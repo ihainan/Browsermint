@@ -129,7 +129,10 @@ export async function handleWebSocketUpgrade(
   }
 
   const sessionId = match[1];
-  const qs = new URLSearchParams(url.split("?")[1] ?? "");
+  // The session player appends params with "?" even when baseWsUrl already
+  // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
+  // Merge all "?"-separated segments into a valid query string before parsing.
+  const qs = new URLSearchParams(url.split("?").slice(1).join("&"));
   const token = qs.get("token");
 
   if (!token) {

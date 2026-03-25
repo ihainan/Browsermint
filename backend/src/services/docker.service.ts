@@ -20,7 +20,6 @@ export async function createAndStartContainer(
   sessionId: string
 ): Promise<ContainerInfo> {
   const containerName = `${CONTAINER_PREFIX}${sessionId}`;
-  const internalApiUrl = `http://${containerName}:3000`;
 
   const container = await docker.createContainer({
     name: containerName,
@@ -43,6 +42,17 @@ export async function createAndStartContainer(
 
   await container.start();
 
+  // Container name DNS only resolves inside Docker networks.
+  // When the backend runs on the host, inspect the container to get its
+  // actual IP on the internal network — reachable from both host and Docker.
+  const info = await container.inspect();
+  const networkInfo = info.NetworkSettings.Networks[config.DOCKER_NETWORK_NAME];
+  if (!networkInfo?.IPAddress) {
+    await container.remove({ force: true }).catch(() => {});
+    throw new Error(`Container did not get an IP on network ${config.DOCKER_NETWORK_NAME}`);
+  }
+  const internalApiUrl = `http://${networkInfo.IPAddress}:3000`;
+
   return {
     containerId: container.id,
     containerName,
@@ -53,7 +63,7 @@ export async function createAndStartContainer(
 export async function waitForContainerReady(
   internalApiUrl: string
 ): Promise<void> {
-  const healthUrl = `${internalApiUrl}/health`;
+  const healthUrl = `${internalApiUrl}/v1/health`;
   const startTime = Date.now();
 
   while (Date.now() - startTime < HEALTH_POLL_TIMEOUT_MS) {
