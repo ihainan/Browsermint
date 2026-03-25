@@ -1,0 +1,42 @@
+{
+  "name": "steelyard-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node build/index.js",
+    "db:generate": "prisma generate --schema=src/db/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema=src/db/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema=src/db/schema.prisma"
+  },
+  "prisma": {
+    "schema": "src/db/schema.prisma"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@fastify/sensible": "^6.0.3",
+    "@prisma/client": "^6.5.0",
+    "bcrypt": "^5.1.1",
+    "dockerode": "^4.0.2",
+    "fastify": "^5.2.1",
+    "fastify-plugin": "^5.0.1",
+    "http-proxy": "^1.18.1",
+    "jsonwebtoken": "^9.0.2",
+    "pino": "^9.6.0",
+    "uuid": "^11.0.5",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/dockerode": "^3.3.29",
+    "@types/http-proxy": "^1.17.15",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.13.10",
+    "@types/ws": "^8.5.14",
+    "prisma": "^6.5.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,69 @@
+# Dependencies
+backend/node_modules/
+frontend/node_modules/
+node_modules/
+
+# Build output
+backend/build/
+backend/dist/
+frontend/dist/
+frontend/build/
+
+# Environment variables (sensitive)
+.env
+docker/.env
+docker/dev/.env
+
+# Keep example env files
+!.env.example
+!backend/.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# PostgreSQL data
+postgres-data/
+pgdata/
+docker/postgres-data/
+docker/dev/postgres-data/
+*.sql.bak
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/

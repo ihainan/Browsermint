@@ -1,0 +1,23 @@
+import { z } from "zod";
+
+const envSchema = z.object({
+  DATABASE_URL: z.string().min(1),
+  JWT_SECRET: z.string().min(16),
+  JWT_SESSION_TOKEN_SECRET: z.string().min(16),
+  DOCKER_NETWORK_NAME: z.string().default("steelyard-internal"),
+  STEEL_BROWSER_IMAGE: z
+    .string()
+    .default("ghcr.io/steel-dev/steel-browser-api:latest"),
+  PORT: z.coerce.number().default(4000),
+  NODE_ENV: z
+    .enum(["development", "production", "test"])
+    .default("development"),
+});
+
+const parsed = envSchema.safeParse(process.env);
+if (!parsed.success) {
+  console.error("Invalid environment variables:", parsed.error.flatten());
+  process.exit(1);
+}
+
+export const config = parsed.data;

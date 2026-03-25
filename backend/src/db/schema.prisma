@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  username     String    @unique @db.VarChar(64)
+  email        String    @unique @db.VarChar(256)
+  passwordHash String    @db.VarChar(256)
+  maxSessions  Int       @default(5)
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+}
+
+model Session {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @db.Uuid
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String?   @db.VarChar(256)
+  status         String    @default("creating") // creating | running | stopping | stopped | error
+  containerId    String?   @db.VarChar(128)
+  containerName  String?   @db.VarChar(128)
+  internalApiUrl String?   @db.VarChar(256)
+  createdAt      DateTime  @default(now())
+  lastActiveAt   DateTime  @default(now())
+  deletedAt      DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([containerId])
+}
