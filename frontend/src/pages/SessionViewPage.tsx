@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
-import { Loader2, AlertCircle, Monitor, RefreshCw } from "lucide-react";
+import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2 } from "lucide-react";
 import clsx from "clsx";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
@@ -49,7 +49,36 @@ interface LogEntry {
   timestamp: string;
   type: "Console" | "Request" | "Response" | "Error" | "Navigation";
   text: string;
-  message?: string;
+  payload?: Record<string, unknown>;
+}
+
+interface RawLogEvent {
+  id?: string;
+  timestamp?: string;
+  type?: LogEntry["type"];
+  pageId?: string;
+  targetType?: string;
+  console?: {
+    level?: string;
+    text?: string;
+    loc?: string;
+  };
+  request?: {
+    method?: string;
+    url?: string;
+    resourceType?: string;
+  };
+  response?: {
+    status?: number;
+    url?: string;
+    mimeType?: string;
+  };
+  error?: {
+    message?: string;
+  };
+  navigation?: {
+    url?: string;
+  };
 }
 
 const LOG_TYPE_COLOR: Record<string, string> = {
@@ -61,20 +90,61 @@ const LOG_TYPE_COLOR: Record<string, string> = {
 };
 
 function formatLogMessage(log: LogEntry): string {
-  try {
-    const body = JSON.parse(log.text) as Record<string, unknown>;
-    if (log.type === "Console") {
-      const msg = (body.message as string | undefined) ?? (body.text as string | undefined) ?? "";
-      return msg.replace(/^\d{2}:\d{2}:\d{2}\.\d{3}\s+(INFO|WARN|ERROR|DEBUG)\s+/, "").replace(/\n|\t/g, " ");
-    }
-    if (log.type === "Request") return `[${body.method as string}] ${body.url as string}`;
-    if (log.type === "Response") return `[${body.status as number}] ${body.url as string}`;
-    if (log.type === "Error") return (body.message as string | undefined) ?? log.text;
-    if (log.type === "Navigation") return (body.url as string | undefined) ?? JSON.stringify(body);
-    return (body.message as string | undefined) ?? log.text;
-  } catch {
-    return log.text;
+  const body = log.payload;
+  if (!body) return log.text;
+
+  if (log.type === "Console") {
+    const consolePayload = body.console as Record<string, unknown> | undefined;
+    const msg = typeof consolePayload?.text === "string" ? consolePayload.text : "";
+    return msg.replace(/^\d{2}:\d{2}:\d{2}\.\d{3}\s+(INFO|WARN|ERROR|DEBUG)\s+/, "").replace(/\n|\t/g, " ");
   }
+
+  if (log.type === "Request") {
+    const requestPayload = body.request as Record<string, unknown> | undefined;
+    const method = typeof requestPayload?.method === "string" ? requestPayload.method : "REQUEST";
+    const url = typeof requestPayload?.url === "string" ? requestPayload.url : "";
+    return url ? `[${method}] ${url}` : log.text;
+  }
+
+  if (log.type === "Response") {
+    const responsePayload = body.response as Record<string, unknown> | undefined;
+    const status = typeof responsePayload?.status === "number" ? responsePayload.status : "?";
+    const url = typeof responsePayload?.url === "string" ? responsePayload.url : "";
+    return url ? `[${status}] ${url}` : log.text;
+  }
+
+  if (log.type === "Error") {
+    const errorPayload = body.error as Record<string, unknown> | undefined;
+    return typeof errorPayload?.message === "string" ? errorPayload.message : log.text;
+  }
+
+  if (log.type === "Navigation") {
+    const navigationPayload = body.navigation as Record<string, unknown> | undefined;
+    return typeof navigationPayload?.url === "string" ? navigationPayload.url : log.text;
+  }
+
+  return log.text;
+}
+
+function stringifyPayload(payload: unknown): string {
+  return typeof payload === "string" ? payload : JSON.stringify(payload);
+}
+
+function normalizeIncomingLogs(data: string): LogEntry[] {
+  const parsed = JSON.parse(data) as unknown;
+  const rawLogs = Array.isArray(parsed) ? parsed as RawLogEvent[] : [parsed as RawLogEvent];
+
+  return rawLogs
+    .filter((log): log is RawLogEvent & { type: LogEntry["type"]; timestamp: string } =>
+      Boolean(log && log.type && log.timestamp)
+    )
+    .map((log, index) => ({
+      id: log.id ?? `${log.timestamp}-${log.type}-${log.pageId ?? "page"}-${index}`,
+      timestamp: log.timestamp,
+      type: log.type,
+      text: stringifyPayload(log),
+      payload: log as unknown as Record<string, unknown>,
+    }));
 }
 
 // ─── Sidebar Tabs ─────────────────────────────────────────────────────────────
@@ -158,7 +228,7 @@ function LogsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionTo
     );
     ws.onmessage = (e) => {
       try {
-        const incoming: LogEntry[] = JSON.parse(e.data as string);
+        const incoming = normalizeIncomingLogs(e.data as string);
         setLogs((prev) =>
           [...prev, ...incoming]
             .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
@@ -203,6 +273,7 @@ export default function SessionViewPage() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState("");
   const [activeTab, setActiveTab] = useState<SidebarTab>("details");
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const { data: sessionData, isPending } = useQuery({
     queryKey: ["session", id],
@@ -336,16 +407,28 @@ export default function SessionViewPage() {
 
           {browserSrc && (
             <iframe
+              ref={iframeRef}
               src={browserSrc}
               className="w-full h-full border-0"
               title="Cloud Browser"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             />
           )}
+
+          {/* Fullscreen button */}
+          {browserSrc && (
+            <button
+              onClick={() => iframeRef.current?.requestFullscreen()}
+              className="absolute bottom-3 right-3 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
+              title="Fullscreen"
+            >
+              <Maximize2 size={14} />
+            </button>
+          )}
         </div>
 
         {/* Sidebar */}
-        <aside className="w-72 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
+        <aside className="w-96 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
           {/* Tabs */}
           <div className="flex border-b border-gray-800 shrink-0">
             {(["details", "logs"] as SidebarTab[]).map((tab) => (
