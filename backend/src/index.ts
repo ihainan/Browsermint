@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
-import { handleBrowserProxy, handleDetailsProxy } from "./services/proxy.service.js";
+import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
@@ -58,6 +58,15 @@ server.get("/api/sessions/:id/browser", {
   handler: async (request, reply) =>
     handleBrowserProxy(
       request as Parameters<typeof handleBrowserProxy>[0],
+      reply
+    ),
+});
+
+// DevTools frontend asset proxy (session-token auth via query string)
+server.get("/api/sessions/:id/devtools/*", {
+  handler: async (request, reply) =>
+    handleDevtoolsProxy(
+      request as Parameters<typeof handleDevtoolsProxy>[0],
       reply
     ),
 });

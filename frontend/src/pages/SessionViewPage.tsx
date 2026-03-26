@@ -149,7 +149,7 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
 
 // ─── Sidebar Tabs ─────────────────────────────────────────────────────────────
 
-type SidebarTab = "details" | "logs";
+type SidebarTab = "details" | "logs" | "devtools";
 
 function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -214,6 +214,64 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
         <DetailRow label="WebSocket URL" value={details.websocketUrl} mono />
       )}
     </div>
+  );
+}
+
+function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionToken: string | null }) {
+  const [pageId, setPageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/sessions/${sessionId}/cast?token=${sessionToken}&tabInfo=true`
+    );
+
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data as string) as
+          | { type?: string; firstTabId?: string; pageId?: string }
+          | { type?: string; firstTabId?: string; pageId?: string }[];
+        const messages = Array.isArray(payload) ? payload : [payload];
+
+        for (const message of messages) {
+          if (message.type === "tabList" && message.firstTabId) {
+            setPageId((prev) => prev ?? message.firstTabId ?? null);
+          }
+          if (message.type === "activeTabChange" && message.pageId) {
+            setPageId(message.pageId);
+          }
+        }
+      } catch {}
+    };
+
+    return () => ws.close();
+  }, [sessionId, sessionToken]);
+
+  if (!sessionToken) {
+    return (
+      <div className="flex-1 px-3 py-4 text-xs text-gray-500">
+        DevTools will be available once the session token is ready.
+      </div>
+    );
+  }
+
+  const devtoolsWs = pageId
+    ? `//${window.location.host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${encodeURIComponent(sessionToken)}`
+    : `//${window.location.host}/ws/sessions/${sessionId}/cdp?token=${encodeURIComponent(sessionToken)}`;
+  const devtoolsSrc =
+    `/api/sessions/${sessionId}/devtools/devtools_app.html` +
+    `?token=${encodeURIComponent(sessionToken)}` +
+    `&ws=${encodeURIComponent(devtoolsWs)}` +
+    (pageId ? `&pageId=${encodeURIComponent(pageId)}` : "");
+
+  return (
+    <iframe
+      src={devtoolsSrc}
+      className="w-full h-full border-0 bg-white"
+      title="Chrome DevTools"
+      key={pageId ?? "default"}
+    />
   );
 }
 
@@ -431,7 +489,7 @@ export default function SessionViewPage() {
         <aside className="w-96 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
           {/* Tabs */}
           <div className="flex border-b border-gray-800 shrink-0">
-            {(["details", "logs"] as SidebarTab[]).map((tab) => (
+            {(["details", "logs", "devtools"] as SidebarTab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -453,6 +511,9 @@ export default function SessionViewPage() {
           )}
           {activeTab === "logs" && (
             <LogsSidebar sessionId={session.id} sessionToken={sessionToken} />
+          )}
+          {activeTab === "devtools" && (
+            <DevToolsSidebar sessionId={session.id} sessionToken={sessionToken} />
           )}
         </aside>
       </div>

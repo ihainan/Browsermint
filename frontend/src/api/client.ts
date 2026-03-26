@@ -60,6 +60,7 @@ export interface SteelSessionDetails {
   solveCaptcha?: boolean;
   isSelenium?: boolean;
   websocketUrl?: string;
+  debuggerUrl?: string;
   proxyTxBytes?: number;
   proxyRxBytes?: number;
   creditsUsed?: number;

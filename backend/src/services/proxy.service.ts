@@ -15,6 +15,16 @@ interface SessionTokenPayload {
   type: string;
 }
 
+interface SessionProxyContext {
+  userId: string;
+  sessionId: string;
+  session: {
+    id: string;
+    containerName: string | null;
+    internalApiUrl: string | null;
+  };
+}
+
 // ─── Proxy Server (singleton) ─────────────────────────────────────────────────
 
 export const proxyServer = httpProxy.createProxyServer({});
@@ -46,6 +56,67 @@ async function validateSessionToken(
   }
 }
 
+async function getSessionProxyContext(
+  sessionId: string,
+  token: string
+): Promise<SessionProxyContext | null> {
+  const payload = await validateSessionToken(token);
+  if (!payload || payload.sessionId !== sessionId) return null;
+
+  const session = await prisma.session.findFirst({
+    where: {
+      id: sessionId,
+      userId: payload.userId,
+      deletedAt: null,
+      status: "running",
+    },
+    select: {
+      id: true,
+      containerName: true,
+      internalApiUrl: true,
+    },
+  });
+
+  if (!session?.internalApiUrl) return null;
+
+  return { userId: payload.userId, sessionId, session };
+}
+
+function getRequestProtocols(request: Pick<FastifyRequest, "headers"> | IncomingMessage) {
+  const isHttps = (request.headers["x-forwarded-proto"] as string | undefined) === "https";
+  return {
+    http: isHttps ? "https" : "http",
+    ws: isHttps ? "wss" : "ws",
+  };
+}
+
+function getDevtoolsBaseUrl(internalApiUrl: string): URL {
+  const devtoolsUrl = new URL(internalApiUrl);
+  devtoolsUrl.port = "9223";
+  devtoolsUrl.pathname = "/";
+  devtoolsUrl.search = "";
+  devtoolsUrl.hash = "";
+  return devtoolsUrl;
+}
+
+function getCookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const [rawKey, ...rest] = part.trim().split("=");
+    if (rawKey === name) {
+      return rest.join("=") || null;
+    }
+  }
+  return null;
+}
+
+async function updateLastActiveAt(sessionId: string) {
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { lastActiveAt: new Date() },
+  }).catch(() => {});
+}
+
 // ─── HTTP Proxy: Browser View ─────────────────────────────────────────────────
 // GET /api/sessions/:id/browser?token=xxx
 // Fetches debug HTML from container, rewrites the embedded wsUrl, and returns it.
@@ -59,22 +130,11 @@ export async function handleBrowserProxy(
 
   if (!token) return reply.status(401).send({ error: "Missing token" });
 
-  const payload = await validateSessionToken(token);
-  if (!payload || payload.sessionId !== sessionId) {
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) {
     return reply.status(401).send({ error: "Invalid token" });
   }
-
-  const session = await prisma.session.findFirst({
-    where: {
-      id: sessionId,
-      userId: payload.userId,
-      deletedAt: null,
-      status: "running",
-    },
-  });
-  if (!session?.internalApiUrl) {
-    return reply.status(404).send({ error: "Session not found or not running" });
-  }
+  const { session } = context;
 
   const debugUrl = `${session.internalApiUrl}/v1/sessions/debug`;
   let html: string;
@@ -99,10 +159,7 @@ export async function handleBrowserProxy(
   );
 
   // Update last active timestamp (fire-and-forget)
-  prisma.session.update({
-    where: { id: sessionId },
-    data: { lastActiveAt: new Date() },
-  }).catch(() => {});
+  await updateLastActiveAt(sessionId);
 
   return reply
     .header("Content-Type", "text/html; charset=utf-8")
@@ -122,17 +179,11 @@ export async function handleDetailsProxy(
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
 
-  const payload = await validateSessionToken(token);
-  if (!payload || payload.sessionId !== sessionId) {
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) {
     return reply.status(401).send({ error: "Invalid token" });
   }
-
-  const session = await prisma.session.findFirst({
-    where: { id: sessionId, userId: payload.userId, deletedAt: null, status: "running" },
-  });
-  if (!session?.internalApiUrl) {
-    return reply.status(404).send({ error: "Session not found or not running" });
-  }
+  const { session } = context;
 
   try {
     const res = await fetch(`${session.internalApiUrl}/v1/sessions`, {
@@ -142,18 +193,125 @@ export async function handleDetailsProxy(
     const data = await res.json() as unknown;
     // Each container hosts exactly one Steel Browser session; return first entry.
     const sessions = Array.isArray(data) ? data : ((data as { sessions?: unknown[] })?.sessions ?? []);
-    return reply.send(sessions[0] ?? {});
+    const sessionDetail = (sessions[0] ?? {}) as Record<string, unknown>;
+
+    // Rewrite the internal Docker websocketUrl to a publicly accessible proxy URL
+    if (sessionDetail.websocketUrl) {
+      const host = request.headers.host ?? "localhost";
+      const proto = getRequestProtocols(request).ws;
+      sessionDetail.websocketUrl = `${proto}://${host}/ws/sessions/${sessionId}/cdp`;
+    }
+
+    if (token) {
+      const host = request.headers.host ?? "localhost";
+      const proto = getRequestProtocols(request).http;
+      sessionDetail.debuggerUrl = `${proto}://${host}/api/sessions/${sessionId}/devtools/devtools_app.html?token=${encodeURIComponent(token)}`;
+    }
+
+    return reply.send(sessionDetail);
   } catch (err) {
     console.error("Failed to fetch session details:", err);
     return reply.status(502).send({ error: "Failed to reach browser session" });
   }
 }
 
+// ─── HTTP Proxy: DevTools Frontend ───────────────────────────────────────────
+// GET /api/sessions/:id/devtools/*?token=xxx
+// Proxies Chrome DevTools frontend assets and rewrites the page websocket target.
+
+export async function handleDevtoolsProxy(
+  request: FastifyRequest<{ Params: { id: string; "*": string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token =
+    request.query.token ??
+    getCookieValue(request.headers.cookie, `steelyard_devtools_${sessionId}`);
+  const assetPath = request.params["*"] || "devtools_app.html";
+
+  if (!token) {
+    return reply.status(401).send({ error: "Missing token" });
+  }
+
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) {
+    return reply.status(401).send({ error: "Invalid token" });
+  }
+  const { session } = context;
+
+  const devtoolsBaseUrl = getDevtoolsBaseUrl(session.internalApiUrl!);
+  const upstreamUrl = new URL(assetPath, new URL("/devtools/", devtoolsBaseUrl));
+
+  for (const [key, value] of Object.entries(request.query as Record<string, string | string[]>)) {
+    if (Array.isArray(value)) {
+      value.forEach((item) => upstreamUrl.searchParams.append(key, item));
+    } else if (value !== undefined) {
+      upstreamUrl.searchParams.set(key, value);
+    }
+  }
+
+  if (assetPath === "devtools_app.html" && !upstreamUrl.searchParams.has("ws")) {
+    try {
+      const host = request.headers.host ?? "localhost";
+      const pageId = typeof request.query.pageId === "string" ? request.query.pageId : null;
+
+      if (pageId) {
+        upstreamUrl.searchParams.set(
+          "ws",
+          `//${host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${token}`
+        );
+      } else {
+        const res = await fetch(`${session.internalApiUrl}/v1/devtools/inspector.html`, {
+          redirect: "manual",
+          signal: AbortSignal.timeout(5000),
+        });
+        const redirectLocation = res.headers.get("location");
+        if (redirectLocation) {
+          const target = new URL(redirectLocation);
+          const rawWs = target.searchParams.get("ws");
+          if (rawWs) {
+            const wsTarget = new URL(`http:${rawWs}`);
+            upstreamUrl.searchParams.set(
+              "ws",
+              `//${host}/ws/sessions/${sessionId}/cdp${wsTarget.pathname}?token=${token}`
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to resolve DevTools target:", err);
+    }
+  }
+
+  try {
+    const res = await fetch(upstreamUrl, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error(`Upstream ${res.status}`);
+
+    const contentType = res.headers.get("content-type");
+    if (contentType) reply.header("Content-Type", contentType);
+    reply.header("Cache-Control", "no-store");
+    reply.header(
+      "Set-Cookie",
+      `steelyard_devtools_${sessionId}=${encodeURIComponent(token)}; Path=/api/sessions/${sessionId}/devtools/; HttpOnly; SameSite=Lax`
+    );
+
+    await updateLastActiveAt(sessionId);
+
+    const body = Buffer.from(await res.arrayBuffer());
+    return reply.send(body);
+  } catch (err) {
+    console.error("Failed to fetch DevTools asset:", err);
+    return reply.status(502).send({ error: "Failed to reach DevTools frontend" });
+  }
+}
+
 // ─── WebSocket Proxy ──────────────────────────────────────────────────────────
 // Handles the HTTP upgrade event from Fastify's underlying server.
-// Matches: /ws/sessions/:id/(cast|logs)?token=xxx
+// Matches: /ws/sessions/:id/(cast|logs|cdp[/subpath])?token=xxx
 
-const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs)/;
+const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|cdp)(\/[^?]*)?/;
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -168,7 +326,8 @@ export async function handleWebSocketUpgrade(
   }
 
   const sessionId = match[1];
-  const wsType = match[2] as "cast" | "logs";
+  const wsType = match[2] as "cast" | "logs" | "cdp";
+  const wsSubPath = match[3] ?? "/";
   // The session player appends params with "?" even when baseWsUrl already
   // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
   // Merge all "?"-separated segments into a valid query string before parsing.
@@ -201,8 +360,15 @@ export async function handleWebSocketUpgrade(
   }
 
   // Rewrite path based on WebSocket type
+  let proxyTarget = session.internalApiUrl;
   if (wsType === "logs") {
     request.url = "/v1/sessions/logs";
+  } else if (wsType === "cdp") {
+    // Forward directly to the container's CDP server (port 9223) at the given sub-path.
+    // /ws/sessions/{id}/cdp        → /
+    // /ws/sessions/{id}/cdp/devtools/page/{id} → /devtools/page/{id}
+    request.url = wsSubPath;
+    proxyTarget = getDevtoolsBaseUrl(session.internalApiUrl!).origin;
   } else {
     // cast: rewrite /ws/sessions/{id}/cast → /v1/sessions/cast, preserve player params
     request.url = "/v1/sessions/cast";
@@ -223,5 +389,5 @@ export async function handleWebSocketUpgrade(
     data: { lastActiveAt: new Date() },
   }).catch(() => {});
 
-  proxyServer.ws(request, socket, head, { target: session.internalApiUrl });
+  proxyServer.ws(request, socket, head, { target: proxyTarget });
 }
