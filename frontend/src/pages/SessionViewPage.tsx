@@ -1,27 +1,208 @@
-import { useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { sessionsApi, Session } from "../api/client.ts";
-import { ArrowLeft, Loader2, AlertCircle, Monitor } from "lucide-react";
+import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
+import { Loader2, AlertCircle, Monitor, RefreshCw } from "lucide-react";
 import clsx from "clsx";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
-  creating: "bg-yellow-100 text-yellow-800",
-  running: "bg-green-100 text-green-800",
-  stopping: "bg-orange-100 text-orange-800",
-  stopped: "bg-gray-100 text-gray-600",
-  error: "bg-red-100 text-red-700",
+  creating: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
+  running:  "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+  stopping: "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
+  stopped:  "bg-gray-100 text-gray-500 ring-1 ring-gray-200",
+  error:    "bg-red-50 text-red-600 ring-1 ring-red-200",
+};
+
+const STATUS_DOT: Record<Session["status"], string> = {
+  creating: "bg-amber-400 animate-pulse",
+  running:  "bg-emerald-500",
+  stopping: "bg-orange-400 animate-pulse",
+  stopped:  "bg-gray-400",
+  error:    "bg-red-500",
 };
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString();
 }
 
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+// ─── Log Types ────────────────────────────────────────────────────────────────
+
+interface LogEntry {
+  id: string;
+  timestamp: string;
+  type: "Console" | "Request" | "Response" | "Error" | "Navigation";
+  text: string;
+  message?: string;
+}
+
+const LOG_TYPE_COLOR: Record<string, string> = {
+  Console:    "text-cyan-400",
+  Request:    "text-pink-400",
+  Response:   "text-emerald-400",
+  Error:      "text-red-400",
+  Navigation: "text-gray-500",
+};
+
+function formatLogMessage(log: LogEntry): string {
+  try {
+    const body = JSON.parse(log.text) as Record<string, unknown>;
+    if (log.type === "Console") {
+      const msg = (body.message as string | undefined) ?? (body.text as string | undefined) ?? "";
+      return msg.replace(/^\d{2}:\d{2}:\d{2}\.\d{3}\s+(INFO|WARN|ERROR|DEBUG)\s+/, "").replace(/\n|\t/g, " ");
+    }
+    if (log.type === "Request") return `[${body.method as string}] ${body.url as string}`;
+    if (log.type === "Response") return `[${body.status as number}] ${body.url as string}`;
+    if (log.type === "Error") return (body.message as string | undefined) ?? log.text;
+    if (log.type === "Navigation") return (body.url as string | undefined) ?? JSON.stringify(body);
+    return (body.message as string | undefined) ?? log.text;
+  } catch {
+    return log.text;
+  }
+}
+
+// ─── Sidebar Tabs ─────────────────────────────────────────────────────────────
+
+type SidebarTab = "details" | "logs";
+
+function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex flex-col gap-0.5 py-2 border-b border-gray-800">
+      <span className="text-xs text-gray-500">{label}</span>
+      <span className={clsx("text-xs text-gray-300 break-all", mono && "font-mono")}>{value}</span>
+    </div>
+  );
+}
+
+function DetailsSidebar({ session, sessionToken }: { session: Session; sessionToken: string | null }) {
+  const [details, setDetails] = useState<SteelSessionDetails | null>(null);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    sessionsApi.getDetails(session.id, sessionToken)
+      .then((r) => setDetails(r.data))
+      .catch(() => {});
+    // Refresh every 5s while running
+    const interval = setInterval(() => {
+      sessionsApi.getDetails(session.id, sessionToken)
+        .then((r) => setDetails(r.data))
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [session.id, sessionToken]);
+
+  return (
+    <div className="overflow-y-auto flex-1 px-3 pb-4 font-mono text-xs">
+      <DetailRow label="ID" value={session.id} mono />
+      <DetailRow label="Name" value={session.name ?? "—"} />
+      <DetailRow label="Created" value={formatDate(session.createdAt)} />
+      <DetailRow label="Last Active" value={formatDate(session.lastActiveAt)} />
+      {session.containerName && (
+        <DetailRow label="Container" value={session.containerName} mono />
+      )}
+      {details?.duration !== undefined && (
+        <DetailRow label="Duration" value={formatDuration(details.duration)} />
+      )}
+      {details?.userAgent && (
+        <DetailRow label="User Agent" value={details.userAgent} />
+      )}
+      {details?.isSelenium !== undefined && (
+        <DetailRow label="isSelenium" value={String(details.isSelenium)} />
+      )}
+      {details?.solveCaptcha !== undefined && (
+        <DetailRow label="Auto-captcha" value={String(details.solveCaptcha)} />
+      )}
+      {details?.proxy !== undefined && (
+        <DetailRow label="Proxy" value={details.proxy || "None"} />
+      )}
+      {details?.proxyTxBytes !== undefined && (
+        <DetailRow label="Proxy TX" value={formatBytes(details.proxyTxBytes)} />
+      )}
+      {details?.proxyRxBytes !== undefined && (
+        <DetailRow label="Proxy RX" value={formatBytes(details.proxyRxBytes)} />
+      )}
+      {details?.creditsUsed !== undefined && (
+        <DetailRow label="Cost" value={String(details.creditsUsed)} />
+      )}
+      {details?.websocketUrl && (
+        <DetailRow label="WebSocket URL" value={details.websocketUrl} mono />
+      )}
+    </div>
+  );
+}
+
+function LogsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionToken: string | null }) {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!sessionToken) return;
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/sessions/${sessionId}/logs?token=${sessionToken}`
+    );
+    ws.onmessage = (e) => {
+      try {
+        const incoming: LogEntry[] = JSON.parse(e.data as string);
+        setLogs((prev) =>
+          [...prev, ...incoming]
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            .slice(-200)
+        );
+      } catch {}
+    };
+    return () => ws.close();
+  }, [sessionId, sessionToken]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  return (
+    <div className="overflow-y-auto flex-1 px-2 pb-2 font-mono text-xs">
+      {logs.length === 0 && (
+        <p className="text-gray-600 p-2">No logs yet…</p>
+      )}
+      {logs.map((log) => (
+        <pre key={log.id} className="mb-1 whitespace-pre-wrap break-all leading-relaxed">
+          <span className="text-gray-600">
+            {new Date(log.timestamp).toLocaleTimeString("en-US", {
+              hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+            })}
+          </span>{" "}
+          <span className={clsx(LOG_TYPE_COLOR[log.type] ?? "text-gray-400")}>
+            [{log.type}]
+          </span>{" "}
+          <span className="text-gray-300">{formatLogMessage(log)}</span>
+        </pre>
+      ))}
+      <div ref={bottomRef} />
+    </div>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 export default function SessionViewPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState("");
+  const [activeTab, setActiveTab] = useState<SidebarTab>("details");
 
   const { data: sessionData, isPending } = useQuery({
     queryKey: ["session", id],
@@ -35,7 +216,6 @@ export default function SessionViewPage() {
 
   const session = sessionData;
 
-  // Fetch session token once session is running
   useEffect(() => {
     if (!id || session?.status !== "running") return;
     setTokenError("");
@@ -47,18 +227,18 @@ export default function SessionViewPage() {
 
   if (isPending) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Loader2 size={24} className="animate-spin text-gray-400" />
+      <div className="flex items-center justify-center min-h-screen bg-gray-50">
+        <Loader2 size={22} className="animate-spin text-gray-300" />
       </div>
     );
   }
 
   if (!session) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-4">
-        <p className="text-gray-500">Session not found</p>
-        <Link to="/sessions" className="text-sm text-gray-900 underline">
-          Back to sessions
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 gap-3">
+        <p className="text-sm text-gray-400">Browser not found</p>
+        <Link to="/sessions" className="text-sm text-gray-700 font-medium hover:text-gray-900 transition-colors">
+          ← Back to browsers
         </Link>
       </div>
     );
@@ -69,81 +249,88 @@ export default function SessionViewPage() {
     : null;
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-screen bg-gray-950">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-4 shrink-0">
-        <button
-          onClick={() => navigate("/sessions")}
-          className="p-1.5 text-gray-400 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-        >
-          <ArrowLeft size={18} />
-        </button>
-
-        <Monitor size={18} className="text-gray-400" />
+      <header className="bg-gray-900 border-b border-gray-800 px-4 py-2.5 flex items-center gap-3 shrink-0">
+        <div className="w-6 h-6 bg-gray-700 rounded-lg flex items-center justify-center shrink-0">
+          <Monitor size={13} className="text-gray-300" />
+        </div>
 
         <div className="flex-1 min-w-0">
-          <h1 className="text-sm font-semibold text-gray-900 truncate">
-            {session.name ?? "Unnamed session"}
+          <h1 className="text-sm font-semibold text-gray-100 truncate leading-tight">
+            {session.name ?? "Unnamed browser"}
           </h1>
-          <p className="text-xs text-gray-400 truncate">{session.id}</p>
+          <p className="text-xs text-gray-500 truncate font-mono">{session.id}</p>
         </div>
 
         <span
           className={clsx(
-            "px-2 py-0.5 rounded-full text-xs font-medium shrink-0",
+            "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium shrink-0",
             STATUS_STYLES[session.status]
           )}
         >
+          <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
           {session.status}
         </span>
       </header>
 
       {/* Body */}
       <div className="flex flex-1 min-h-0">
-        {/* Browser iframe */}
-        <div className="flex-1 bg-gray-900 relative">
+        {/* Browser viewport */}
+        <div className="flex-1 bg-gray-950 relative">
           {session.status === "creating" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-3">
-              <Loader2 size={32} className="animate-spin" />
-              <p className="text-sm opacity-70">Starting browser session...</p>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
+              <div className="w-12 h-12 bg-gray-800 rounded-2xl flex items-center justify-center">
+                <Loader2 size={22} className="animate-spin text-gray-400" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium text-gray-300">Starting cloud browser</p>
+                <p className="text-xs text-gray-600 mt-1">This may take up to 30 seconds</p>
+              </div>
             </div>
           )}
 
           {session.status === "error" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-3">
-              <AlertCircle size={32} className="text-red-400" />
-              <p className="text-sm opacity-70">Session failed to start</p>
-              <Link
-                to="/sessions"
-                className="text-sm text-red-300 underline"
-              >
-                Back to sessions
-              </Link>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
+              <div className="w-12 h-12 bg-red-950 rounded-2xl flex items-center justify-center">
+                <AlertCircle size={22} className="text-red-400" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium text-gray-300">Browser failed to start</p>
+                <Link to="/sessions" className="text-xs text-gray-500 hover:text-gray-300 transition-colors mt-1 block">
+                  ← Back to browsers
+                </Link>
+              </div>
             </div>
           )}
 
           {session.status === "running" && tokenError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-3">
-              <AlertCircle size={32} className="text-yellow-400" />
-              <p className="text-sm opacity-70">{tokenError}</p>
-              <button
-                onClick={() => {
-                  setTokenError("");
-                  sessionsApi
-                    .getToken(id!)
-                    .then((res) => setSessionToken(res.data.token))
-                    .catch(() => setTokenError("Failed to get session access token"));
-                }}
-                className="text-sm text-yellow-300 underline"
-              >
-                Retry
-              </button>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
+              <div className="w-12 h-12 bg-amber-950 rounded-2xl flex items-center justify-center">
+                <AlertCircle size={22} className="text-amber-400" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium text-gray-300">{tokenError}</p>
+                <button
+                  onClick={() => {
+                    setTokenError("");
+                    sessionsApi
+                      .getToken(id!)
+                      .then((res) => setSessionToken(res.data.token))
+                      .catch(() => setTokenError("Failed to get session access token"));
+                  }}
+                  className="inline-flex items-center gap-1.5 mt-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  <RefreshCw size={11} />
+                  Retry
+                </button>
+              </div>
             </div>
           )}
 
           {session.status === "running" && !tokenError && !sessionToken && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <Loader2 size={24} className="animate-spin text-gray-500" />
+              <Loader2 size={22} className="animate-spin text-gray-600" />
             </div>
           )}
 
@@ -151,49 +338,39 @@ export default function SessionViewPage() {
             <iframe
               src={browserSrc}
               className="w-full h-full border-0"
-              title="Browser session"
+              title="Cloud Browser"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             />
           )}
         </div>
 
-        {/* Session info sidebar */}
-        <aside className="w-64 bg-white border-l border-gray-200 p-4 shrink-0 overflow-y-auto">
-          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
-            Session info
-          </h2>
-          <dl className="space-y-3">
-            <div>
-              <dt className="text-xs text-gray-400">Name</dt>
-              <dd className="text-sm text-gray-900 truncate">
-                {session.name ?? "—"}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-gray-400">Status</dt>
-              <dd className="text-sm text-gray-900">{session.status}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-gray-400">Created</dt>
-              <dd className="text-sm text-gray-900">
-                {formatDate(session.createdAt)}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-gray-400">Last active</dt>
-              <dd className="text-sm text-gray-900">
-                {formatDate(session.lastActiveAt)}
-              </dd>
-            </div>
-            {session.containerName && (
-              <div>
-                <dt className="text-xs text-gray-400">Container</dt>
-                <dd className="text-xs text-gray-500 font-mono truncate">
-                  {session.containerName}
-                </dd>
-              </div>
-            )}
-          </dl>
+        {/* Sidebar */}
+        <aside className="w-72 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
+          {/* Tabs */}
+          <div className="flex border-b border-gray-800 shrink-0">
+            {(["details", "logs"] as SidebarTab[]).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={clsx(
+                  "flex-1 py-2.5 text-xs font-medium capitalize transition-colors",
+                  activeTab === tab
+                    ? "text-gray-100 border-b-2 border-gray-100"
+                    : "text-gray-500 hover:text-gray-400"
+                )}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          {activeTab === "details" && (
+            <DetailsSidebar session={session} sessionToken={sessionToken} />
+          )}
+          {activeTab === "logs" && (
+            <LogsSidebar sessionId={session.id} sessionToken={sessionToken} />
+          )}
         </aside>
       </div>
     </div>

@@ -52,6 +52,21 @@ export interface Session {
   deletedAt: string | null;
 }
 
+export interface SteelSessionDetails {
+  id?: string;
+  createdAt?: string;
+  duration?: number;
+  userAgent?: string;
+  solveCaptcha?: boolean;
+  isSelenium?: boolean;
+  websocketUrl?: string;
+  proxyTxBytes?: number;
+  proxyRxBytes?: number;
+  creditsUsed?: number;
+  proxy?: string;
+  status?: string;
+}
+
 export const authApi = {
   register: (data: { username: string; email: string; password: string }) =>
     api.post<{ user: User; token: string }>("/auth/register", data),
@@ -66,6 +81,10 @@ export const sessionsApi = {
   create: (data: { name?: string }) =>
     api.post<{ session: Session }>("/sessions", data),
   delete: (id: string) => api.delete(`/sessions/${id}`),
+  stop: (id: string) => api.post<{ session: Session }>(`/sessions/${id}/stop`),
+  start: (id: string) => api.post<{ session: Session }>(`/sessions/${id}/start`),
+  getDetails: (id: string, token: string) =>
+    api.get<SteelSessionDetails>(`/sessions/${id}/details?token=${token}`),
   getToken: (id: string) =>
     api.post<{ token: string }>(`/sessions/${id}/token`),
 };

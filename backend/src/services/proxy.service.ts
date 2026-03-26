@@ -110,11 +110,50 @@ export async function handleBrowserProxy(
     .send(html);
 }
 
+// ─── HTTP Proxy: Session Details ─────────────────────────────────────────────
+// GET /api/sessions/:id/details?token=xxx
+// Fetches live session metadata from the Steel Browser container.
+
+export async function handleDetailsProxy(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+
+  const payload = await validateSessionToken(token);
+  if (!payload || payload.sessionId !== sessionId) {
+    return reply.status(401).send({ error: "Invalid token" });
+  }
+
+  const session = await prisma.session.findFirst({
+    where: { id: sessionId, userId: payload.userId, deletedAt: null, status: "running" },
+  });
+  if (!session?.internalApiUrl) {
+    return reply.status(404).send({ error: "Session not found or not running" });
+  }
+
+  try {
+    const res = await fetch(`${session.internalApiUrl}/v1/sessions`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(`Upstream ${res.status}`);
+    const data = await res.json() as unknown;
+    // Each container hosts exactly one Steel Browser session; return first entry.
+    const sessions = Array.isArray(data) ? data : ((data as { sessions?: unknown[] })?.sessions ?? []);
+    return reply.send(sessions[0] ?? {});
+  } catch (err) {
+    console.error("Failed to fetch session details:", err);
+    return reply.status(502).send({ error: "Failed to reach browser session" });
+  }
+}
+
 // ─── WebSocket Proxy ──────────────────────────────────────────────────────────
 // Handles the HTTP upgrade event from Fastify's underlying server.
-// Matches: /ws/sessions/:id/cast?token=xxx
+// Matches: /ws/sessions/:id/(cast|logs)?token=xxx
 
-const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/cast/;
+const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs)/;
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -129,6 +168,7 @@ export async function handleWebSocketUpgrade(
   }
 
   const sessionId = match[1];
+  const wsType = match[2] as "cast" | "logs";
   // The session player appends params with "?" even when baseWsUrl already
   // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
   // Merge all "?"-separated segments into a valid query string before parsing.
@@ -160,18 +200,22 @@ export async function handleWebSocketUpgrade(
     return;
   }
 
-  // Rewrite path: /ws/sessions/{id}/cast → /v1/sessions/cast
-  request.url = "/v1/sessions/cast";
-  // Preserve pageId/pageIndex query params if present
-  const pageId = qs.get("pageId");
-  const pageIndex = qs.get("pageIndex");
-  const tabInfo = qs.get("tabInfo");
-  const innerQs = new URLSearchParams();
-  if (pageId) innerQs.set("pageId", pageId);
-  if (pageIndex) innerQs.set("pageIndex", pageIndex);
-  if (tabInfo) innerQs.set("tabInfo", tabInfo);
-  const innerQsStr = innerQs.toString();
-  if (innerQsStr) request.url += `?${innerQsStr}`;
+  // Rewrite path based on WebSocket type
+  if (wsType === "logs") {
+    request.url = "/v1/sessions/logs";
+  } else {
+    // cast: rewrite /ws/sessions/{id}/cast → /v1/sessions/cast, preserve player params
+    request.url = "/v1/sessions/cast";
+    const pageId = qs.get("pageId");
+    const pageIndex = qs.get("pageIndex");
+    const tabInfo = qs.get("tabInfo");
+    const innerQs = new URLSearchParams();
+    if (pageId) innerQs.set("pageId", pageId);
+    if (pageIndex) innerQs.set("pageIndex", pageIndex);
+    if (tabInfo) innerQs.set("tabInfo", tabInfo);
+    const innerQsStr = innerQs.toString();
+    if (innerQsStr) request.url += `?${innerQsStr}`;
+  }
 
   // Update last active timestamp (fire-and-forget)
   prisma.session.update({

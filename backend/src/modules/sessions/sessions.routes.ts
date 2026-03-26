@@ -7,6 +7,8 @@ import {
   handleDeleteSession,
   handleGetSession,
   handleListSessions,
+  handleStartSession,
+  handleStopSession,
 } from "./sessions.controller.js";
 
 export default async function sessionsRoutes(server: FastifyInstance) {
@@ -40,6 +42,22 @@ export default async function sessionsRoutes(server: FastifyInstance) {
     handler: async (request, reply) =>
       handleDeleteSession(
         request as Parameters<typeof handleDeleteSession>[0],
+        reply
+      ),
+  });
+
+  server.post("/:id/stop", {
+    handler: async (request, reply) =>
+      handleStopSession(
+        request as Parameters<typeof handleStopSession>[0],
+        reply
+      ),
+  });
+
+  server.post("/:id/start", {
+    handler: async (request, reply) =>
+      handleStartSession(
+        request as Parameters<typeof handleStartSession>[0],
         reply
       ),
   });

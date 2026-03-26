@@ -1,6 +1,7 @@
 import { useState, FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext.tsx";
+import { Monitor } from "lucide-react";
 
 export default function LoginPage() {
   const { login, user } = useAuth();
@@ -10,7 +11,6 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [isPending, setIsPending] = useState(false);
 
-  // Already logged in
   if (user) {
     navigate("/sessions", { replace: true });
     return null;
@@ -34,25 +34,28 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-100 px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">SteelYard</h1>
-          <p className="text-gray-500 mt-1">Browser session management</p>
+          <div className="inline-flex items-center justify-center w-12 h-12 bg-gray-900 rounded-2xl mb-4 shadow-lg">
+            <Monitor size={22} className="text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">SteelYard</h1>
+          <p className="text-sm text-gray-500 mt-1">Cloud browser management</p>
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
-          <h2 className="text-xl font-semibold text-gray-800 mb-6">Sign in</h2>
+        <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 p-8">
+          <h2 className="text-lg font-semibold text-gray-800 mb-6">Sign in to your account</h2>
 
           {error && (
-            <div className="mb-4 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            <div className="mb-5 px-4 py-3 bg-red-50 rounded-xl text-sm text-red-600">
               {error}
             </div>
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
                 Email
               </label>
               <input
@@ -60,13 +63,13 @@ export default function LoginPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400 transition-colors"
                 placeholder="you@example.com"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
                 Password
               </label>
               <input
@@ -74,7 +77,7 @@ export default function LoginPage() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400 transition-colors"
                 placeholder="••••••••"
               />
             </div>
@@ -82,15 +85,15 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isPending}
-              className="w-full py-2 px-4 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="w-full py-2.5 px-4 bg-gray-900 text-white text-sm font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm mt-2"
             >
-              {isPending ? "Signing in..." : "Sign in"}
+              {isPending ? "Signing in…" : "Sign in"}
             </button>
           </form>
 
-          <p className="mt-4 text-sm text-center text-gray-500">
+          <p className="mt-5 text-sm text-center text-gray-400">
             No account?{" "}
-            <Link to="/register" className="text-gray-900 font-medium hover:underline">
+            <Link to="/register" className="text-gray-700 font-medium hover:text-gray-900 transition-colors">
               Create one
             </Link>
           </p>

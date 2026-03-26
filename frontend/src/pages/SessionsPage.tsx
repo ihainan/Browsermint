@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, Session } from "../api/client.ts";
 import { useAuth } from "../contexts/AuthContext.tsx";
-import { Plus, Trash2, Monitor, LogOut, Loader2, ExternalLink, Globe } from "lucide-react";
+import { Plus, Trash2, Monitor, LogOut, Loader2, ExternalLink, Globe, Play, Pause, MoreHorizontal } from "lucide-react";
 import clsx from "clsx";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
@@ -57,7 +57,9 @@ export default function SessionsPage() {
   const { user, logout } = useAuth();
   const queryClient = useQueryClient();
   const [newSessionName, setNewSessionName] = useState("");
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmModalId, setDeleteConfirmModalId] = useState<string | null>(null);
+  const [openMoreMenuId, setOpenMoreMenuId] = useState<string | null>(null);
+  const [newBrowserModalOpen, setNewBrowserModalOpen] = useState(false);
   const [createError, setCreateError] = useState("");
   const [avatarOpen, setAvatarOpen] = useState(false);
   const avatarRef = useRef<HTMLDivElement>(null);
@@ -72,6 +74,13 @@ export default function SessionsPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  useEffect(() => {
+    if (!openMoreMenuId) return;
+    function handleClick() { setOpenMoreMenuId(null); }
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [openMoreMenuId]);
+
   const { data, isPending: isLoadingSessions } = useQuery({
     queryKey: ["sessions"],
     queryFn: () => sessionsApi.list().then((r) => r.data.sessions),
@@ -84,6 +93,8 @@ export default function SessionsPage() {
     mutationFn: (name: string) => sessionsApi.create({ name }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      setNewBrowserModalOpen(false);
+      setNewSessionName("");
       window.open(`/sessions/${res.data.session.id}`, "_blank");
     },
     onError: (err: unknown) => {
@@ -98,8 +109,18 @@ export default function SessionsPage() {
     mutationFn: (id: string) => sessionsApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setDeleteConfirmId(null);
+      setDeleteConfirmModalId(null);
     },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: (id: string) => sessionsApi.stop(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+
+  const startMutation = useMutation({
+    mutationFn: (id: string) => sessionsApi.start(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
   });
 
   function getNameValidationError(name: string): string {
@@ -173,64 +194,25 @@ export default function SessionsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-10">
-        {/* Create session */}
-        <div className="bg-white rounded-2xl shadow-md shadow-gray-300/50 border border-gray-200 p-6 mb-6">
-          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">
-            New browser
-          </h2>
-          <div className="flex gap-3 items-start">
-            <div className="flex-1">
-              <input
-                type="text"
-                value={newSessionName}
-                onChange={(e) => { setNewSessionName(e.target.value); setCreateError(""); }}
-                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-                placeholder="Browser name"
-                className={clsx(
-                  "w-full px-3.5 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:border-transparent transition-colors",
-                  nameError
-                    ? "border-red-200 focus:ring-red-400/20"
-                    : "border-gray-200 focus:ring-gray-900/10"
-                )}
-                disabled={createMutation.isPending}
-              />
-              {(nameError || (createError && !nameError)) && (
-                <p className="mt-1.5 text-xs text-red-500">
-                  {nameError || createError}
-                </p>
-              )}
-              {createMutation.isPending && (
-                <p className="mt-1.5 text-xs text-gray-400">
-                  Starting cloud browser, this may take up to 30 seconds…
-                </p>
-              )}
-            </div>
-            <button
-              onClick={handleCreate}
-              disabled={!canCreate}
-              className="flex items-center gap-2 px-4 py-2.5 bg-gray-900 text-white text-sm font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm shrink-0"
-            >
-              {createMutation.isPending ? (
-                <Loader2 size={15} className="animate-spin" />
-              ) : (
-                <Plus size={15} />
-              )}
-              {createMutation.isPending ? "Starting…" : "Create"}
-            </button>
-          </div>
-        </div>
-
         {/* Sessions list */}
         <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
               Cloud Browsers
+              {sessions.length > 0 && (
+                <span className="ml-1.5 normal-case font-normal">
+                  ({sessions.length}/{user?.maxSessions ?? 5})
+                </span>
+              )}
             </h2>
-            {sessions.length > 0 && (
-              <span className="text-xs text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full">
-                {sessions.length} / {user?.maxSessions ?? 5}
-              </span>
-            )}
+            <button
+              onClick={() => setNewBrowserModalOpen(true)}
+              disabled={!canCreate && sessions.length >= (user?.maxSessions ?? 5)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-xs font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              <Plus size={13} />
+              New Browser
+            </button>
           </div>
 
           {isLoadingSessions && sessions.length === 0 ? (
@@ -250,14 +232,26 @@ export default function SessionsPage() {
               {sessions.map((session) => (
                 <div
                   key={session.id}
-                  className="group bg-white rounded-2xl border border-gray-200 shadow-md shadow-gray-300/40 px-5 py-4 flex items-center gap-4 hover:shadow-lg hover:shadow-gray-300/50 hover:border-gray-300 transition-all duration-150"
+                  className={clsx(
+                    "group rounded-2xl border shadow-md px-5 py-4 flex items-center gap-4 hover:shadow-lg hover:border-gray-300 transition-all duration-150",
+                    session.status === "stopped"
+                      ? "bg-gray-50 border-gray-200 shadow-gray-200/40 hover:shadow-gray-200/50"
+                      : "bg-white border-gray-200 shadow-gray-300/40 hover:shadow-gray-300/50"
+                  )}
                 >
                   {/* Icon */}
                   <div className={clsx(
-                    "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br shadow-sm",
-                    getBrowserGradient(session.name)
+                    "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm",
+                    session.status === "stopped" || session.status === "stopping"
+                      ? "bg-gray-200"
+                      : "bg-gradient-to-br " + getBrowserGradient(session.name)
                   )}>
-                    <Globe size={17} className="text-white drop-shadow-sm" />
+                    <Globe size={17} className={clsx(
+                      "drop-shadow-sm",
+                      session.status === "stopped" || session.status === "stopping"
+                        ? "text-gray-400"
+                        : "text-white"
+                    )} />
                   </div>
 
                   {/* Name + ID */}
@@ -296,51 +290,82 @@ export default function SessionsPage() {
                     </div>
                     <div>
                       <p className="text-xs text-gray-400 mb-0.5">Container</p>
-                      <p className="text-xs text-gray-500 font-mono truncate">
-                        {session.containerName
-                          ? session.containerName.replace("steelyard-session-", "")
-                          : "—"}
-                      </p>
+                      {session.status === "stopped" || session.status === "stopping" ? (
+                        <p className="text-xs text-gray-400 italic">Disabled</p>
+                      ) : (
+                        <p className="text-xs text-gray-500 font-mono truncate">
+                          {session.containerName
+                            ? session.containerName.replace("steelyard-session-", "")
+                            : "—"}
+                        </p>
+                      )}
                     </div>
                   </div>
 
                   {/* Status + actions */}
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span
-                      className={clsx(
-                        "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium",
-                        STATUS_STYLES[session.status]
-                      )}
-                    >
-                      <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
-                      {session.status}
-                    </span>
-
-                    {deleteConfirmId === session.id ? (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => deleteMutation.mutate(session.id)}
-                          disabled={deleteMutation.isPending}
-                          className="text-xs text-red-500 font-semibold hover:text-red-600 transition-colors"
-                        >
-                          Delete
-                        </button>
-                        <button
-                          onClick={() => setDeleteConfirmId(null)}
-                          className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setDeleteConfirmId(session.id)}
-                        className="p-1.5 text-gray-300 hover:text-red-400 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                        title="Delete browser"
+                  <div className="flex items-center gap-2 shrink-0">
+                    {session.status !== "running" && session.status !== "stopping" && session.status !== "stopped" && (
+                      <span
+                        className={clsx(
+                          "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium",
+                          STATUS_STYLES[session.status]
+                        )}
                       >
-                        <Trash2 size={15} />
-                      </button>
+                        <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
+                        {session.status}
+                      </span>
                     )}
+
+                    {/* More menu */}
+                    <div className="relative">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenMoreMenuId(openMoreMenuId === session.id ? null : session.id);
+                        }}
+                        className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                        title="More options"
+                      >
+                        <MoreHorizontal size={15} />
+                      </button>
+                      {openMoreMenuId === session.id && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="absolute right-0 mt-1.5 w-40 bg-white rounded-xl shadow-lg shadow-gray-200/60 border border-gray-100 py-1 z-20"
+                        >
+                          {session.status === "running" && (
+                            <button
+                              onClick={() => { setOpenMoreMenuId(null); stopMutation.mutate(session.id); }}
+                              disabled={stopMutation.isPending && stopMutation.variables === session.id}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
+                            >
+                              <Pause size={13} />
+                              Disable
+                            </button>
+                          )}
+                          {(session.status === "stopped" || session.status === "error") && (
+                            <button
+                              onClick={() => { setOpenMoreMenuId(null); startMutation.mutate(session.id); }}
+                              disabled={startMutation.isPending && startMutation.variables === session.id}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
+                            >
+                              <Play size={13} />
+                              Resume
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              setOpenMoreMenuId(null);
+                              setDeleteConfirmModalId(session.id);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 size={13} />
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -348,6 +373,92 @@ export default function SessionsPage() {
           )}
         </div>
       </main>
+
+      {/* New browser modal */}
+      {newBrowserModalOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+          onClick={() => { setNewBrowserModalOpen(false); setNewSessionName(""); setCreateError(""); }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 w-80 mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-gray-900 mb-4">New Browser</h3>
+            <input
+              type="text"
+              value={newSessionName}
+              onChange={(e) => { setNewSessionName(e.target.value); setCreateError(""); }}
+              onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+              placeholder="Browser name"
+              autoFocus
+              className={clsx(
+                "w-full px-3.5 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:border-transparent transition-colors",
+                nameError
+                  ? "border-red-200 focus:ring-red-400/20"
+                  : "border-gray-200 focus:ring-gray-900/10"
+              )}
+              disabled={createMutation.isPending}
+            />
+            {(nameError || (createError && !nameError)) && (
+              <p className="mt-1.5 text-xs text-red-500">{nameError || createError}</p>
+            )}
+            {createMutation.isPending && (
+              <p className="mt-1.5 text-xs text-gray-400">Starting cloud browser, this may take up to 30 seconds…</p>
+            )}
+            <div className="flex gap-2 justify-end mt-4">
+              <button
+                onClick={() => { setNewBrowserModalOpen(false); setNewSessionName(""); setCreateError(""); }}
+                className="px-3.5 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreate}
+                disabled={!canCreate}
+                className="px-3.5 py-2 text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {createMutation.isPending ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+                {createMutation.isPending ? "Starting…" : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteConfirmModalId && (
+        <div
+          className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+          onClick={() => setDeleteConfirmModalId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 w-80 mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">Delete browser?</h3>
+            <p className="text-xs text-gray-400 mb-5">
+              This will permanently delete the browser and all its data. This action cannot be undone.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setDeleteConfirmModalId(null)}
+                className="px-3.5 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteMutation.mutate(deleteConfirmModalId)}
+                disabled={deleteMutation.isPending}
+                className="px-3.5 py-2 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {deleteMutation.isPending && <Loader2 size={11} className="animate-spin" />}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

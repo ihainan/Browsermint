@@ -8,7 +8,8 @@ const envSchema = z.object({
   STEEL_BROWSER_IMAGE: z
     .string()
     .default("ghcr.io/steel-dev/steel-browser-api:latest"),
-  PORT: z.coerce.number().default(4000),
+  PORT: z.coerce.number().default(24710),
+  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
   NODE_ENV: z
     .enum(["development", "production", "test"])
     .default("development"),

@@ -2,18 +2,35 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
 import { config } from "./config.js";
-import { prisma } from "./db/client.js";
+import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
-import { handleBrowserProxy } from "./services/proxy.service.js";
+import { handleBrowserProxy, handleDetailsProxy } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
 
 const server = Fastify({
   logger: {
-    level: config.NODE_ENV === "production" ? "info" : "debug",
+    level: config.LOG_LEVEL,
+    transport: config.NODE_ENV !== "production"
+      ? { target: "pino-pretty", options: { colorize: true, translateTime: "SYS:HH:MM:ss", ignore: "pid,hostname" } }
+      : undefined,
   },
+  disableRequestLogging: true,
+});
+
+bindPrismaLogger(server.log);
+
+// Log requests at debug level
+server.addHook("onRequest", async (request) => {
+  request.log.debug({ method: request.method, url: request.url }, "incoming request");
+});
+server.addHook("onResponse", async (request, reply) => {
+  request.log.debug(
+    { method: request.method, url: request.url, statusCode: reply.statusCode, responseTime: reply.elapsedTime },
+    "request completed"
+  );
 });
 
 await server.register(cors, {
@@ -26,6 +43,15 @@ await server.register(sensible);
 
 await server.register(authRoutes, { prefix: "/api/auth" });
 await server.register(sessionsRoutes, { prefix: "/api/sessions" });
+
+// Session details proxy (session-token auth via query string)
+server.get("/api/sessions/:id/details", {
+  handler: async (request, reply) =>
+    handleDetailsProxy(
+      request as Parameters<typeof handleDetailsProxy>[0],
+      reply
+    ),
+});
 
 // Browser proxy endpoint (session-token auth via query string)
 server.get("/api/sessions/:id/browser", {

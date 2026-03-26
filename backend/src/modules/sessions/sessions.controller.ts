@@ -47,6 +47,13 @@ export async function handleCreateSession(
     const containerInfo = await createAndStartContainer(sessionId);
     await waitForContainerReady(containerInfo.internalApiUrl);
 
+    // Session may have been deleted by the user while container was starting
+    const current = await prisma.session.findUnique({ where: { id: sessionId } });
+    if (!current || current.deletedAt) {
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      return reply.status(409).send({ error: "Session was deleted during creation" });
+    }
+
     const updated = await prisma.session.update({
       where: { id: sessionId },
       data: {
@@ -128,6 +135,102 @@ export async function handleDeleteSession(
   });
 
   return reply.send({ success: true });
+}
+
+// ─── Stop Session (keep session, stop container) ─────────────────────────────
+
+export async function handleStopSession(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const { id } = request.params;
+  const session = await prisma.session.findFirst({
+    where: { id, userId: request.user.sub, deletedAt: null },
+  });
+  if (!session) return reply.status(404).send({ error: "Session not found" });
+  if (session.status !== "running") {
+    return reply.status(400).send({ error: "Session is not running" });
+  }
+
+  await prisma.session.update({ where: { id }, data: { status: "stopping" } });
+
+  if (session.containerId) {
+    await stopAndRemoveContainer(session.containerId).catch(console.error);
+  }
+
+  const updated = await prisma.session.update({
+    where: { id },
+    data: {
+      status: "stopped",
+      containerId: null,
+      containerName: null,
+      internalApiUrl: null,
+    },
+  });
+
+  return reply.send({ session: updated });
+}
+
+// ─── Start Session (restart a stopped session) ────────────────────────────────
+
+export async function handleStartSession(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const { id } = request.params;
+  const session = await prisma.session.findFirst({
+    where: { id, userId: request.user.sub, deletedAt: null },
+  });
+  if (!session) return reply.status(404).send({ error: "Session not found" });
+  if (session.status !== "stopped" && session.status !== "error") {
+    return reply.status(400).send({ error: "Session is not stopped" });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: request.user.sub } });
+  if (!user) return reply.status(404).send({ error: "User not found" });
+
+  const activeCount = await prisma.session.count({
+    where: {
+      userId: request.user.sub,
+      deletedAt: null,
+      status: { in: ["creating", "running"] },
+    },
+  });
+  if (activeCount >= user.maxSessions) {
+    return reply.status(429).send({
+      error: `Session limit reached (max ${user.maxSessions})`,
+    });
+  }
+
+  await prisma.session.update({ where: { id }, data: { status: "creating" } });
+
+  try {
+    const containerInfo = await createAndStartContainer(id);
+    await waitForContainerReady(containerInfo.internalApiUrl);
+
+    const current = await prisma.session.findUnique({ where: { id } });
+    if (!current || current.deletedAt) {
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      return reply.status(409).send({ error: "Session was deleted during startup" });
+    }
+
+    const updated = await prisma.session.update({
+      where: { id },
+      data: {
+        status: "running",
+        containerId: containerInfo.containerId,
+        containerName: containerInfo.containerName,
+        internalApiUrl: containerInfo.internalApiUrl,
+        lastActiveAt: new Date(),
+      },
+    });
+
+    return reply.send({ session: updated });
+  } catch (err) {
+    console.error("Session start failed:", err);
+    await prisma.session.update({ where: { id }, data: { status: "error" } });
+    return reply.status(500).send({ error: "Failed to start browser session" });
+  }
 }
 
 // ─── Issue Session Token ──────────────────────────────────────────────────────
