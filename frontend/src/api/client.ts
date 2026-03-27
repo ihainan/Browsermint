@@ -68,6 +68,11 @@ export interface SteelSessionDetails {
   status?: string;
 }
 
+export interface SteelDevtoolsTarget {
+  pageId: string | null;
+  wsPath: string | null;
+}
+
 export const authApi = {
   register: (data: { username: string; email: string; password: string }) =>
     api.post<{ user: User; token: string }>("/auth/register", data),
@@ -86,6 +91,8 @@ export const sessionsApi = {
   start: (id: string) => api.post<{ session: Session }>(`/sessions/${id}/start`),
   getDetails: (id: string, token: string) =>
     api.get<SteelSessionDetails>(`/sessions/${id}/details?token=${token}`),
+  getDevtoolsTarget: (id: string, token: string) =>
+    api.get<SteelDevtoolsTarget>(`/sessions/${id}/devtools-target?token=${token}`),
   getToken: (id: string) =>
     api.post<{ token: string }>(`/sessions/${id}/token`),
 };

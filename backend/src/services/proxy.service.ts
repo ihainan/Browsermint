@@ -25,6 +25,11 @@ interface SessionProxyContext {
   };
 }
 
+interface ResolvedDevtoolsTarget {
+  pageId: string | null;
+  wsPath: string | null;
+}
+
 // ─── Proxy Server (singleton) ─────────────────────────────────────────────────
 
 export const proxyServer = httpProxy.createProxyServer({});
@@ -150,6 +155,41 @@ function getCookieValue(cookieHeader: string | undefined, name: string): string 
     }
   }
   return null;
+}
+
+async function resolveDevtoolsTarget(
+  session: { internalApiUrl: string | null },
+  pageId?: string | null
+): Promise<ResolvedDevtoolsTarget> {
+  if (!session.internalApiUrl) {
+    return { pageId: null, wsPath: null };
+  }
+
+  const inspectorUrl = new URL("/v1/devtools/inspector.html", session.internalApiUrl);
+  if (pageId) inspectorUrl.searchParams.set("pageId", pageId);
+
+  const res = await fetch(inspectorUrl, {
+    redirect: "manual",
+    signal: AbortSignal.timeout(5000),
+  });
+  const redirectLocation = res.headers.get("location");
+  if (!redirectLocation) {
+    return { pageId: null, wsPath: null };
+  }
+
+  const target = new URL(redirectLocation, getDevtoolsBaseUrl(session.internalApiUrl));
+  const rawWs = target.searchParams.get("ws");
+  if (!rawWs) {
+    return { pageId: null, wsPath: null };
+  }
+
+  const wsTarget = new URL(`http:${rawWs}`);
+  const pageIdMatch = wsTarget.pathname.match(/\/devtools\/page\/([^/?]+)/);
+
+  return {
+    pageId: pageIdMatch ? decodeURIComponent(pageIdMatch[1]) : null,
+    wsPath: wsTarget.pathname,
+  };
 }
 
 async function updateLastActiveAt(sessionId: string) {
@@ -306,29 +346,13 @@ export async function handleDevtoolsProxy(
     try {
       const host = getPublicRequestHost(request);
       const pageId = typeof request.query.pageId === "string" ? request.query.pageId : null;
+      const resolvedTarget = await resolveDevtoolsTarget(session, pageId);
 
-      if (pageId) {
+      if (resolvedTarget.wsPath) {
         upstreamUrl.searchParams.set(
           "ws",
-          `//${host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${token}`
+          `//${host}/ws/sessions/${sessionId}/cdp${resolvedTarget.wsPath}?token=${token}`
         );
-      } else {
-        const res = await fetch(`${session.internalApiUrl}/v1/devtools/inspector.html`, {
-          redirect: "manual",
-          signal: AbortSignal.timeout(5000),
-        });
-        const redirectLocation = res.headers.get("location");
-        if (redirectLocation) {
-          const target = new URL(redirectLocation);
-          const rawWs = target.searchParams.get("ws");
-          if (rawWs) {
-            const wsTarget = new URL(`http:${rawWs}`);
-            upstreamUrl.searchParams.set(
-              "ws",
-              `//${host}/ws/sessions/${sessionId}/cdp${wsTarget.pathname}?token=${token}`
-            );
-          }
-        }
       }
     } catch (err) {
       console.error("Failed to resolve DevTools target:", err);
@@ -359,11 +383,34 @@ export async function handleDevtoolsProxy(
   }
 }
 
+export async function handleDevtoolsTargetProxy(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) {
+    return reply.status(401).send({ error: "Invalid token" });
+  }
+
+  try {
+    const target = await resolveDevtoolsTarget(context.session);
+    return reply.send(target);
+  } catch (err) {
+    console.error("Failed to resolve DevTools target:", err);
+    return reply.status(502).send({ error: "Failed to resolve DevTools target" });
+  }
+}
+
 // ─── WebSocket Proxy ──────────────────────────────────────────────────────────
 // Handles the HTTP upgrade event from Fastify's underlying server.
-// Matches: /ws/sessions/:id/(cast|logs|cdp[/subpath])?token=xxx
+// Matches: /ws/sessions/:id/(cast|logs|pageId|cdp[/subpath])?token=xxx
 
-const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|cdp)(\/[^?]*)?/;
+const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|pageId|cdp)(\/[^?]*)?/;
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -379,7 +426,7 @@ export async function handleWebSocketUpgrade(
   }
 
   const sessionId = match[1];
-  const wsType = match[2] as "cast" | "logs" | "cdp";
+  const wsType = match[2] as "cast" | "logs" | "pageId" | "cdp";
   const wsSubPath = match[3] ?? "/";
   // The session player appends params with "?" even when baseWsUrl already
   // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
@@ -432,6 +479,8 @@ export async function handleWebSocketUpgrade(
   let proxyTarget = session.internalApiUrl;
   if (wsType === "logs") {
     request.url = "/v1/sessions/logs";
+  } else if (wsType === "pageId") {
+    request.url = "/v1/sessions/pageId";
   } else if (wsType === "cdp") {
     // Forward directly to the container's CDP server (port 9223) at the given sub-path.
     // /ws/sessions/{id}/cdp        → /

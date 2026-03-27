@@ -418,29 +418,50 @@ function ConnectAgentModal({
 }
 
 function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionToken: string | null }) {
+  const [devtoolsWsPath, setDevtoolsWsPath] = useState<string | null>(null);
   const [pageId, setPageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      setDevtoolsWsPath(null);
+      setPageId(null);
+      return;
+    }
+
+    const refreshTarget = () => {
+      sessionsApi
+        .getDevtoolsTarget(sessionId, sessionToken)
+        .then((res) => {
+          setPageId(res.data.pageId);
+          setDevtoolsWsPath(res.data.wsPath);
+        })
+        .catch(() => {});
+    };
+
+    refreshTarget();
+    const interval = setInterval(refreshTarget, 5000);
+    return () => clearInterval(interval);
+  }, [sessionId, sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) return;
 
     const ws = new WebSocket(
-      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/sessions/${sessionId}/cast?token=${sessionToken}&tabInfo=true`
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/sessions/${sessionId}/pageId?token=${encodeURIComponent(sessionToken)}`
     );
 
     ws.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data as string) as
-          | { type?: string; firstTabId?: string; pageId?: string }
-          | { type?: string; firstTabId?: string; pageId?: string }[];
-        const messages = Array.isArray(payload) ? payload : [payload];
-
-        for (const message of messages) {
-          if (message.type === "tabList" && message.firstTabId) {
-            setPageId((prev) => prev ?? message.firstTabId ?? null);
-          }
-          if (message.type === "activeTabChange" && message.pageId) {
-            setPageId(message.pageId);
-          }
+        const payload = JSON.parse(event.data as string) as { pageId?: string };
+        if (payload.pageId) {
+          setPageId(payload.pageId);
+          sessionsApi
+            .getDevtoolsTarget(sessionId, sessionToken)
+            .then((res) => {
+              setPageId(res.data.pageId);
+              setDevtoolsWsPath(res.data.wsPath);
+            })
+            .catch(() => {});
         }
       } catch {}
     };
@@ -449,14 +470,12 @@ function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessi
   }, [sessionId, sessionToken]);
 
   const openDevTools = () => {
-    if (!sessionToken) return;
-    const devtoolsWs = pageId
-      ? `//${window.location.host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${encodeURIComponent(sessionToken)}`
-      : `//${window.location.host}/ws/sessions/${sessionId}/cdp?token=${encodeURIComponent(sessionToken)}`;
+    if (!sessionToken || !devtoolsWsPath) return;
+    const proxiedWs = `//${window.location.host}/ws/sessions/${sessionId}/cdp${devtoolsWsPath}?token=${encodeURIComponent(sessionToken)}`;
     const devtoolsSrc =
       `/api/sessions/${sessionId}/devtools/devtools_app.html` +
       `?token=${encodeURIComponent(sessionToken)}` +
-      `&ws=${encodeURIComponent(devtoolsWs)}` +
+      `&ws=${encodeURIComponent(proxiedWs)}` +
       (pageId ? `&pageId=${encodeURIComponent(pageId)}` : "");
     window.open(devtoolsSrc, `devtools-${sessionId}`, "width=1280,height=800,menubar=no,toolbar=no");
   };
@@ -468,15 +487,17 @@ function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessi
       </p>
       <button
         onClick={openDevTools}
-        disabled={!sessionToken}
+        disabled={!sessionToken || !devtoolsWsPath}
         className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 text-xs font-medium transition-colors"
       >
         <ExternalLink size={13} />
         Open DevTools
       </button>
-      {!pageId && sessionToken && (
-        <p className="text-xs text-gray-600">正在获取页面信息…</p>
-      )}
+      <p className="text-xs text-gray-600 text-center">
+        {devtoolsWsPath
+          ? "DevTools will attach to the current page in a separate window."
+          : "Waiting for the active page to become available..."}
+      </p>
     </div>
   );
 }
