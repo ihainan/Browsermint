@@ -33,7 +33,12 @@ export async function createAndStartContainer(
       `CDP_DOMAIN=${containerName}:9223`,
       "LOG_STORAGE_ENABLED=false",
       "DISABLE_CHROME_SANDBOX=true",
+      "CHROME_HEADLESS=false",
     ],
+    // Start Xvfb before the entrypoint so headful Chrome has a display to connect to.
+    // The image sets DISPLAY=:10 but never actually launches the X server.
+    Entrypoint: ["/bin/sh", "-c"],
+    Cmd: ["Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 2 && exec /app/api/entrypoint.sh"],
     HostConfig: {
       NetworkMode: config.DOCKER_NETWORK_NAME,
       // Phase 2: Memory: 2 * 1024 * 1024 * 1024, NanoCpus: 2e9
