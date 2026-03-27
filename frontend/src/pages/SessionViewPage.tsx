@@ -6,6 +6,11 @@ import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Pl
 import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
+import openclawIcon from "../assets/agents/openclaw.svg";
+import claudeCodeIcon from "../assets/agents/claude-code.png";
+import codexIcon from "../assets/agents/codex.png";
+import cursorIcon from "../assets/agents/cursor.png";
+import antigravityIcon from "../assets/agents/antigravity.png";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
   creating: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
@@ -187,15 +192,15 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
   );
 }
 
-type AgentPlatform = "openclaw" | "claude-code" | "cursor" | "custom";
+type AgentPlatform = "openclaw" | "claude-code" | "codex" | "cursor" | "antigravity";
 
-function usePlatformLabels() {
-  const { t } = useI18n();
+function usePlatforms() {
   return [
-    { id: "openclaw" as const, label: "OpenClaw" },
-    { id: "claude-code" as const, label: "Claude Code" },
-    { id: "cursor" as const, label: "Cursor" },
-    { id: "custom" as const, label: t("sessionView.connect.customApi") },
+    { id: "openclaw" as const, label: "OpenClaw", icon: openclawIcon },
+    { id: "claude-code" as const, label: "Claude Code", icon: claudeCodeIcon },
+    { id: "codex" as const, label: "Codex", icon: codexIcon },
+    { id: "cursor" as const, label: "Cursor", icon: cursorIcon },
+    { id: "antigravity" as const, label: "Antigravity", icon: antigravityIcon },
   ];
 }
 
@@ -211,7 +216,7 @@ function CodeBlock({ code }: { code: string }) {
 
   return (
     <div className="relative group mt-2">
-      <pre className="bg-slate-50 text-gray-800 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre leading-relaxed border border-slate-200">
+      <pre className="bg-slate-50 text-gray-800 text-xs rounded-lg p-3 whitespace-pre-wrap break-all leading-relaxed border border-slate-200">
         {code}
       </pre>
       <button
@@ -291,28 +296,12 @@ function PlatformContent({
     );
   }
 
+  if (platform === "codex" || platform === "antigravity") {
+    return <div className="h-full" />;
+  }
+
   return (
-    <div className="space-y-4 text-sm text-gray-700">
-      <p>{t("sessionView.connect.customIntro")}</p>
-      <div>
-        <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.sessionIdLabel")}</p>
-        <CodeBlock code={sessionId} />
-      </div>
-      <div>
-        <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
-        <CodeBlock code={cdpUrl} />
-      </div>
-      <div>
-        <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.playwrightNode")}</p>
-        <CodeBlock code={`import { chromium } from "playwright";\n\nconst browser = await chromium.connectOverCDP(\n  "${cdpUrl}"\n);`} />
-      </div>
-      <div>
-        <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.playwrightPython")}</p>
-        <CodeBlock
-          code={`from playwright.async_api import async_playwright\n\nasync with async_playwright() as p:\n    browser = await p.chromium.connect_over_cdp(\n        "${cdpUrl}"\n    )`}
-        />
-      </div>
-    </div>
+    <div className="h-full" />
   );
 }
 
@@ -326,7 +315,7 @@ function ConnectAgentModal({
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const platforms = usePlatformLabels();
+  const platforms = usePlatforms();
   const [platform, setPlatform] = useState<AgentPlatform>("openclaw");
   const cdpUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`;
 
@@ -337,7 +326,7 @@ function ConnectAgentModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-white border border-slate-300 rounded-2xl shadow-[0_24px_70px_-24px_rgba(15,23,42,0.4)] ring-1 ring-slate-200/80 w-full max-w-3xl mx-4 flex flex-col max-h-[80vh]">
+      <div className="bg-white border border-slate-300 rounded-2xl shadow-[0_24px_70px_-24px_rgba(15,23,42,0.4)] ring-1 ring-slate-200/80 w-full max-w-5xl mx-4 flex flex-col min-h-[72vh] max-h-[88vh]">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
           <div>
             <h2 className="text-sm font-semibold text-gray-900">{t("sessionView.connect.title")}</h2>
@@ -358,11 +347,12 @@ function ConnectAgentModal({
                 key={p.id}
                 onClick={() => setPlatform(p.id)}
                 className={clsx(
-                  "w-full text-left px-4 py-2.5 text-xs font-medium transition-colors",
+                  "w-full flex items-center gap-3 text-left px-4 py-3 text-xs font-medium transition-colors",
                   platform === p.id ? "text-gray-900 bg-white" : "text-gray-500 hover:text-gray-900 hover:bg-white/70"
                 )}
               >
-                {p.label}
+                <img src={p.icon} alt={p.label} className="w-5 h-5 shrink-0 object-contain" />
+                <span>{p.label}</span>
               </button>
             ))}
           </div>
