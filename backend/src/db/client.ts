@@ -1,17 +1,21 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import type { FastifyBaseLogger } from "fastify";
 
-const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
+const prismaClientOptions = {
+  log: [
+    { emit: "event", level: "query" },
+    { emit: "event", level: "error" },
+    { emit: "event", level: "warn" },
+  ],
+} satisfies Prisma.PrismaClientOptions;
 
-export const prisma =
+type AppPrismaClient = PrismaClient<typeof prismaClientOptions>;
+
+const globalForPrisma = globalThis as unknown as { prisma?: AppPrismaClient };
+
+export const prisma: AppPrismaClient =
   globalForPrisma.prisma ??
-  new PrismaClient({
-    log: [
-      { emit: "event", level: "query" },
-      { emit: "event", level: "error" },
-      { emit: "event", level: "warn" },
-    ],
-  });
+  new PrismaClient(prismaClientOptions);
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;

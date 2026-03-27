@@ -83,11 +83,53 @@ async function getSessionProxyContext(
 }
 
 function getRequestProtocols(request: Pick<FastifyRequest, "headers"> | IncomingMessage) {
-  const isHttps = (request.headers["x-forwarded-proto"] as string | undefined) === "https";
+  const forwardedProto = getFirstHeaderValue(request.headers["x-forwarded-proto"]);
+  let isHttps = forwardedProto === "https";
+
+  if (!forwardedProto) {
+    for (const headerName of ["origin", "referer"] as const) {
+      const headerValue = getFirstHeaderValue(request.headers[headerName]);
+      if (!headerValue) continue;
+
+      try {
+        isHttps = new URL(headerValue).protocol === "https:";
+        break;
+      } catch {
+        continue;
+      }
+    }
+  }
+
   return {
     http: isHttps ? "https" : "http",
     ws: isHttps ? "wss" : "ws",
   };
+}
+
+function getFirstHeaderValue(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  if (typeof value !== "string") return null;
+  return value.split(",")[0]?.trim() || null;
+}
+
+function getPublicRequestHost(
+  request: Pick<FastifyRequest, "headers"> | IncomingMessage
+): string {
+  const forwardedHost = getFirstHeaderValue(request.headers["x-forwarded-host"]);
+  if (forwardedHost) return forwardedHost;
+
+  for (const headerName of ["origin", "referer"] as const) {
+    const headerValue = getFirstHeaderValue(request.headers[headerName]);
+    if (!headerValue) continue;
+
+    try {
+      return new URL(headerValue).host;
+    } catch {
+      continue;
+    }
+  }
+
+  return getFirstHeaderValue(request.headers.host) ?? "localhost";
 }
 
 function getDevtoolsBaseUrl(internalApiUrl: string): URL {
@@ -147,16 +189,26 @@ export async function handleBrowserProxy(
     return reply.status(502).send({ error: "Failed to reach browser session" });
   }
 
-  // Rewrite the internal wsUrl to go through our WebSocket proxy
-  const containerName = `steelyard-session-${sessionId}`;
-  const internalWsUrl = `ws://${containerName}:3000/v1/sessions/cast`;
-  const host = request.headers.host ?? "localhost";
-  const publicWsUrl = `ws://${host}/ws/sessions/${sessionId}/cast?token=${token}`;
+  // Rewrite the embedded session player WebSocket to go through our proxy.
+  // The upstream may render either a container hostname or an internal IP, so
+  // replace the assigned constant instead of matching one exact origin.
+  const host = getPublicRequestHost(request);
+  const { ws: wsProto } = getRequestProtocols(request);
+  const publicWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/cast?token=${token}`;
+  const originalBaseWsUrlMatch = html.match(/const\s+baseWsUrl\s*=\s*['"]([^'"]+)['"];/);
 
   html = html.replace(
-    `const baseWsUrl = '${internalWsUrl}'`,
-    `const baseWsUrl = '${publicWsUrl}'`
+    /const\s+baseWsUrl\s*=\s*['"][^'"]+['"];/,
+    `const baseWsUrl = '${publicWsUrl}';`
   );
+
+  console.info("[browser-proxy] rewrote session debug HTML", {
+    sessionId,
+    host,
+    upstreamDebugUrl: debugUrl,
+    originalBaseWsUrl: originalBaseWsUrlMatch?.[1] ?? null,
+    rewrittenBaseWsUrl: publicWsUrl,
+  });
 
   // Update last active timestamp (fire-and-forget)
   await updateLastActiveAt(sessionId);
@@ -197,13 +249,13 @@ export async function handleDetailsProxy(
 
     // Rewrite the internal Docker websocketUrl to a publicly accessible proxy URL
     if (sessionDetail.websocketUrl) {
-      const host = request.headers.host ?? "localhost";
+      const host = getPublicRequestHost(request);
       const proto = getRequestProtocols(request).ws;
       sessionDetail.websocketUrl = `${proto}://${host}/ws/sessions/${sessionId}/cdp`;
     }
 
     if (token) {
-      const host = request.headers.host ?? "localhost";
+      const host = getPublicRequestHost(request);
       const proto = getRequestProtocols(request).http;
       sessionDetail.debuggerUrl = `${proto}://${host}/api/sessions/${sessionId}/devtools/devtools_app.html?token=${encodeURIComponent(token)}`;
     }
@@ -220,7 +272,7 @@ export async function handleDetailsProxy(
 // Proxies Chrome DevTools frontend assets and rewrites the page websocket target.
 
 export async function handleDevtoolsProxy(
-  request: FastifyRequest<{ Params: { id: string; "*": string }; Querystring: { token?: string } }>,
+  request: FastifyRequest<{ Params: { id: string; "*": string }; Querystring: { token?: string; pageId?: string } }>,
   reply: FastifyReply
 ) {
   const { id: sessionId } = request.params;
@@ -252,7 +304,7 @@ export async function handleDevtoolsProxy(
 
   if (assetPath === "devtools_app.html" && !upstreamUrl.searchParams.has("ws")) {
     try {
-      const host = request.headers.host ?? "localhost";
+      const host = getPublicRequestHost(request);
       const pageId = typeof request.query.pageId === "string" ? request.query.pageId : null;
 
       if (pageId) {
@@ -321,6 +373,7 @@ export async function handleWebSocketUpgrade(
   const url = request.url ?? "";
   const match = url.match(WS_PATH_REGEX);
   if (!match) {
+    console.warn("[ws-proxy] rejecting upgrade: path did not match", { url });
     socket.destroy();
     return;
   }
@@ -335,12 +388,23 @@ export async function handleWebSocketUpgrade(
   const token = qs.get("token");
 
   if (!token) {
+    console.warn("[ws-proxy] rejecting upgrade: missing token", {
+      sessionId,
+      wsType,
+      url,
+    });
     socket.destroy();
     return;
   }
 
   const payload = await validateSessionToken(token);
   if (!payload || payload.sessionId !== sessionId) {
+    console.warn("[ws-proxy] rejecting upgrade: invalid token", {
+      sessionId,
+      wsType,
+      payloadSessionId: payload?.sessionId ?? null,
+      payloadUserId: payload?.userId ?? null,
+    });
     socket.destroy();
     return;
   }
@@ -355,6 +419,11 @@ export async function handleWebSocketUpgrade(
   });
 
   if (!session?.internalApiUrl) {
+    console.warn("[ws-proxy] rejecting upgrade: session unavailable", {
+      sessionId,
+      wsType,
+      userId: payload.userId,
+    });
     socket.destroy();
     return;
   }
@@ -382,6 +451,15 @@ export async function handleWebSocketUpgrade(
     const innerQsStr = innerQs.toString();
     if (innerQsStr) request.url += `?${innerQsStr}`;
   }
+
+  console.info("[ws-proxy] proxying upgrade", {
+    sessionId,
+    userId: payload.userId,
+    wsType,
+    proxyTarget,
+    rewrittenUrl: request.url,
+    originalUrl: url,
+  });
 
   // Update last active timestamp (fire-and-forget)
   prisma.session.update({
