@@ -2,28 +2,26 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, Session } from "../api/client.ts";
 import { useAuth } from "../contexts/AuthContext.tsx";
-import { Plus, Trash2, Monitor, LogOut, Loader2, ExternalLink, Globe, Play, Pause, MoreHorizontal } from "lucide-react";
+import { Plus, Trash2, Monitor, LogOut, Loader2, ExternalLink, Globe, Play, Pause, MoreHorizontal, ChevronRight, Check } from "lucide-react";
 import clsx from "clsx";
+import { useI18n } from "../i18n/I18nContext.tsx";
+import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
   creating: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
-  running:  "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+  running: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
   stopping: "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
-  stopped:  "bg-gray-100 text-gray-500 ring-1 ring-gray-200",
-  error:    "bg-red-50 text-red-600 ring-1 ring-red-200",
+  stopped: "bg-gray-100 text-gray-500 ring-1 ring-gray-200",
+  error: "bg-red-50 text-red-600 ring-1 ring-red-200",
 };
 
 const STATUS_DOT: Record<Session["status"], string> = {
   creating: "bg-amber-400 animate-pulse",
-  running:  "bg-emerald-500",
+  running: "bg-emerald-500",
   stopping: "bg-orange-400 animate-pulse",
-  stopped:  "bg-gray-400",
-  error:    "bg-red-500",
+  stopped: "bg-gray-400",
+  error: "bg-red-500",
 };
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString();
-}
 
 const BROWSER_GRADIENTS = [
   "from-sky-400 to-blue-500",
@@ -55,6 +53,7 @@ function getAvatarColor(username: string): string {
 
 export default function SessionsPage() {
   const { user, logout } = useAuth();
+  const { locale, setLocale, t, formatDateTime } = useI18n();
   const queryClient = useQueryClient();
   const [newSessionName, setNewSessionName] = useState("");
   const [deleteConfirmModalId, setDeleteConfirmModalId] = useState<string | null>(null);
@@ -62,12 +61,14 @@ export default function SessionsPage() {
   const [newBrowserModalOpen, setNewBrowserModalOpen] = useState(false);
   const [createError, setCreateError] = useState("");
   const [avatarOpen, setAvatarOpen] = useState(false);
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const avatarRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (avatarRef.current && !avatarRef.current.contains(e.target as Node)) {
         setAvatarOpen(false);
+        setLanguageMenuOpen(false);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
@@ -76,7 +77,9 @@ export default function SessionsPage() {
 
   useEffect(() => {
     if (!openMoreMenuId) return;
-    function handleClick() { setOpenMoreMenuId(null); }
+    function handleClick() {
+      setOpenMoreMenuId(null);
+    }
     document.addEventListener("click", handleClick);
     return () => document.removeEventListener("click", handleClick);
   }, [openMoreMenuId]);
@@ -99,8 +102,8 @@ export default function SessionsPage() {
     },
     onError: (err: unknown) => {
       const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data
-          ?.error ?? "Failed to create browser";
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        t("sessions.createBrowserFailed");
       setCreateError(msg);
     },
   });
@@ -125,11 +128,9 @@ export default function SessionsPage() {
 
   function getNameValidationError(name: string): string {
     const trimmed = name.trim();
-    if (!trimmed) return "Browser name is required";
-    const duplicate = sessions.some(
-      (s) => s.name?.toLowerCase() === trimmed.toLowerCase()
-    );
-    if (duplicate) return "You already have a browser with this name";
+    if (!trimmed) return t("sessions.browserNameRequired");
+    const duplicate = sessions.some((s) => s.name?.toLowerCase() === trimmed.toLowerCase());
+    if (duplicate) return t("sessions.browserNameDuplicate");
     return "";
   }
 
@@ -153,7 +154,6 @@ export default function SessionsPage() {
 
   return (
     <div className="min-h-screen bg-slate-100">
-      {/* Header */}
       <header className="bg-white border-b border-gray-200 shadow-sm px-6 py-3.5 flex items-center justify-between sticky top-0 z-10">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center">
@@ -162,7 +162,15 @@ export default function SessionsPage() {
           <h1 className="text-base font-bold text-gray-900 tracking-tight">SteelYard</h1>
         </div>
 
-        <div ref={avatarRef} className="relative">
+        <div
+          ref={avatarRef}
+          className="relative"
+          onMouseEnter={() => setAvatarOpen(true)}
+          onMouseLeave={() => {
+            setAvatarOpen(false);
+            setLanguageMenuOpen(false);
+          }}
+        >
           <button
             onClick={() => setAvatarOpen((o) => !o)}
             className={clsx(
@@ -175,33 +183,69 @@ export default function SessionsPage() {
           </button>
 
           {avatarOpen && (
-            <div className="absolute right-0 mt-2.5 w-52 bg-white rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 py-1.5 z-20">
-              <div className="px-4 py-2.5 mb-1">
-                <p className="text-sm font-semibold text-gray-900">{user?.username}</p>
-                <p className="text-xs text-gray-400 truncate mt-0.5">{user?.email}</p>
+            <div className="absolute right-0 top-full pt-2.5 z-20">
+              <div className="absolute inset-x-0 -top-2.5 h-2.5" />
+              <div className="w-52 bg-white rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 py-1.5">
+                <div className="px-4 py-2.5 mb-1">
+                  <p className="text-sm font-semibold text-gray-900">{user?.username}</p>
+                  <p className="text-xs text-gray-400 truncate mt-0.5">{user?.email}</p>
+                </div>
+                <div className="h-px bg-gray-100 mx-2 mb-1" />
+                <div
+                  className="relative mx-1"
+                  onMouseEnter={() => setLanguageMenuOpen(true)}
+                  onMouseLeave={() => setLanguageMenuOpen(false)}
+                >
+                  <button
+                    onClick={() => setLanguageMenuOpen((open) => !open)}
+                    className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-xl transition-colors"
+                  >
+                    <span>{t("common.language")}</span>
+                    <ChevronRight size={14} />
+                  </button>
+                  {languageMenuOpen && (
+                    <div className="absolute top-0 right-full min-w-36 bg-white rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 py-1.5">
+                      {(["zh", "en"] as const).map((nextLocale) => (
+                        <button
+                          key={nextLocale}
+                          onClick={() => {
+                            setLocale(nextLocale);
+                            setLanguageMenuOpen(false);
+                          }}
+                          className="w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors"
+                        >
+                          <span>{nextLocale === "zh" ? t("common.chinese") : t("common.english")}</span>
+                          {locale === nextLocale && <Check size={14} className="text-gray-900" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    setAvatarOpen(false);
+                    setLanguageMenuOpen(false);
+                    logout();
+                  }}
+                  className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-xl mx-auto transition-colors"
+                >
+                  <LogOut size={14} />
+                  {t("common.signOut")}
+                </button>
               </div>
-              <div className="h-px bg-gray-100 mx-2 mb-1" />
-              <button
-                onClick={() => { setAvatarOpen(false); logout(); }}
-                className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-xl mx-auto transition-colors"
-              >
-                <LogOut size={14} />
-                Sign out
-              </button>
             </div>
           )}
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-10">
-        {/* Sessions list */}
         <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-              Cloud Browsers
+              {t("sessions.title")}
               {sessions.length > 0 && (
                 <span className="ml-1.5 normal-case font-normal">
-                  ({sessions.length}/{user?.maxSessions ?? 5})
+                  {t("sessions.count", { current: sessions.length, max: user?.maxSessions ?? 5 })}
                 </span>
               )}
             </h2>
@@ -211,7 +255,7 @@ export default function SessionsPage() {
               className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-xs font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
             >
               <Plus size={13} />
-              New Browser
+              {t("sessions.newBrowser")}
             </button>
           </div>
 
@@ -224,8 +268,8 @@ export default function SessionsPage() {
               <div className="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
                 <Monitor size={24} className="text-gray-300" />
               </div>
-              <p className="text-sm font-medium text-gray-400">No browsers yet</p>
-              <p className="text-xs text-gray-300 mt-1">Create one above to get started</p>
+              <p className="text-sm font-medium text-gray-400">{t("sessions.noBrowsers")}</p>
+              <p className="text-xs text-gray-300 mt-1">{t("sessions.noBrowsersHint")}</p>
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -239,70 +283,62 @@ export default function SessionsPage() {
                       : "bg-white border-gray-200 shadow-gray-300/40 hover:shadow-gray-300/50"
                   )}
                 >
-                  {/* Icon */}
-                  <div className={clsx(
-                    "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm",
-                    session.status === "stopped" || session.status === "stopping"
-                      ? "bg-gray-200"
-                      : "bg-gradient-to-br " + getBrowserGradient(session.name)
-                  )}>
-                    <Globe size={17} className={clsx(
-                      "drop-shadow-sm",
+                  <div
+                    className={clsx(
+                      "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm",
                       session.status === "stopped" || session.status === "stopping"
-                        ? "text-gray-400"
-                        : "text-white"
-                    )} />
+                        ? "bg-gray-200"
+                        : "bg-gradient-to-br " + getBrowserGradient(session.name)
+                    )}
+                  >
+                    <Globe
+                      size={17}
+                      className={clsx(
+                        "drop-shadow-sm",
+                        session.status === "stopped" || session.status === "stopping" ? "text-gray-400" : "text-white"
+                      )}
+                    />
                   </div>
 
-                  {/* Name + ID */}
                   <div
                     className={clsx(
                       "min-w-0 w-48 shrink-0",
                       session.status === "running" && "cursor-pointer"
                     )}
-                    onClick={() =>
-                      session.status === "running" &&
-                      window.open(`/sessions/${session.id}`, "_blank")
-                    }
+                    onClick={() => session.status === "running" && window.open(`/sessions/${session.id}`, "_blank")}
                   >
                     <div className="flex items-center gap-1.5">
                       <p className="text-sm font-semibold text-gray-900 truncate">
-                        {session.name ?? "Unnamed browser"}
+                        {session.name ?? t("common.unnamedBrowser")}
                       </p>
                       {session.status === "running" && (
                         <ExternalLink size={11} className="text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
                       )}
                     </div>
-                    <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">
-                      {session.id.slice(0, 8)}…
-                    </p>
+                    <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{session.id.slice(0, 8)}…</p>
                   </div>
 
-                  {/* Metadata columns */}
                   <div className="flex-1 grid grid-cols-3 gap-4 min-w-0">
                     <div>
-                      <p className="text-xs text-gray-400 mb-0.5">Created</p>
-                      <p className="text-xs text-gray-700 truncate">{formatDate(session.createdAt)}</p>
+                      <p className="text-xs text-gray-400 mb-0.5">{t("sessions.created")}</p>
+                      <p className="text-xs text-gray-700 truncate">{formatDateTime(session.createdAt)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-400 mb-0.5">Last active</p>
-                      <p className="text-xs text-gray-700 truncate">{formatDate(session.lastActiveAt)}</p>
+                      <p className="text-xs text-gray-400 mb-0.5">{t("sessions.lastActive")}</p>
+                      <p className="text-xs text-gray-700 truncate">{formatDateTime(session.lastActiveAt)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-400 mb-0.5">Container</p>
+                      <p className="text-xs text-gray-400 mb-0.5">{t("sessions.container")}</p>
                       {session.status === "stopped" || session.status === "stopping" ? (
-                        <p className="text-xs text-gray-400 italic">Disabled</p>
+                        <p className="text-xs text-gray-400 italic">{t("sessions.disabled")}</p>
                       ) : (
                         <p className="text-xs text-gray-500 font-mono truncate">
-                          {session.containerName
-                            ? session.containerName.replace("steelyard-session-", "")
-                            : "—"}
+                          {session.containerName ? session.containerName.replace("steelyard-session-", "") : "—"}
                         </p>
                       )}
                     </div>
                   </div>
 
-                  {/* Status + actions */}
                   <div className="flex items-center gap-2 shrink-0">
                     {session.status !== "running" && session.status !== "stopping" && session.status !== "stopped" && (
                       <span
@@ -312,11 +348,10 @@ export default function SessionsPage() {
                         )}
                       >
                         <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
-                        {session.status}
+                        {getSessionStatusLabel(locale, session.status)}
                       </span>
                     )}
 
-                    {/* More menu */}
                     <div className="relative">
                       <button
                         onClick={(e) => {
@@ -324,7 +359,7 @@ export default function SessionsPage() {
                           setOpenMoreMenuId(openMoreMenuId === session.id ? null : session.id);
                         }}
                         className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                        title="More options"
+                        title={t("sessions.moreOptions")}
                       >
                         <MoreHorizontal size={15} />
                       </button>
@@ -335,22 +370,28 @@ export default function SessionsPage() {
                         >
                           {session.status === "running" && (
                             <button
-                              onClick={() => { setOpenMoreMenuId(null); stopMutation.mutate(session.id); }}
+                              onClick={() => {
+                                setOpenMoreMenuId(null);
+                                stopMutation.mutate(session.id);
+                              }}
                               disabled={stopMutation.isPending && stopMutation.variables === session.id}
                               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
                             >
                               <Pause size={13} />
-                              Disable
+                              {t("sessions.disable")}
                             </button>
                           )}
                           {(session.status === "stopped" || session.status === "error") && (
                             <button
-                              onClick={() => { setOpenMoreMenuId(null); startMutation.mutate(session.id); }}
+                              onClick={() => {
+                                setOpenMoreMenuId(null);
+                                startMutation.mutate(session.id);
+                              }}
                               disabled={startMutation.isPending && startMutation.variables === session.id}
                               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
                             >
                               <Play size={13} />
-                              Resume
+                              {t("sessions.resume")}
                             </button>
                           )}
                           <button
@@ -361,7 +402,7 @@ export default function SessionsPage() {
                             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
                           >
                             <Trash2 size={13} />
-                            Delete
+                            {t("sessions.delete")}
                           </button>
                         </div>
                       )}
@@ -374,44 +415,50 @@ export default function SessionsPage() {
         </div>
       </main>
 
-      {/* New browser modal */}
       {newBrowserModalOpen && (
         <div
           className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
-          onClick={() => { setNewBrowserModalOpen(false); setNewSessionName(""); setCreateError(""); }}
+          onClick={() => {
+            setNewBrowserModalOpen(false);
+            setNewSessionName("");
+            setCreateError("");
+          }}
         >
           <div
             className="bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 w-80 mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-gray-900 mb-4">New Browser</h3>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4">{t("sessions.newBrowserModalTitle")}</h3>
             <input
               type="text"
               value={newSessionName}
-              onChange={(e) => { setNewSessionName(e.target.value); setCreateError(""); }}
+              onChange={(e) => {
+                setNewSessionName(e.target.value);
+                setCreateError("");
+              }}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-              placeholder="Browser name"
+              placeholder={t("sessions.browserNamePlaceholder")}
               autoFocus
               className={clsx(
                 "w-full px-3.5 py-2.5 bg-gray-50 border rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:border-transparent transition-colors",
-                nameError
-                  ? "border-red-200 focus:ring-red-400/20"
-                  : "border-gray-200 focus:ring-gray-900/10"
+                nameError ? "border-red-200 focus:ring-red-400/20" : "border-gray-200 focus:ring-gray-900/10"
               )}
               disabled={createMutation.isPending}
             />
             {(nameError || (createError && !nameError)) && (
               <p className="mt-1.5 text-xs text-red-500">{nameError || createError}</p>
             )}
-            {createMutation.isPending && (
-              <p className="mt-1.5 text-xs text-gray-400">Starting cloud browser, this may take up to 30 seconds…</p>
-            )}
+            {createMutation.isPending && <p className="mt-1.5 text-xs text-gray-400">{t("sessions.startingHint")}</p>}
             <div className="flex gap-2 justify-end mt-4">
               <button
-                onClick={() => { setNewBrowserModalOpen(false); setNewSessionName(""); setCreateError(""); }}
+                onClick={() => {
+                  setNewBrowserModalOpen(false);
+                  setNewSessionName("");
+                  setCreateError("");
+                }}
                 className="px-3.5 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={handleCreate}
@@ -419,14 +466,13 @@ export default function SessionsPage() {
                 className="px-3.5 py-2 text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {createMutation.isPending ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
-                {createMutation.isPending ? "Starting…" : "Create"}
+                {createMutation.isPending ? t("sessions.starting") : t("common.create")}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Delete confirmation modal */}
       {deleteConfirmModalId && (
         <div
           className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
@@ -436,16 +482,14 @@ export default function SessionsPage() {
             className="bg-white rounded-2xl shadow-2xl border border-gray-100 p-6 w-80 mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-gray-900 mb-1">Delete browser?</h3>
-            <p className="text-xs text-gray-400 mb-5">
-              This will permanently delete the browser and all its data. This action cannot be undone.
-            </p>
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">{t("sessions.deleteBrowserTitle")}</h3>
+            <p className="text-xs text-gray-400 mb-5">{t("sessions.deleteBrowserHint")}</p>
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setDeleteConfirmModalId(null)}
                 className="px-3.5 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => deleteMutation.mutate(deleteConfirmModalId)}
@@ -453,7 +497,7 @@ export default function SessionsPage() {
                 className="px-3.5 py-2 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {deleteMutation.isPending && <Loader2 size={11} className="animate-spin" />}
-                Delete
+                {t("sessions.delete")}
               </button>
             </div>
           </div>

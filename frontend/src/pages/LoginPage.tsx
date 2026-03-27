@@ -2,9 +2,11 @@ import { useState, FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext.tsx";
 import { Monitor } from "lucide-react";
+import { useI18n } from "../i18n/I18nContext.tsx";
 
 export default function LoginPage() {
   const { login, user } = useAuth();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,7 +28,7 @@ export default function LoginPage() {
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data
-          ?.error ?? "Login failed";
+          ?.error ?? t("login.loginFailed");
       setError(msg);
     } finally {
       setIsPending(false);
@@ -41,11 +43,11 @@ export default function LoginPage() {
             <Monitor size={22} className="text-white" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">SteelYard</h1>
-          <p className="text-sm text-gray-500 mt-1">Cloud browser management</p>
+          <p className="text-sm text-gray-500 mt-1">{t("login.subtitle")}</p>
         </div>
 
         <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 p-8">
-          <h2 className="text-lg font-semibold text-gray-800 mb-6">Sign in to your account</h2>
+          <h2 className="text-lg font-semibold text-gray-800 mb-6">{t("login.title")}</h2>
 
           {error && (
             <div className="mb-5 px-4 py-3 bg-red-50 rounded-xl text-sm text-red-600">
@@ -56,7 +58,7 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                Email
+                {t("common.email")}
               </label>
               <input
                 type="email"
@@ -70,7 +72,7 @@ export default function LoginPage() {
 
             <div>
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                Password
+                {t("common.password")}
               </label>
               <input
                 type="password"
@@ -87,14 +89,14 @@ export default function LoginPage() {
               disabled={isPending}
               className="w-full py-2.5 px-4 bg-gray-900 text-white text-sm font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm mt-2"
             >
-              {isPending ? "Signing in…" : "Sign in"}
+              {isPending ? t("login.submitting") : t("login.submit")}
             </button>
           </form>
 
           <p className="mt-5 text-sm text-center text-gray-400">
-            No account?{" "}
+            {t("login.noAccount")}{" "}
             <Link to="/register" className="text-gray-700 font-medium hover:text-gray-900 transition-colors">
-              Create one
+              {t("login.createOne")}
             </Link>
           </p>
         </div>
