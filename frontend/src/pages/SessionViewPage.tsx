@@ -147,9 +147,9 @@ type SidebarTab = "details" | "logs" | "devtools";
 
 function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex flex-col gap-0.5 py-2 border-b border-gray-800">
+    <div className="flex flex-col gap-0.5 py-2.5 border-b border-gray-100">
       <span className="text-xs text-gray-500">{label}</span>
-      <span className={clsx("text-xs text-gray-300 break-all", mono && "font-mono")}>{value}</span>
+      <span className={clsx("text-xs text-gray-700 break-all", mono && "font-mono")}>{value}</span>
     </div>
   );
 }
@@ -211,12 +211,12 @@ function CodeBlock({ code }: { code: string }) {
 
   return (
     <div className="relative group mt-2">
-      <pre className="bg-gray-950 text-gray-300 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre leading-relaxed border border-gray-800">
+      <pre className="bg-slate-50 text-gray-800 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre leading-relaxed border border-slate-200">
         {code}
       </pre>
       <button
         onClick={copy}
-        className="absolute top-2 right-2 p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors opacity-0 group-hover:opacity-100"
+        className="absolute top-2 right-2 p-1.5 rounded bg-white/90 hover:bg-white text-gray-500 hover:text-gray-900 border border-slate-200 transition-colors opacity-0 group-hover:opacity-100"
         title={t("sessionView.connect.copy")}
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
@@ -238,7 +238,7 @@ function PlatformContent({
 
   if (platform === "openclaw") {
     return (
-      <div className="space-y-4 text-sm text-gray-300">
+      <div className="space-y-4 text-sm text-gray-700">
         <p>{t("sessionView.connect.openclawIntro")}</p>
         <div>
           <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
@@ -255,7 +255,7 @@ function PlatformContent({
 
   if (platform === "claude-code") {
     return (
-      <div className="space-y-4 text-sm text-gray-300">
+      <div className="space-y-4 text-sm text-gray-700">
         <p>{t("sessionView.connect.claudeIntro")}</p>
         <div>
           <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
@@ -274,7 +274,7 @@ function PlatformContent({
 
   if (platform === "cursor") {
     return (
-      <div className="space-y-4 text-sm text-gray-300">
+      <div className="space-y-4 text-sm text-gray-700">
         <p>{t("sessionView.connect.cursorIntro")}</p>
         <div>
           <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
@@ -292,7 +292,7 @@ function PlatformContent({
   }
 
   return (
-    <div className="space-y-4 text-sm text-gray-300">
+    <div className="space-y-4 text-sm text-gray-700">
       <p>{t("sessionView.connect.customIntro")}</p>
       <div>
         <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.sessionIdLabel")}</p>
@@ -332,34 +332,34 @@ function ConnectAgentModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/18 backdrop-blur-md"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-gray-900 border border-gray-800 rounded-xl shadow-2xl w-full max-w-3xl mx-4 flex flex-col max-h-[80vh]">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800 shrink-0">
+      <div className="bg-white border border-slate-300 rounded-2xl shadow-[0_24px_70px_-24px_rgba(15,23,42,0.4)] ring-1 ring-slate-200/80 w-full max-w-3xl mx-4 flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
           <div>
-            <h2 className="text-sm font-semibold text-gray-100">{t("sessionView.connect.title")}</h2>
+            <h2 className="text-sm font-semibold text-gray-900">{t("sessionView.connect.title")}</h2>
             <p className="text-xs text-gray-500 mt-0.5">{t("sessionView.connect.subtitle")}</p>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-slate-100 transition-colors"
           >
             <X size={16} />
           </button>
         </div>
 
         <div className="flex flex-1 min-h-0">
-          <div className="w-40 border-r border-gray-800 py-3 shrink-0">
+          <div className="w-40 border-r border-slate-100 py-3 shrink-0 bg-slate-50/70 rounded-l-2xl">
             {platforms.map((p) => (
               <button
                 key={p.id}
                 onClick={() => setPlatform(p.id)}
                 className={clsx(
                   "w-full text-left px-4 py-2.5 text-xs font-medium transition-colors",
-                  platform === p.id ? "text-gray-100 bg-gray-800" : "text-gray-500 hover:text-gray-300 hover:bg-gray-800/50"
+                  platform === p.id ? "text-gray-900 bg-white" : "text-gray-500 hover:text-gray-900 hover:bg-white/70"
                 )}
               >
                 {p.label}
@@ -440,7 +440,7 @@ function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessi
       <button
         onClick={openDevTools}
         disabled={!sessionToken || !devtoolsWsPath}
-        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 text-xs font-medium transition-colors"
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors shadow-sm"
       >
         <ExternalLink size={13} />
         {t("sessionView.devtools.open")}
@@ -486,7 +486,7 @@ function LogsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionTo
         <pre key={log.id} className="mb-1 whitespace-pre-wrap break-all leading-relaxed">
           <span className="text-gray-600">{formatTime(log.timestamp)}</span>{" "}
           <span className={clsx(LOG_TYPE_COLOR[log.type] ?? "text-gray-400")}>[{log.type}]</span>{" "}
-          <span className="text-gray-300">{formatLogMessage(log)}</span>
+          <span className="text-gray-700">{formatLogMessage(log)}</span>
         </pre>
       ))}
       <div ref={bottomRef} />
@@ -549,23 +549,23 @@ export default function SessionViewPage() {
   ];
 
   return (
-    <div className="flex flex-col h-screen bg-gray-950">
-      <header className="bg-gray-900 border-b border-gray-800 px-4 py-2.5 flex items-center gap-3 shrink-0">
-        <div className="w-6 h-6 bg-gray-700 rounded-lg flex items-center justify-center shrink-0">
-          <Monitor size={13} className="text-gray-300" />
+    <div className="flex flex-col h-screen bg-slate-100">
+      <header className="bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-3 flex items-center gap-3 shrink-0 shadow-sm">
+        <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
+          <Monitor size={13} className="text-white" />
         </div>
 
         <div className="flex-1 min-w-0">
-          <h1 className="text-sm font-semibold text-gray-100 truncate leading-tight">
+          <h1 className="text-sm font-semibold text-gray-900 truncate leading-tight">
             {session.name ?? t("common.unnamedBrowser")}
           </h1>
-          <p className="text-xs text-gray-500 truncate font-mono">{session.id}</p>
+          <p className="text-xs text-gray-400 truncate font-mono">{session.id}</p>
         </div>
 
         {session.status === "running" && sessionToken ? (
           <button
             onClick={() => setConnectModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium transition-colors shrink-0"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-900 hover:bg-gray-800 text-white text-xs font-medium transition-colors shrink-0 shadow-sm"
           >
             <Plug size={12} />
             {t("sessionView.connectAgent")}
@@ -584,27 +584,27 @@ export default function SessionViewPage() {
       </header>
 
       <div className="flex flex-1 min-h-0">
-        <div className="flex-1 bg-gray-950 relative">
+        <div className="flex-1 bg-white relative shadow-inner">
           {session.status === "creating" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-              <div className="w-12 h-12 bg-gray-800 rounded-2xl flex items-center justify-center">
-                <Loader2 size={22} className="animate-spin text-gray-400" />
+              <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center border border-slate-200">
+                <Loader2 size={22} className="animate-spin text-gray-500" />
               </div>
               <div className="text-center">
-                <p className="text-sm font-medium text-gray-300">{t("sessionView.startingTitle")}</p>
-                <p className="text-xs text-gray-600 mt-1">{t("sessionView.startingHint")}</p>
+                <p className="text-sm font-medium text-gray-900">{t("sessionView.startingTitle")}</p>
+                <p className="text-xs text-gray-500 mt-1">{t("sessionView.startingHint")}</p>
               </div>
             </div>
           )}
 
           {session.status === "error" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-              <div className="w-12 h-12 bg-red-950 rounded-2xl flex items-center justify-center">
-                <AlertCircle size={22} className="text-red-400" />
+              <div className="w-12 h-12 bg-red-50 rounded-2xl flex items-center justify-center border border-red-100">
+                <AlertCircle size={22} className="text-red-500" />
               </div>
               <div className="text-center">
-                <p className="text-sm font-medium text-gray-300">{t("sessionView.startFailed")}</p>
-                <Link to="/sessions" className="text-xs text-gray-500 hover:text-gray-300 transition-colors mt-1 block">
+                <p className="text-sm font-medium text-gray-900">{t("sessionView.startFailed")}</p>
+                <Link to="/sessions" className="text-xs text-gray-500 hover:text-gray-900 transition-colors mt-1 block">
                   {t("sessionView.backToBrowsers")}
                 </Link>
               </div>
@@ -613,17 +613,17 @@ export default function SessionViewPage() {
 
           {session.status === "running" && tokenError && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-              <div className="w-12 h-12 bg-amber-950 rounded-2xl flex items-center justify-center">
-                <AlertCircle size={22} className="text-amber-400" />
+              <div className="w-12 h-12 bg-amber-50 rounded-2xl flex items-center justify-center border border-amber-100">
+                <AlertCircle size={22} className="text-amber-500" />
               </div>
               <div className="text-center">
-                <p className="text-sm font-medium text-gray-300">{tokenError}</p>
+                <p className="text-sm font-medium text-gray-900">{tokenError}</p>
                 <button
                   onClick={() => {
                     setTokenError("");
                     sessionsApi.getToken(id!).then((res) => setSessionToken(res.data.token)).catch(() => setTokenError(t("sessionView.tokenFailed")));
                   }}
-                  className="inline-flex items-center gap-1.5 mt-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                  className="inline-flex items-center gap-1.5 mt-2 text-xs text-gray-500 hover:text-gray-900 transition-colors"
                 >
                   <RefreshCw size={11} />
                   {t("common.retry")}
@@ -634,7 +634,7 @@ export default function SessionViewPage() {
 
           {session.status === "running" && !tokenError && !sessionToken && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <Loader2 size={22} className="animate-spin text-gray-600" />
+              <Loader2 size={22} className="animate-spin text-gray-400" />
             </div>
           )}
 
@@ -653,14 +653,14 @@ export default function SessionViewPage() {
             <div className="absolute bottom-3 right-3 flex items-center gap-1.5">
               <button
                 onClick={() => setIframeKey((k) => k + 1)}
-                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/90 hover:bg-white text-gray-500 hover:text-gray-900 border border-slate-200 backdrop-blur-sm transition-colors shadow-sm"
                 title={t("sessionView.reloadBrowser")}
               >
                 <RefreshCw size={14} />
               </button>
               <button
                 onClick={() => iframeRef.current?.requestFullscreen()}
-                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/90 hover:bg-white text-gray-500 hover:text-gray-900 border border-slate-200 backdrop-blur-sm transition-colors shadow-sm"
                 title={t("sessionView.fullscreen")}
               >
                 <Maximize2 size={14} />
@@ -669,15 +669,15 @@ export default function SessionViewPage() {
           )}
         </div>
 
-        <aside className="w-96 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
-          <div className="flex border-b border-gray-800 shrink-0">
+        <aside className="w-96 bg-white border-l border-slate-200 flex flex-col shrink-0 shadow-[-10px_0_30px_-24px_rgba(15,23,42,0.25)]">
+          <div className="flex border-b border-slate-100 shrink-0 bg-slate-50/80">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={clsx(
                   "flex-1 py-2.5 text-xs font-medium transition-colors",
-                  activeTab === tab.id ? "text-gray-100 border-b-2 border-gray-100" : "text-gray-500 hover:text-gray-400"
+                  activeTab === tab.id ? "text-gray-900 border-b-2 border-gray-900 bg-white" : "text-gray-500 hover:text-gray-900"
                 )}
               >
                 {tab.label}

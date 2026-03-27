@@ -278,10 +278,12 @@ export default function SessionsPage() {
                   key={session.id}
                   className={clsx(
                     "group rounded-2xl border shadow-md px-5 py-4 flex items-center gap-4 hover:shadow-lg hover:border-gray-300 transition-all duration-150",
+                    session.status === "running" && "cursor-pointer",
                     session.status === "stopped"
                       ? "bg-gray-50 border-gray-200 shadow-gray-200/40 hover:shadow-gray-200/50"
                       : "bg-white border-gray-200 shadow-gray-300/40 hover:shadow-gray-300/50"
                   )}
+                  onClick={() => session.status === "running" && window.open(`/sessions/${session.id}`, "_blank")}
                 >
                   <div
                     className={clsx(
@@ -301,11 +303,7 @@ export default function SessionsPage() {
                   </div>
 
                   <div
-                    className={clsx(
-                      "min-w-0 w-48 shrink-0",
-                      session.status === "running" && "cursor-pointer"
-                    )}
-                    onClick={() => session.status === "running" && window.open(`/sessions/${session.id}`, "_blank")}
+                    className="min-w-0 w-48 shrink-0"
                   >
                     <div className="flex items-center gap-1.5">
                       <p className="text-sm font-semibold text-gray-900 truncate">
@@ -339,7 +337,7 @@ export default function SessionsPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
                     {session.status !== "running" && session.status !== "stopping" && session.status !== "stopped" && (
                       <span
                         className={clsx(
