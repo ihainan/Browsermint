@@ -34,11 +34,25 @@ export async function createAndStartContainer(
       "LOG_STORAGE_ENABLED=false",
       "DISABLE_CHROME_SANDBOX=true",
       "CHROME_HEADLESS=false",
+      // Load a minimal Chrome extension that overrides navigator.credentials at
+      // document_start (world: MAIN) — the only reliable way to prevent Google's
+      // passkey page from hanging. CSS flags alone (--disable-features=WebAuthentication)
+      // are insufficient because Chrome still attempts OS-level passkey dialogs
+      // that can never appear inside a container, blocking "try another way" too.
+      "CHROME_ARGS=--load-extension=/tmp/disable-passkeys --disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain",
     ],
-    // Start Xvfb before the entrypoint so headful Chrome has a display to connect to.
-    // The image sets DISPLAY=:10 but never actually launches the X server.
+    // Start Xvfb, create the disable-passkeys extension, then run the entrypoint.
     Entrypoint: ["/bin/sh", "-c"],
-    Cmd: ["Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 2 && exec /app/api/entrypoint.sh"],
+    Cmd: [
+      [
+        "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &",
+        "mkdir -p /tmp/disable-passkeys &&",
+        `printf '%s' '{"manifest_version":3,"name":"Disable Passkeys","version":"1.0","content_scripts":[{"matches":["<all_urls>"],"js":["content.js"],"run_at":"document_start","world":"MAIN","all_frames":true}]}' > /tmp/disable-passkeys/manifest.json &&`,
+        `printf '%s' 'try{Object.defineProperty(window,"PublicKeyCredential",{value:undefined,writable:false,configurable:false});}catch(e){}if(navigator.credentials){navigator.credentials.get=()=>Promise.reject(new DOMException("Operation not allowed","NotAllowedError"));}' > /tmp/disable-passkeys/content.js &&`,
+        "sleep 2 &&",
+        "exec /app/api/entrypoint.sh",
+      ].join(" "),
+    ],
     HostConfig: {
       NetworkMode: config.DOCKER_NETWORK_NAME,
       // Phase 2: Memory: 2 * 1024 * 1024 * 1024, NanoCpus: 2e9
