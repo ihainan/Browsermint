@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
-import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2 } from "lucide-react";
+import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Plug, ExternalLink } from "lucide-react";
 import clsx from "clsx";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
@@ -217,6 +217,206 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
   );
 }
 
+// ─── Connect Agent Modal ──────────────────────────────────────────────────────
+
+type AgentPlatform = "openclaw" | "claude-code" | "cursor" | "custom";
+
+const PLATFORMS: { id: AgentPlatform; label: string }[] = [
+  { id: "openclaw",    label: "OpenClaw" },
+  { id: "claude-code", label: "Claude Code" },
+  { id: "cursor",      label: "Cursor" },
+  { id: "custom",      label: "Custom / API" },
+];
+
+function CodeBlock({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="relative group mt-2">
+      <pre className="bg-gray-950 text-gray-300 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre leading-relaxed border border-gray-800">
+        {code}
+      </pre>
+      <button
+        onClick={copy}
+        className="absolute top-2 right-2 p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors opacity-0 group-hover:opacity-100"
+        title="Copy"
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+    </div>
+  );
+}
+
+function PlatformContent({
+  platform,
+  cdpUrl,
+  sessionId,
+}: {
+  platform: AgentPlatform;
+  cdpUrl: string;
+  sessionId: string;
+}) {
+  if (platform === "openclaw") {
+    return (
+      <div className="space-y-4 text-sm text-gray-300">
+        <p>在 OpenClaw 中，将此浏览器会话配置为远程 CDP 浏览器。</p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">CDP WebSocket 地址</p>
+          <CodeBlock code={cdpUrl} />
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">在 OpenClaw 配置中设置</p>
+          <CodeBlock
+            code={`browser:\n  type: cdp\n  endpoint: "${cdpUrl}"`}
+          />
+        </div>
+        <p className="text-xs text-gray-500">
+          会话在浏览器窗口保持活跃期间持续有效。Token 随会话刷新而更新，请确保在 Agent 启动前获取最新的 CDP 地址。
+        </p>
+      </div>
+    );
+  }
+
+  if (platform === "claude-code") {
+    return (
+      <div className="space-y-4 text-sm text-gray-300">
+        <p>通过 MCP 将此浏览器接入 Claude Code，让 Claude 可以直接操控浏览器。</p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">CDP WebSocket 地址</p>
+          <CodeBlock code={cdpUrl} />
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">在 <code className="text-gray-300">.claude/settings.json</code> 中添加 MCP 服务器</p>
+          <CodeBlock
+            code={`{\n  "mcpServers": {\n    "browser": {\n      "command": "npx",\n      "args": ["@playwright/mcp"],\n      "env": {\n        "CDP_ENDPOINT": "${cdpUrl}"\n      }\n    }\n  }\n}`}
+          />
+        </div>
+        <p className="text-xs text-gray-500">
+          需要安装 <code className="text-gray-300">@playwright/mcp</code>。此 Token 为临时凭证，每次会话重启后需重新获取。
+        </p>
+      </div>
+    );
+  }
+
+  if (platform === "cursor") {
+    return (
+      <div className="space-y-4 text-sm text-gray-300">
+        <p>在 Cursor 中通过 MCP 连接此浏览器，让 AI 具备浏览器操控能力。</p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">CDP WebSocket 地址</p>
+          <CodeBlock code={cdpUrl} />
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">在 Cursor 设置 → MCP 中添加</p>
+          <CodeBlock
+            code={`{\n  "mcpServers": {\n    "browser": {\n      "command": "npx",\n      "args": ["@playwright/mcp"],\n      "env": {\n        "CDP_ENDPOINT": "${cdpUrl}"\n      }\n    }\n  }\n}`}
+          />
+        </div>
+        <p className="text-xs text-gray-500">
+          配置完成后重启 Cursor，在对话中即可要求 AI 控制浏览器执行操作。
+        </p>
+      </div>
+    );
+  }
+
+  // custom
+  return (
+    <div className="space-y-4 text-sm text-gray-300">
+      <p>通过 CDP（Chrome DevTools Protocol）直接接入此浏览器会话。</p>
+      <div>
+        <p className="text-xs text-gray-500 mb-1">Session ID</p>
+        <CodeBlock code={sessionId} />
+      </div>
+      <div>
+        <p className="text-xs text-gray-500 mb-1">CDP WebSocket 地址</p>
+        <CodeBlock code={cdpUrl} />
+      </div>
+      <div>
+        <p className="text-xs text-gray-500 mb-1">Playwright（Node.js）</p>
+        <CodeBlock
+          code={`import { chromium } from "playwright";\n\nconst browser = await chromium.connectOverCDP(\n  "${cdpUrl}"\n);`}
+        />
+      </div>
+      <div>
+        <p className="text-xs text-gray-500 mb-1">Playwright（Python）</p>
+        <CodeBlock
+          code={`from playwright.async_api import async_playwright\n\nasync with async_playwright() as p:\n    browser = await p.chromium.connect_over_cdp(\n        "${cdpUrl}"\n    )`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ConnectAgentModal({
+  session,
+  sessionToken,
+  onClose,
+}: {
+  session: Session;
+  sessionToken: string;
+  onClose: () => void;
+}) {
+  const [platform, setPlatform] = useState<AgentPlatform>("openclaw");
+  const cdpUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-gray-900 border border-gray-800 rounded-xl shadow-2xl w-full max-w-3xl mx-4 flex flex-col max-h-[80vh]">
+        {/* Modal Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800 shrink-0">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-100">Connect Agent</h2>
+            <p className="text-xs text-gray-500 mt-0.5">将此浏览器接入你的 AI Agent</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Modal Body */}
+        <div className="flex flex-1 min-h-0">
+          {/* Platform list */}
+          <div className="w-40 border-r border-gray-800 py-3 shrink-0">
+            {PLATFORMS.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPlatform(p.id)}
+                className={clsx(
+                  "w-full text-left px-4 py-2.5 text-xs font-medium transition-colors",
+                  platform === p.id
+                    ? "text-gray-100 bg-gray-800"
+                    : "text-gray-500 hover:text-gray-300 hover:bg-gray-800/50"
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Tutorial content */}
+          <div className="flex-1 overflow-y-auto p-5">
+            <PlatformContent
+              platform={platform}
+              cdpUrl={cdpUrl}
+              sessionId={session.id}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionToken: string | null }) {
   const [pageId, setPageId] = useState<string | null>(null);
 
@@ -248,30 +448,36 @@ function DevToolsSidebar({ sessionId, sessionToken }: { sessionId: string; sessi
     return () => ws.close();
   }, [sessionId, sessionToken]);
 
-  if (!sessionToken) {
-    return (
-      <div className="flex-1 px-3 py-4 text-xs text-gray-500">
-        DevTools will be available once the session token is ready.
-      </div>
-    );
-  }
-
-  const devtoolsWs = pageId
-    ? `//${window.location.host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${encodeURIComponent(sessionToken)}`
-    : `//${window.location.host}/ws/sessions/${sessionId}/cdp?token=${encodeURIComponent(sessionToken)}`;
-  const devtoolsSrc =
-    `/api/sessions/${sessionId}/devtools/devtools_app.html` +
-    `?token=${encodeURIComponent(sessionToken)}` +
-    `&ws=${encodeURIComponent(devtoolsWs)}` +
-    (pageId ? `&pageId=${encodeURIComponent(pageId)}` : "");
+  const openDevTools = () => {
+    if (!sessionToken) return;
+    const devtoolsWs = pageId
+      ? `//${window.location.host}/ws/sessions/${sessionId}/cdp/devtools/page/${encodeURIComponent(pageId)}?token=${encodeURIComponent(sessionToken)}`
+      : `//${window.location.host}/ws/sessions/${sessionId}/cdp?token=${encodeURIComponent(sessionToken)}`;
+    const devtoolsSrc =
+      `/api/sessions/${sessionId}/devtools/devtools_app.html` +
+      `?token=${encodeURIComponent(sessionToken)}` +
+      `&ws=${encodeURIComponent(devtoolsWs)}` +
+      (pageId ? `&pageId=${encodeURIComponent(pageId)}` : "");
+    window.open(devtoolsSrc, `devtools-${sessionId}`, "width=1280,height=800,menubar=no,toolbar=no");
+  };
 
   return (
-    <iframe
-      src={devtoolsSrc}
-      className="w-full h-full border-0 bg-white"
-      title="Chrome DevTools"
-      key={pageId ?? "default"}
-    />
+    <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4">
+      <p className="text-xs text-gray-500 text-center leading-relaxed">
+        DevTools opens in a separate window to avoid affecting the browser viewport.
+      </p>
+      <button
+        onClick={openDevTools}
+        disabled={!sessionToken}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 text-xs font-medium transition-colors"
+      >
+        <ExternalLink size={13} />
+        Open DevTools
+      </button>
+      {!pageId && sessionToken && (
+        <p className="text-xs text-gray-600">正在获取页面信息…</p>
+      )}
+    </div>
   );
 }
 
@@ -331,6 +537,8 @@ export default function SessionViewPage() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState("");
   const [activeTab, setActiveTab] = useState<SidebarTab>("details");
+  const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [iframeKey, setIframeKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const { data: sessionData, isPending } = useQuery({
@@ -392,15 +600,25 @@ export default function SessionViewPage() {
           <p className="text-xs text-gray-500 truncate font-mono">{session.id}</p>
         </div>
 
-        <span
-          className={clsx(
-            "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium shrink-0",
-            STATUS_STYLES[session.status]
-          )}
-        >
-          <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
-          {session.status}
-        </span>
+        {session.status === "running" && sessionToken ? (
+          <button
+            onClick={() => setConnectModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-medium transition-colors shrink-0"
+          >
+            <Plug size={12} />
+            Connect Agent
+          </button>
+        ) : (
+          <span
+            className={clsx(
+              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium shrink-0",
+              STATUS_STYLES[session.status]
+            )}
+          >
+            <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
+            {session.status}
+          </span>
+        )}
       </header>
 
       {/* Body */}
@@ -465,6 +683,7 @@ export default function SessionViewPage() {
 
           {browserSrc && (
             <iframe
+              key={iframeKey}
               ref={iframeRef}
               src={browserSrc}
               className="w-full h-full border-0"
@@ -473,15 +692,24 @@ export default function SessionViewPage() {
             />
           )}
 
-          {/* Fullscreen button */}
+          {/* Bottom-right controls */}
           {browserSrc && (
-            <button
-              onClick={() => iframeRef.current?.requestFullscreen()}
-              className="absolute bottom-3 right-3 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
-              title="Fullscreen"
-            >
-              <Maximize2 size={14} />
-            </button>
+            <div className="absolute bottom-3 right-3 flex items-center gap-1.5">
+              <button
+                onClick={() => setIframeKey((k) => k + 1)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
+                title="Reload browser"
+              >
+                <RefreshCw size={14} />
+              </button>
+              <button
+                onClick={() => iframeRef.current?.requestFullscreen()}
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-900/70 hover:bg-gray-900 text-gray-400 hover:text-gray-100 backdrop-blur-sm transition-colors"
+                title="Fullscreen"
+              >
+                <Maximize2 size={14} />
+              </button>
+            </div>
           )}
         </div>
 
@@ -517,6 +745,14 @@ export default function SessionViewPage() {
           )}
         </aside>
       </div>
+
+      {connectModalOpen && sessionToken && (
+        <ConnectAgentModal
+          session={session}
+          sessionToken={sessionToken}
+          onClose={() => setConnectModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

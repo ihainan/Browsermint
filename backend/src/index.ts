@@ -87,16 +87,18 @@ server.server.on("upgrade", (request, socket, head) => {
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
+function runStartupTask(name: string, task: () => Promise<void>) {
+  void task().catch((err) => {
+    server.log.warn({ err }, `${name} failed`);
+  });
+}
+
 server.addHook("onReady", async () => {
   server.log.info("Reconciling containers...");
-  await reconcileContainers().catch((err) =>
-    server.log.warn({ err }, "Container reconcile failed")
-  );
+  runStartupTask("Container reconcile", reconcileContainers);
 
   server.log.info("Pulling steel-browser image...");
-  await pullImageIfNeeded().catch((err) =>
-    server.log.warn({ err }, "Image pull failed")
-  );
+  runStartupTask("Image pull", pullImageIfNeeded);
 });
 
 server.addHook("onClose", async () => {
