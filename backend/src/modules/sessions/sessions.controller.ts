@@ -251,7 +251,7 @@ export async function handleCreateSessionToken(
   const token = jwt.sign(
     { sub: request.user.sub, sessionId: id, type: "session" },
     config.JWT_SESSION_TOKEN_SECRET,
-    { expiresIn: "15m" }
+    { expiresIn: "180d" }
   );
 
   return reply.send({ token });

@@ -317,7 +317,24 @@ function ConnectAgentModal({
   const { t } = useI18n();
   const platforms = usePlatforms();
   const [platform, setPlatform] = useState<AgentPlatform>("openclaw");
-  const cdpUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`;
+  const [cdpUrl, setCdpUrl] = useState(
+    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    sessionsApi.getDetails(session.id, sessionToken).then((res) => {
+      if (cancelled) return;
+      if (typeof res.data.websocketUrl === "string" && res.data.websocketUrl.length > 0) {
+        setCdpUrl(res.data.websocketUrl);
+      }
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session.id, sessionToken]);
 
   return (
     <div

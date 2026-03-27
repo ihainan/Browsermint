@@ -137,6 +137,22 @@ function getPublicRequestHost(
   return getFirstHeaderValue(request.headers.host) ?? "localhost";
 }
 
+function rewriteUpstreamWebSocketUrl(
+  request: Pick<FastifyRequest, "headers"> | IncomingMessage,
+  sessionId: string,
+  token: string,
+  rawWsUrl: string
+): string | null {
+  try {
+    const upstreamWsUrl = new URL(rawWsUrl);
+    const host = getPublicRequestHost(request);
+    const { ws: wsProto } = getRequestProtocols(request);
+    return `${wsProto}://${host}/ws/sessions/${sessionId}/cdp${upstreamWsUrl.pathname}?token=${encodeURIComponent(token)}`;
+  } catch {
+    return null;
+  }
+}
+
 function getDevtoolsBaseUrl(internalApiUrl: string): URL {
   const devtoolsUrl = new URL(internalApiUrl);
   devtoolsUrl.port = "9223";
@@ -287,11 +303,33 @@ export async function handleDetailsProxy(
     const sessions = Array.isArray(data) ? data : ((data as { sessions?: unknown[] })?.sessions ?? []);
     const sessionDetail = (sessions[0] ?? {}) as Record<string, unknown>;
 
-    // Rewrite the internal Docker websocketUrl to a publicly accessible proxy URL
-    if (sessionDetail.websocketUrl) {
-      const host = getPublicRequestHost(request);
-      const proto = getRequestProtocols(request).ws;
-      sessionDetail.websocketUrl = `${proto}://${host}/ws/sessions/${sessionId}/cdp`;
+    // Rewrite websocketUrl to the browser-level Chrome CDP endpoint so external
+    // agents (Playwright, Puppeteer, etc.) can connect directly via CDP.
+    // Steel Browser's own websocketUrl points to port 3000 (its internal proxy),
+    // not a valid Chrome CDP path. We fetch /json/version from the CDP port (9223)
+    // to get the real browser WebSocket path (/devtools/browser/{id}), then
+    // rewrite it through our /cdp proxy — which already handles this path correctly.
+    try {
+      const cdpBaseUrl = getDevtoolsBaseUrl(session.internalApiUrl!);
+      const versionRes = await fetch(new URL("/json/version", cdpBaseUrl), {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (versionRes.ok) {
+        const versionData = await versionRes.json() as { webSocketDebuggerUrl?: string };
+        if (typeof versionData.webSocketDebuggerUrl === "string") {
+          const publicWebsocketUrl = rewriteUpstreamWebSocketUrl(
+            request,
+            sessionId,
+            token,
+            versionData.webSocketDebuggerUrl
+          );
+          if (publicWebsocketUrl) {
+            sessionDetail.websocketUrl = publicWebsocketUrl;
+          }
+        }
+      }
+    } catch {
+      // Non-fatal: keep whatever websocketUrl Steel Browser returned
     }
 
     if (token) {
