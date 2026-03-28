@@ -8,6 +8,7 @@ import {
   waitForContainerReady,
   stopAndRemoveContainer,
 } from "../../services/docker.service.js";
+import { initCdpSession, cleanupCdpSession } from "../../services/cdp.service.js";
 import { CreateSessionBody } from "./sessions.schema.js";
 
 // ─── Create Session ───────────────────────────────────────────────────────────
@@ -46,6 +47,7 @@ export async function handleCreateSession(
   try {
     const containerInfo = await createAndStartContainer(sessionId);
     await waitForContainerReady(containerInfo.internalApiUrl);
+    await initCdpSession(sessionId, containerInfo.internalApiUrl);
 
     // Session may have been deleted by the user while container was starting
     const current = await prisma.session.findUnique({ where: { id: sessionId } });
@@ -125,6 +127,7 @@ export async function handleDeleteSession(
     data: { status: "stopping" },
   });
 
+  cleanupCdpSession(id);
   if (session.containerId) {
     await stopAndRemoveContainer(session.containerId).catch(console.error);
   }
@@ -154,6 +157,7 @@ export async function handleStopSession(
 
   await prisma.session.update({ where: { id }, data: { status: "stopping" } });
 
+  cleanupCdpSession(id);
   if (session.containerId) {
     await stopAndRemoveContainer(session.containerId).catch(console.error);
   }
@@ -207,6 +211,7 @@ export async function handleStartSession(
   try {
     const containerInfo = await createAndStartContainer(id);
     await waitForContainerReady(containerInfo.internalApiUrl);
+    await initCdpSession(id, containerInfo.internalApiUrl);
 
     const current = await prisma.session.findUnique({ where: { id } });
     if (!current || current.deletedAt) {
