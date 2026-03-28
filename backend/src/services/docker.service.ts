@@ -93,6 +93,40 @@ export async function waitForContainerReady(
   throw new Error(`Container at ${internalApiUrl} did not become ready within ${HEALTH_POLL_TIMEOUT_MS}ms`);
 }
 
+// Stop-only: preserves the container filesystem so data survives across stop/start.
+// Use this for the Stop action. Use stopAndRemoveContainer for Delete.
+export async function stopContainer(containerId: string): Promise<void> {
+  try {
+    const container = docker.getContainer(containerId);
+    await container.stop({ t: 5 }).catch(() => {});
+  } catch (err: unknown) {
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode === 404) return; // Already gone
+    throw err;
+  }
+}
+
+// Start an existing (stopped) container and return its updated network info.
+// The container's filesystem (Chrome user data, cookies, etc.) is preserved.
+export async function startExistingContainer(
+  containerId: string
+): Promise<ContainerInfo> {
+  const container = docker.getContainer(containerId);
+  await container.start();
+
+  const info = await container.inspect();
+  const networkInfo = info.NetworkSettings.Networks[config.DOCKER_NETWORK_NAME];
+  if (!networkInfo?.IPAddress) {
+    throw new Error(`Container did not get an IP on network ${config.DOCKER_NETWORK_NAME}`);
+  }
+
+  return {
+    containerId: container.id,
+    containerName: info.Name.replace(/^\//, ""),
+    internalApiUrl: `http://${networkInfo.IPAddress}:3000`,
+  };
+}
+
 export async function stopAndRemoveContainer(
   containerId: string
 ): Promise<void> {

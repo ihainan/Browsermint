@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
@@ -510,6 +510,58 @@ export default function SessionViewPage() {
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const browserContainerRef = useRef<HTMLDivElement>(null);
+
+  // Clipboard bridge: relay host clipboard ↔ browser iframe via postMessage.
+  const handleClipboardMessage = useCallback(async (event: MessageEvent) => {
+    if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
+    switch (event.data?.type) {
+      case "requestClipboardRead": {
+        let response: Record<string, unknown>;
+        try {
+          const text = await navigator.clipboard.readText();
+          response = { type: "clipboardReadResponse", text, requestId: event.data.requestId };
+        } catch {
+          response = { type: "clipboardReadResponse", error: "Failed to read clipboard", requestId: event.data.requestId };
+        }
+        iframeRef.current.contentWindow?.postMessage(response, "*");
+        break;
+      }
+      case "requestClipboardWrite": {
+        let response: Record<string, unknown>;
+        try {
+          await navigator.clipboard.writeText(event.data.text);
+          response = { type: "clipboardWriteResponse", success: true, requestId: event.data.requestId };
+        } catch {
+          response = { type: "clipboardWriteResponse", success: false, error: "Failed to write clipboard", requestId: event.data.requestId };
+        }
+        iframeRef.current.contentWindow?.postMessage(response, "*");
+        break;
+      }
+    }
+  }, []);
+
+  // Ctrl+V pressed while the browser container (not the iframe itself) is focused.
+  const handleBrowserContainerKeyDown = useCallback(async (event: KeyboardEvent) => {
+    if (!browserContainerRef.current?.contains(document.activeElement)) return;
+    const isCtrlOrCmd = event.ctrlKey || event.metaKey;
+    if (isCtrlOrCmd && (event.key === "v" || event.key === "V")) {
+      event.preventDefault();
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) iframeRef.current?.contentWindow?.postMessage({ type: "triggerPaste", text }, "*");
+      } catch { /* clipboard permission denied */ }
+    }
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("message", handleClipboardMessage);
+    document.addEventListener("keydown", handleBrowserContainerKeyDown, true);
+    return () => {
+      window.removeEventListener("message", handleClipboardMessage);
+      document.removeEventListener("keydown", handleBrowserContainerKeyDown, true);
+    };
+  }, [handleClipboardMessage, handleBrowserContainerKeyDown]);
 
   const { data: sessionData, isPending } = useQuery({
     queryKey: ["session", id],
@@ -548,7 +600,7 @@ export default function SessionViewPage() {
     );
   }
 
-  const browserSrc = sessionToken ? `/api/sessions/${id}/browser?token=${sessionToken}` : null;
+  const browserSrc = sessionToken ? `/api/sessions/${id}/browser?token=${sessionToken}&clipboardBridge=true` : null;
   const tabs: { id: SidebarTab; label: string }[] = [
     { id: "details", label: t("sessionView.tabDetails") },
     { id: "logs", label: t("sessionView.tabLogs") },
@@ -591,7 +643,7 @@ export default function SessionViewPage() {
       </header>
 
       <div className="flex flex-1 min-h-0">
-        <div className="flex-1 bg-white relative shadow-inner">
+        <div ref={browserContainerRef} className="flex-1 bg-white relative shadow-inner" tabIndex={-1} style={{ outline: "none" }}>
           {session.status === "creating" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
               <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center border border-slate-200">
@@ -653,6 +705,7 @@ export default function SessionViewPage() {
               className="w-full h-full border-0"
               title={t("sessionView.iframeTitle")}
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              allow="clipboard-read; clipboard-write"
             />
           )}
 

@@ -5,7 +5,9 @@ import { prisma } from "../../db/client.js";
 import { config } from "../../config.js";
 import {
   createAndStartContainer,
+  startExistingContainer,
   waitForContainerReady,
+  stopContainer,
   stopAndRemoveContainer,
 } from "../../services/docker.service.js";
 import { initCdpSession, cleanupCdpSession } from "../../services/cdp.service.js";
@@ -159,17 +161,15 @@ export async function handleStopSession(
 
   cleanupCdpSession(id);
   if (session.containerId) {
-    await stopAndRemoveContainer(session.containerId).catch(console.error);
+    // Stop-only: container filesystem (cookies, browser data) is preserved for resume.
+    await stopContainer(session.containerId).catch(console.error);
   }
 
   const updated = await prisma.session.update({
     where: { id },
-    data: {
-      status: "stopped",
-      containerId: null,
-      containerName: null,
-      internalApiUrl: null,
-    },
+    data: { status: "stopped" },
+    // containerId / containerName / internalApiUrl intentionally kept so
+    // handleStartSession can restart the same container.
   });
 
   return reply.send({ session: updated });
@@ -209,13 +209,19 @@ export async function handleStartSession(
   await prisma.session.update({ where: { id }, data: { status: "creating" } });
 
   try {
-    const containerInfo = await createAndStartContainer(id);
+    // If a container already exists (session was stopped, not deleted), restart it
+    // so the browser's cookies and local storage are preserved.
+    // Otherwise create a fresh container.
+    const containerInfo = session.containerId
+      ? await startExistingContainer(session.containerId)
+      : await createAndStartContainer(id);
+
     await waitForContainerReady(containerInfo.internalApiUrl);
     await initCdpSession(id, containerInfo.internalApiUrl);
 
     const current = await prisma.session.findUnique({ where: { id } });
     if (!current || current.deletedAt) {
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      await stopContainer(containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during startup" });
     }
 
