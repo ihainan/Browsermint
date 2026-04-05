@@ -204,6 +204,149 @@ function usePlatforms() {
   ];
 }
 
+// ── RichText ────────────────────────────────────────────────────────────────
+
+type RichSegment = { type: "bold" | "code" | "text"; value: string };
+
+function parseRichText(text: string): RichSegment[] {
+  const segments: RichSegment[] = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) segments.push({ type: "text", value: text.slice(last, match.index) });
+    const raw = match[0];
+    if (raw.startsWith("**")) {
+      segments.push({ type: "bold", value: raw.slice(2, -2) });
+    } else {
+      segments.push({ type: "code", value: raw.slice(1, -1) });
+    }
+    last = match.index + raw.length;
+  }
+  if (last < text.length) segments.push({ type: "text", value: text.slice(last) });
+  return segments;
+}
+
+function RichText({ text }: { text: string }) {
+  return (
+    <>
+      {parseRichText(text).map((seg, i) => {
+        if (seg.type === "bold") return <strong key={i} className="font-semibold text-indigo-600">{seg.value}</strong>;
+        if (seg.type === "code") return <code key={i} className="font-mono bg-slate-100 text-slate-700 px-1 rounded text-[0.82em]">{seg.value}</code>;
+        return <span key={i}>{seg.value}</span>;
+      })}
+    </>
+  );
+}
+
+// ── Syntax highlighting ──────────────────────────────────────────────────────
+
+type Token = { type: "key" | "string" | "number" | "boolean" | "null" | "punct" | "plain"; value: string };
+
+function tokenizeJson(code: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < code.length) {
+    // whitespace / newlines
+    if (/\s/.test(code[i])) {
+      tokens.push({ type: "plain", value: code[i++] });
+      continue;
+    }
+    // string — check if it's a key (followed by colon after closing quote)
+    if (code[i] === '"') {
+      let j = i + 1;
+      while (j < code.length && !(code[j] === '"' && code[j - 1] !== "\\")) j++;
+      const raw = code.slice(i, j + 1);
+      i = j + 1;
+      // skip whitespace to peek at next non-space char
+      let k = i;
+      while (k < code.length && code[k] === " ") k++;
+      const isKey = code[k] === ":";
+      tokens.push({ type: isKey ? "key" : "string", value: raw });
+      continue;
+    }
+    // number
+    if (/[-\d]/.test(code[i])) {
+      let j = i;
+      while (j < code.length && /[-\d.eE+]/.test(code[j])) j++;
+      tokens.push({ type: "number", value: code.slice(i, j) });
+      i = j;
+      continue;
+    }
+    // boolean / null keywords
+    const kw = ["true", "false", "null"].find((k) => code.startsWith(k, i));
+    if (kw) {
+      tokens.push({ type: kw === "null" ? "null" : "boolean", value: kw });
+      i += kw.length;
+      continue;
+    }
+    // punctuation
+    if (/[{}\[\]:,]/.test(code[i])) {
+      tokens.push({ type: "punct", value: code[i++] });
+      continue;
+    }
+    tokens.push({ type: "plain", value: code[i++] });
+  }
+  return tokens;
+}
+
+const TOKEN_COLORS: Record<Token["type"], string> = {
+  key: "text-blue-700",
+  string: "text-emerald-700",
+  number: "text-amber-600",
+  boolean: "text-purple-600",
+  null: "text-gray-400",
+  punct: "text-gray-500",
+  plain: "text-gray-800",
+};
+
+function tokenizeShell(code: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < code.length) {
+    if (/\s/.test(code[i])) { tokens.push({ type: "plain", value: code[i++] }); continue; }
+    // quoted string
+    if (code[i] === '"' || code[i] === "'") {
+      const q = code[i]; let j = i + 1;
+      while (j < code.length && code[j] !== q) j++;
+      tokens.push({ type: "string", value: code.slice(i, j + 1) });
+      i = j + 1; continue;
+    }
+    // --flag (possibly --flag=)
+    if (code[i] === "-" && code[i + 1] === "-") {
+      let j = i;
+      while (j < code.length && !/[\s"']/.test(code[j]) && code[j] !== "=") j++;
+      if (code[j] === "=") {
+        tokens.push({ type: "number", value: code.slice(i, j + 1) });
+        i = j + 1;
+      } else {
+        tokens.push({ type: "number", value: code.slice(i, j) });
+        i = j;
+      }
+      continue;
+    }
+    // plain token
+    let j = i;
+    while (j < code.length && !/\s/.test(code[j])) j++;
+    tokens.push({ type: "plain", value: code.slice(i, j) });
+    i = j;
+  }
+  return tokens;
+}
+
+function HighlightedCode({ code }: { code: string }) {
+  const trimmed = code.trimStart();
+  const isJson = trimmed.startsWith("{") || trimmed.startsWith("[");
+  const tokenize = isJson ? tokenizeJson : tokenizeShell;
+  return (
+    <>
+      {tokenize(code).map((tok, idx) => (
+        <span key={idx} className={TOKEN_COLORS[tok.type]}>{tok.value}</span>
+      ))}
+    </>
+  );
+}
+
 function CodeBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -217,7 +360,7 @@ function CodeBlock({ code }: { code: string }) {
   return (
     <div className="relative group mt-2">
       <pre className="bg-slate-50 text-gray-800 text-xs rounded-lg p-3 whitespace-pre-wrap break-all leading-relaxed border border-slate-200">
-        {code}
+        <HighlightedCode code={code} />
       </pre>
       <button
         onClick={copy}
@@ -242,62 +385,83 @@ function PlatformContent({
   const { t } = useI18n();
 
   if (platform === "openclaw") {
+    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "steelyard",\n    "profiles": {\n      "steelyard": {\n        "cdpUrl": "${cdpUrl}"\n      }\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
-        <p>{t("sessionView.connect.openclawIntro")}</p>
+        <p><RichText text={t("sessionView.connect.openclawIntro")} /></p>
         <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
-          <CodeBlock code={cdpUrl} />
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.openclawConfig")} /></p>
+          <CodeBlock code={openclawJson} />
         </div>
-        <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.openclawConfig")}</p>
-          <CodeBlock code={`browser:\n  type: cdp\n  endpoint: "${cdpUrl}"`} />
-        </div>
-        <p className="text-xs text-gray-500">{t("sessionView.connect.openclawHint")}</p>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.openclawHint")} /></p>
       </div>
     );
   }
 
   if (platform === "claude-code") {
+    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpCli = `claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
-        <p>{t("sessionView.connect.claudeIntro")}</p>
+        <p><RichText text={t("sessionView.connect.claudeIntro")} /></p>
         <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
-          <CodeBlock code={cdpUrl} />
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.claudeConfigCli")} /></p>
+          <CodeBlock code={mcpCli} />
         </div>
         <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.claudeConfig")}</p>
-          <CodeBlock
-            code={`{\n  "mcpServers": {\n    "browser": {\n      "command": "npx",\n      "args": ["@playwright/mcp"],\n      "env": {\n        "CDP_ENDPOINT": "${cdpUrl}"\n      }\n    }\n  }\n}`}
-          />
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.claudeConfig")} /></p>
+          <CodeBlock code={mcpJson} />
         </div>
-        <p className="text-xs text-gray-500">{t("sessionView.connect.claudeHint")}</p>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.claudeHint")} /></p>
       </div>
     );
   }
 
   if (platform === "cursor") {
+    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
-        <p>{t("sessionView.connect.cursorIntro")}</p>
+        <p><RichText text={t("sessionView.connect.cursorIntro")} /></p>
         <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cdpLabel")}</p>
-          <CodeBlock code={cdpUrl} />
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.cursorConfig")} /></p>
+          <CodeBlock code={mcpJson} />
         </div>
-        <div>
-          <p className="text-xs text-gray-500 mb-1">{t("sessionView.connect.cursorConfig")}</p>
-          <CodeBlock
-            code={`{\n  "mcpServers": {\n    "browser": {\n      "command": "npx",\n      "args": ["@playwright/mcp"],\n      "env": {\n        "CDP_ENDPOINT": "${cdpUrl}"\n      }\n    }\n  }\n}`}
-          />
-        </div>
-        <p className="text-xs text-gray-500">{t("sessionView.connect.cursorHint")}</p>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.cursorHint")} /></p>
       </div>
     );
   }
 
-  if (platform === "codex" || platform === "antigravity") {
-    return <div className="h-full" />;
+  if (platform === "codex") {
+    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpCli = `codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
+    return (
+      <div className="space-y-4 text-sm text-gray-700">
+        <p><RichText text={t("sessionView.connect.codexIntro")} /></p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.codexConfigCli")} /></p>
+          <CodeBlock code={mcpCli} />
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.codexConfig")} /></p>
+          <CodeBlock code={mcpJson} />
+        </div>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.codexHint")} /></p>
+      </div>
+    );
+  }
+
+  if (platform === "antigravity") {
+    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    return (
+      <div className="space-y-4 text-sm text-gray-700">
+        <p><RichText text={t("sessionView.connect.antigravityIntro")} /></p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.antigravityConfig")} /></p>
+          <CodeBlock code={mcpJson} />
+        </div>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.antigravityHint")} /></p>
+      </div>
+    );
   }
 
   return (
@@ -320,6 +484,12 @@ function ConnectAgentModal({
   const [cdpUrl, setCdpUrl] = useState(
     `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`
   );
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
