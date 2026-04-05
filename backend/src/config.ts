@@ -9,6 +9,7 @@ const envSchema = z.object({
     .string()
     .default("ghcr.io/steel-dev/steel-browser-api:latest"),
   PORT: z.coerce.number().default(24710),
+  CAPSOLVER_API_KEY: z.string().optional(),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
   NODE_ENV: z
     .enum(["development", "production", "test"])

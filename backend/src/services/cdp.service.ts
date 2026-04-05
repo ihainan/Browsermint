@@ -1,13 +1,31 @@
 import WebSocket from "ws";
+import { config } from "../config.js";
+import { solveRecaptchaEnterprise } from "./capsolver.service.js";
 
 // Script injected into every page before any page JavaScript runs.
 // Overrides the WebAuthn JS API so websites see no passkey support,
 // preventing Google's passkey challenge flow from triggering OS-level
 // dialogs that can never resolve inside a headless container.
+//
+// Strategy: replace PublicKeyCredential with a fake class whose static
+// capability-detection methods (isUserVerifyingPlatformAuthenticatorAvailable,
+// isConditionalMediationAvailable) return Promise<false>. Setting the class to
+// undefined instead would cause those calls to throw, leaving Google's
+// /challenge/pk page stuck in its loading state rather than falling through
+// to "Try another way".
 const PASSKEY_OVERRIDE_SCRIPT = `
 try {
+  function FakePublicKeyCredential() {
+    throw new DOMException('Operation not allowed', 'NotAllowedError');
+  }
+  FakePublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable =
+    function() { return Promise.resolve(false); };
+  FakePublicKeyCredential.isConditionalMediationAvailable =
+    function() { return Promise.resolve(false); };
+  FakePublicKeyCredential.getClientCapabilities =
+    function() { return Promise.resolve({}); };
   Object.defineProperty(window, 'PublicKeyCredential', {
-    value: undefined, writable: false, configurable: false
+    value: FakePublicKeyCredential, writable: false, configurable: false
   });
 } catch(e) {}
 if (navigator.credentials) {
@@ -135,6 +153,83 @@ try {
 // use addEventListener on the result.
 `.trim();
 
+// Intercepts grecaptcha.enterprise.execute() calls and routes them through
+// a CDP binding so the backend can obtain a high-score token via CapSolver.
+// Falls back to the original execute() if the binding is unavailable (e.g.
+// CAPSOLVER_API_KEY not configured).
+const RECAPTCHA_INTERCEPT_SCRIPT = `
+(function() {
+  if (window.__steelyard_captcha_patched) return;
+  window.__steelyard_captcha_patched = true;
+
+  var pending = new Map();
+
+  window.__steelyard_resolve_captcha = function(requestId, token) {
+    var p = pending.get(requestId);
+    if (p) { pending.delete(requestId); p.resolve(token); }
+  };
+
+  window.__steelyard_reject_captcha = function(requestId, err) {
+    var p = pending.get(requestId);
+    if (p) { pending.delete(requestId); p.reject(new Error(err)); }
+  };
+
+  function patchEnterprise(enterprise) {
+    if (enterprise.__steelyard_patched) return;
+    enterprise.__steelyard_patched = true;
+    var orig = enterprise.execute.bind(enterprise);
+    enterprise.execute = function(siteKey, options) {
+      var action = (options && options.action) || '';
+      var requestId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      return new Promise(function(resolve, reject) {
+        pending.set(requestId, { resolve: resolve, reject: reject });
+        try {
+          window.__steelyard_solve_captcha(JSON.stringify({
+            requestId: requestId,
+            siteKey: siteKey,
+            action: action,
+            url: location.href
+          }));
+        } catch(e) {
+          // Binding not available — fall back to original execute
+          pending.delete(requestId);
+          orig(siteKey, options).then(resolve, reject);
+        }
+      });
+    };
+  }
+
+  function patchGrecaptcha(val) {
+    if (!val) return;
+    if (val.enterprise) {
+      if (val.enterprise.execute) { patchEnterprise(val.enterprise); return; }
+      var _ent = val.enterprise;
+      Object.defineProperty(val, 'enterprise', {
+        get: function() { return _ent; },
+        set: function(ent) { _ent = ent; if (ent && ent.execute) patchEnterprise(ent); },
+        configurable: true
+      });
+      return;
+    }
+    var _enterprise;
+    Object.defineProperty(val, 'enterprise', {
+      get: function() { return _enterprise; },
+      set: function(ent) { _enterprise = ent; if (ent && ent.execute) patchEnterprise(ent); },
+      configurable: true
+    });
+  }
+
+  var _grecaptcha = window.grecaptcha;
+  Object.defineProperty(window, 'grecaptcha', {
+    get: function() { return _grecaptcha; },
+    set: function(val) { _grecaptcha = val; patchGrecaptcha(val); },
+    configurable: true
+  });
+
+  if (window.grecaptcha) patchGrecaptcha(window.grecaptcha);
+})();
+`.trim();
+
 // One persistent browser-level CDP WebSocket per session.
 const activeSessions = new Map<string, WebSocket>();
 
@@ -205,7 +300,13 @@ async function applyScriptToPage(
     pageSessionId = result.sessionId as string;
   }
 
-  const combinedScript = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT;
+  // Register CDP binding so page JS can request captcha solving from backend
+  if (config.CAPSOLVER_API_KEY) {
+    const bindingId = sendCmd(ws, "Runtime.addBinding", { name: "__steelyard_solve_captcha" }, pageSessionId);
+    await waitForResponse(ws, bindingId);
+  }
+
+  const combinedScript = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + RECAPTCHA_INTERCEPT_SCRIPT;
 
   // Register for all future document loads in this page
   const scriptId = sendCmd(
@@ -235,18 +336,40 @@ export async function initCdpSession(
   const containerIp = url.hostname;
   const cdpBase = `http://${containerIp}:9223`;
 
+  // Port 9223 is nginx proxying Chrome CDP on 127.0.0.1:9222. Chrome may not
+  // be ready immediately after the Steel Browser API (port 3000) becomes healthy,
+  // so retry until the CDP version endpoint returns valid JSON.
   let browserWsUrl: string;
-  try {
-    const versionResp = await fetch(`${cdpBase}/json/version`, { signal: AbortSignal.timeout(5000) });
-    const version = (await versionResp.json()) as Record<string, string>;
-    // The URL reported by Chrome uses internal hostname; replace with IP
-    browserWsUrl = version.webSocketDebuggerUrl.replace(
-      /^ws:\/\/[^/]+/,
-      `ws://${containerIp}:9223`
-    );
-  } catch (err) {
-    console.warn(`[cdp] Failed to get CDP version for session ${sessionId}:`, err);
-    return;
+  {
+    const CDP_RETRY_INTERVAL_MS = 2000;
+    const CDP_TIMEOUT_MS = 30_000;
+    const deadline = Date.now() + CDP_TIMEOUT_MS;
+    let lastErr: unknown;
+    let resolved = false;
+
+    while (Date.now() < deadline) {
+      try {
+        const versionResp = await fetch(`${cdpBase}/json/version`, { signal: AbortSignal.timeout(3000) });
+        if (!versionResp.ok) throw new Error(`HTTP ${versionResp.status}`);
+        const version = (await versionResp.json()) as Record<string, string>;
+        // webSocketDebuggerUrl uses port 80 (nginx internal routing); rewrite to
+        // the externally-accessible nginx CDP proxy on port 9223.
+        browserWsUrl = version.webSocketDebuggerUrl.replace(
+          /^ws:\/\/[^/]+/,
+          `ws://${containerIp}:9223`
+        );
+        resolved = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, CDP_RETRY_INTERVAL_MS));
+      }
+    }
+
+    if (!resolved) {
+      console.warn(`[cdp] Failed to get CDP version for session ${sessionId}:`, lastErr);
+      return;
+    }
   }
 
   const ws = new WebSocket(browserWsUrl);
@@ -266,6 +389,31 @@ export async function initCdpSession(
     try {
       msg = JSON.parse(data.toString());
     } catch {
+      return;
+    }
+
+    if (msg.method === "Runtime.bindingCalled" && config.CAPSOLVER_API_KEY) {
+      const params = msg.params as Record<string, unknown> | undefined;
+      const pageSessionId = msg.sessionId as string | undefined;
+      if (params?.name === "__steelyard_solve_captcha" && pageSessionId) {
+        let payload: { requestId: string; siteKey: string; action: string; url: string };
+        try {
+          payload = JSON.parse(params.payload as string);
+        } catch {
+          return;
+        }
+        solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY)
+          .then((token) => {
+            const expr = `window.__steelyard_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
+            sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
+            console.log(`[cdp] CapSolver: resolved captcha for session ${sessionId}`);
+          })
+          .catch((err: Error) => {
+            const expr = `window.__steelyard_reject_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(err.message)})`;
+            sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
+            console.warn(`[cdp] CapSolver failed for session ${sessionId}:`, err.message);
+          });
+      }
       return;
     }
 
