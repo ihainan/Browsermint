@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
+import { executeCdpCommand } from "./cdp.service.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -257,6 +258,14 @@ export async function handleBrowserProxy(
     /const\s+baseWsUrl\s*=\s*['"][^'"]+['"];/,
     `const baseWsUrl = '${publicWsUrl}';`
   );
+
+  // Inject macOS keyboard remapper: forwards Cmd+key as Ctrl+key to the remote Linux browser
+  const keyboardScript = `<script>(function(){var _r=false;function remap(e){if(_r||!e.metaKey||e.ctrlKey)return;_r=true;e.preventDefault();e.stopImmediatePropagation();(e.target||document).dispatchEvent(new e.constructor(e.type,{bubbles:e.bubbles,cancelable:e.cancelable,composed:e.composed,view:e.view||window,ctrlKey:true,metaKey:false,shiftKey:e.shiftKey,altKey:e.altKey,key:e.key,code:e.code,keyCode:e.keyCode,which:e.which,charCode:e.charCode||0,repeat:e.repeat}));_r=false;}document.addEventListener('keydown',remap,true);document.addEventListener('keyup',remap,true);})();</script>`;
+  if (html.includes('</head>')) {
+    html = html.replace('</head>', keyboardScript + '</head>');
+  } else {
+    html = keyboardScript + html;
+  }
 
   console.info("[browser-proxy] rewrote session debug HTML", {
     sessionId,
@@ -560,4 +569,168 @@ export async function handleWebSocketUpgrade(
   }).catch(() => {});
 
   proxyServer.ws(request, socket, head, { target: proxyTarget });
+}
+
+// ─── CDP Tab Management ───────────────────────────────────────────────────────
+
+interface CdpTarget {
+  targetId: string;
+  type: string;
+  title: string;
+  url: string;
+  attached?: boolean;
+}
+
+export async function handleGetTargets(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  try {
+    const result = await executeCdpCommand(sessionId, "Target.getTargets", {});
+    const targets = ((result.targetInfos ?? []) as CdpTarget[]).filter(
+      (t) => t.type === "page"
+    );
+    return reply.send({ targets });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleCreateTarget(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { url?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const url = (request.body as { url?: string })?.url ?? "chrome://newtab/";
+  try {
+    const result = await executeCdpCommand(sessionId, "Target.createTarget", { url });
+    return reply.send({ targetId: result.targetId });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleCloseTarget(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  try {
+    await executeCdpCommand(sessionId, "Target.closeTarget", { targetId });
+    return reply.send({ ok: true });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleActivateTarget(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  try {
+    await executeCdpCommand(sessionId, "Target.activateTarget", { targetId });
+    return reply.send({ ok: true });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleNavigate(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { url: string; targetId: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const { url, targetId } = request.body as { url: string; targetId: string };
+  if (!url || !targetId) return reply.status(400).send({ error: "url and targetId required" });
+
+  try {
+    const result = await executeCdpCommand(sessionId, "Page.navigate", { url }, targetId);
+    return reply.send(result);
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleGoBack(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { targetId: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const { targetId } = request.body as { targetId: string };
+  try {
+    await executeCdpCommand(sessionId, "Page.goBack", {}, targetId);
+    return reply.send({ ok: true });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleGoForward(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { targetId: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const { targetId } = request.body as { targetId: string };
+  try {
+    await executeCdpCommand(sessionId, "Page.goForward", {}, targetId);
+    return reply.send({ ok: true });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleReload(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { targetId: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const { targetId } = request.body as { targetId: string };
+  try {
+    await executeCdpCommand(sessionId, "Page.reload", {}, targetId);
+    return reply.send({ ok: true });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
 }

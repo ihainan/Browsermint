@@ -489,3 +489,29 @@ export function cleanupCdpSession(sessionId: string): void {
     activeSessions.delete(sessionId);
   }
 }
+
+export async function executeCdpCommand(
+  sessionId: string,
+  method: string,
+  params: Record<string, unknown> = {},
+  targetId?: string
+): Promise<Record<string, unknown>> {
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    throw new Error(`No active CDP session for session ${sessionId}`);
+  }
+
+  let pageSessionId: string | undefined;
+  if (targetId) {
+    const attachId = sendCmd(ws, "Target.attachToTarget", { targetId, flatten: true });
+    const attachResp = await waitForResponse(ws, attachId);
+    const res = attachResp.result as Record<string, unknown> | undefined;
+    if (!res?.sessionId) throw new Error(`Failed to attach to target ${targetId}`);
+    pageSessionId = res.sessionId as string;
+  }
+
+  const cmdId = sendCmd(ws, method, params, pageSessionId);
+  const resp = await waitForResponse(ws, cmdId, 8000);
+  if (resp.error) throw new Error(JSON.stringify(resp.error));
+  return (resp.result ?? {}) as Record<string, unknown>;
+}

@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
-import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy } from "./services/proxy.service.js";
+import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
@@ -77,6 +77,40 @@ server.get("/api/sessions/:id/devtools-target", {
       request as Parameters<typeof handleDevtoolsTargetProxy>[0],
       reply
     ),
+});
+
+// CDP tab management (session-token auth via query string)
+server.get("/api/sessions/:id/targets", {
+  handler: async (request, reply) =>
+    handleGetTargets(request as Parameters<typeof handleGetTargets>[0], reply),
+});
+server.post("/api/sessions/:id/targets", {
+  handler: async (request, reply) =>
+    handleCreateTarget(request as Parameters<typeof handleCreateTarget>[0], reply),
+});
+server.delete("/api/sessions/:id/targets/:targetId", {
+  handler: async (request, reply) =>
+    handleCloseTarget(request as Parameters<typeof handleCloseTarget>[0], reply),
+});
+server.post("/api/sessions/:id/targets/:targetId/activate", {
+  handler: async (request, reply) =>
+    handleActivateTarget(request as Parameters<typeof handleActivateTarget>[0], reply),
+});
+server.post("/api/sessions/:id/navigate", {
+  handler: async (request, reply) =>
+    handleNavigate(request as Parameters<typeof handleNavigate>[0], reply),
+});
+server.post("/api/sessions/:id/go-back", {
+  handler: async (request, reply) =>
+    handleGoBack(request as Parameters<typeof handleGoBack>[0], reply),
+});
+server.post("/api/sessions/:id/go-forward", {
+  handler: async (request, reply) =>
+    handleGoForward(request as Parameters<typeof handleGoForward>[0], reply),
+});
+server.post("/api/sessions/:id/reload", {
+  handler: async (request, reply) =>
+    handleReload(request as Parameters<typeof handleReload>[0], reply),
 });
 
 // Health check

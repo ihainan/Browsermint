@@ -74,6 +74,13 @@ export interface SteelDevtoolsTarget {
   wsPath: string | null;
 }
 
+export interface BrowserTab {
+  targetId: string;
+  type: string;
+  title: string;
+  url: string;
+}
+
 export const authApi = {
   register: (data: { username: string; email: string; password: string }) =>
     api.post<{ user: User; token: string }>("/auth/register", data),
@@ -96,4 +103,20 @@ export const sessionsApi = {
     api.get<SteelDevtoolsTarget>(`/sessions/${id}/devtools-target?token=${token}`),
   getToken: (id: string) =>
     api.post<{ token: string }>(`/sessions/${id}/token`),
+  getTargets: (id: string, token: string) =>
+    api.get<{ targets: BrowserTab[] }>(`/sessions/${id}/targets?token=${token}`),
+  createTarget: (id: string, token: string, url?: string) =>
+    api.post<{ targetId: string }>(`/sessions/${id}/targets?token=${token}`, { url }),
+  closeTarget: (id: string, token: string, targetId: string) =>
+    api.delete(`/sessions/${id}/targets/${targetId}?token=${token}`),
+  activateTarget: (id: string, token: string, targetId: string) =>
+    api.post(`/sessions/${id}/targets/${targetId}/activate?token=${token}`),
+  navigate: (id: string, token: string, data: { url: string; targetId: string }) =>
+    api.post(`/sessions/${id}/navigate?token=${token}`, data),
+  goBack: (id: string, token: string, targetId: string) =>
+    api.post(`/sessions/${id}/go-back?token=${token}`, { targetId }),
+  goForward: (id: string, token: string, targetId: string) =>
+    api.post(`/sessions/${id}/go-forward?token=${token}`, { targetId }),
+  browserReload: (id: string, token: string, targetId: string) =>
+    api.post(`/sessions/${id}/reload?token=${token}`, { targetId }),
 };
