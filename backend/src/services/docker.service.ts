@@ -38,7 +38,7 @@ export async function createAndStartContainer(
       // after the container starts (see cdp.service.ts). The --load-extension flag
       // is intentionally omitted: the Steel Browser image includes --disable-extensions
       // which silently prevents any user-loaded extension from running.
-      "CHROME_ARGS=--disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain",
+      "CHROME_ARGS=--disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain --use-gl=angle --use-angle=swiftshader",
     ],
     Entrypoint: ["/bin/sh", "-c"],
     Cmd: [
