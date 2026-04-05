@@ -336,6 +336,11 @@ export async function handleDetailsProxy(
       const host = getPublicRequestHost(request);
       const proto = getRequestProtocols(request).http;
       sessionDetail.debuggerUrl = `${proto}://${host}/api/sessions/${sessionId}/devtools/devtools_app.html?token=${encodeURIComponent(token)}`;
+
+      const decoded = jwt.decode(token) as { exp?: number } | null;
+      if (decoded?.exp) {
+        sessionDetail.tokenExpiresAt = new Date(decoded.exp * 1000).toISOString();
+      }
     }
 
     return reply.send(sessionDetail);

@@ -66,6 +66,7 @@ export interface SteelSessionDetails {
   creditsUsed?: number;
   proxy?: string;
   status?: string;
+  tokenExpiresAt?: string;
 }
 
 export interface SteelDevtoolsTarget {

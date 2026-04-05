@@ -150,11 +150,29 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
 
 type SidebarTab = "details" | "logs" | "devtools";
 
-function DetailRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function DetailRow({ label, value, mono = false, copyable = false }: { label: string; value: string; mono?: boolean; copyable?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard.writeText(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <div className="flex flex-col gap-0.5 py-2.5 border-b border-gray-100">
       <span className="text-xs text-gray-500">{label}</span>
-      <span className={clsx("text-xs text-gray-700 break-all", mono && "font-mono")}>{value}</span>
+      {copyable ? (
+        <div className="relative group mt-0.5">
+          <pre className="bg-slate-50 text-gray-700 text-xs rounded-md p-2 pr-8 whitespace-pre-wrap break-all leading-relaxed border border-slate-200 font-mono">{value}</pre>
+          <button
+            onClick={copy}
+            className="absolute top-1.5 right-1.5 p-1 rounded bg-white/90 hover:bg-white text-gray-400 hover:text-gray-700 border border-slate-200 transition-colors opacity-0 group-hover:opacity-100"
+          >
+            {copied ? <Check size={11} /> : <Copy size={11} />}
+          </button>
+        </div>
+      ) : (
+        <span className={clsx("text-xs text-gray-700 break-all", mono && "font-mono")}>{value}</span>
+      )}
     </div>
   );
 }
@@ -187,7 +205,8 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
       {details?.proxyTxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyTx")} value={formatBytes(details.proxyTxBytes)} />}
       {details?.proxyRxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyRx")} value={formatBytes(details.proxyRxBytes)} />}
       {details?.creditsUsed !== undefined && <DetailRow label={t("sessionView.details.cost")} value={String(details.creditsUsed)} />}
-      {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={details.websocketUrl} mono />}
+      {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={details.websocketUrl} copyable />}
+      {details?.tokenExpiresAt && <DetailRow label={t("sessionView.details.tokenExpiresAt")} value={formatDateTime(details.tokenExpiresAt)} />}
     </div>
   );
 }
@@ -377,15 +396,23 @@ function PlatformContent({
   platform,
   cdpUrl,
   sessionId,
+  tokenExpiresAt,
 }: {
   platform: AgentPlatform;
   cdpUrl: string;
   sessionId: string;
+  tokenExpiresAt?: string;
 }) {
   const { t } = useI18n();
 
+  const expiryLine = tokenExpiresAt ? (
+    <p className="text-xs font-medium text-amber-600">
+      {t("sessionView.connect.tokenExpiresAt")}: {tokenExpiresAt}
+    </p>
+  ) : null;
+
   if (platform === "openclaw") {
-    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "steelyard",\n    "profiles": {\n      "steelyard": {\n        "cdpUrl": "${cdpUrl}"\n      }\n    }\n  }\n}`;
+    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "steelyard",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "steelyard": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.openclawIntro")} /></p>
@@ -394,6 +421,7 @@ function PlatformContent({
           <CodeBlock code={openclawJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.openclawHint")} /></p>
+        {expiryLine}
       </div>
     );
   }
@@ -413,6 +441,7 @@ function PlatformContent({
           <CodeBlock code={mcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.claudeHint")} /></p>
+        {expiryLine}
       </div>
     );
   }
@@ -427,6 +456,7 @@ function PlatformContent({
           <CodeBlock code={mcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.cursorHint")} /></p>
+        {expiryLine}
       </div>
     );
   }
@@ -446,6 +476,7 @@ function PlatformContent({
           <CodeBlock code={mcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.codexHint")} /></p>
+        {expiryLine}
       </div>
     );
   }
@@ -460,6 +491,7 @@ function PlatformContent({
           <CodeBlock code={mcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.antigravityHint")} /></p>
+        {expiryLine}
       </div>
     );
   }
@@ -478,12 +510,13 @@ function ConnectAgentModal({
   sessionToken: string;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, formatDateTime } = useI18n();
   const platforms = usePlatforms();
   const [platform, setPlatform] = useState<AgentPlatform>("openclaw");
   const [cdpUrl, setCdpUrl] = useState(
     `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`
   );
+  const [tokenExpiresAt, setTokenExpiresAt] = useState<string | undefined>();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -499,12 +532,15 @@ function ConnectAgentModal({
       if (typeof res.data.websocketUrl === "string" && res.data.websocketUrl.length > 0) {
         setCdpUrl(res.data.websocketUrl);
       }
+      if (typeof res.data.tokenExpiresAt === "string") {
+        setTokenExpiresAt(formatDateTime(res.data.tokenExpiresAt));
+      }
     }).catch(() => {});
 
     return () => {
       cancelled = true;
     };
-  }, [session.id, sessionToken]);
+  }, [session.id, sessionToken, formatDateTime]);
 
   return (
     <div
@@ -545,7 +581,7 @@ function ConnectAgentModal({
           </div>
 
           <div className="flex-1 overflow-y-auto p-5">
-            <PlatformContent platform={platform} cdpUrl={cdpUrl} sessionId={session.id} />
+            <PlatformContent platform={platform} cdpUrl={cdpUrl} sessionId={session.id} tokenExpiresAt={tokenExpiresAt} />
           </div>
         </div>
       </div>

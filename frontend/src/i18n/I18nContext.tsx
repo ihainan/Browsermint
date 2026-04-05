@@ -112,6 +112,7 @@ const messages = {
         proxyRx: "Proxy RX",
         cost: "Cost",
         websocketUrl: "WebSocket URL",
+        tokenExpiresAt: "Token Expires",
         none: "None",
       },
       connect: {
@@ -141,6 +142,7 @@ const messages = {
         playwrightPython: "Playwright (Python)",
         customApi: "Custom / API",
         copy: "Copy",
+        tokenExpiresAt: "Token expires at",
       },
       devtools: {
         intro: "DevTools opens in a separate window to avoid affecting the browser viewport.",
@@ -248,6 +250,7 @@ const messages = {
         proxyRx: "代理接收",
         cost: "消耗",
         websocketUrl: "WebSocket 地址",
+        tokenExpiresAt: "Token 过期时间",
         none: "无",
       },
       connect: {
@@ -277,6 +280,7 @@ const messages = {
         playwrightPython: "Playwright（Python）",
         customApi: "自定义 / API",
         copy: "复制",
+        tokenExpiresAt: "Token 过期时间",
       },
       devtools: {
         intro: "DevTools 会在独立窗口中打开，以避免影响浏览器视口。",
