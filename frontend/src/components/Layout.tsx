@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { Monitor, LayoutDashboard, Key, BarChart3, LogOut, ChevronDown, Check, Copy } from "lucide-react";
+import { Monitor, LayoutDashboard, Key, LogOut, ChevronDown, Check } from "lucide-react";
 import browsermintIcon from "../assets/browsermint-icon.png";
 import clsx from "clsx";
 import { useAuth } from "../contexts/AuthContext.tsx";
@@ -30,12 +30,8 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const { locale, setLocale, t, formatDateTime } = useI18n();
 
-  const [usageOpen, setUsageOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
-  const [apiKeyCopied, setApiKeyCopied] = useState(false);
-
-  const usageRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
 
   const { data } = useQuery({
@@ -47,9 +43,6 @@ export default function Layout() {
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (usageRef.current && !usageRef.current.contains(e.target as Node)) {
-        setUsageOpen(false);
-      }
       if (userRef.current && !userRef.current.contains(e.target as Node)) {
         setUserOpen(false);
         setLanguageOpen(false);
@@ -65,6 +58,7 @@ export default function Layout() {
   const navItems = [
     { path: "/", label: t("nav.overview"), icon: LayoutDashboard, exact: true },
     { path: "/browsers", label: t("nav.browsers"), icon: Monitor, exact: false },
+    { path: "/api-key", label: t("nav.apiKey"), icon: Key, exact: true },
   ];
 
   function isNavActive(path: string, exact: boolean) {
@@ -125,80 +119,8 @@ export default function Layout() {
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* Quick access */}
+        {/* Bottom */}
         <div className="px-2 pb-3">
-          <p className="px-2 pt-2 pb-1.5 text-[11px] font-medium text-[#969493]">
-            Quick access
-          </p>
-
-          {/* API Key */}
-          <Link
-            to="/api-key"
-            className={clsx(
-              "group flex w-full items-center gap-2 rounded-sm p-2 h-8 text-sm transition-colors",
-              location.pathname === "/api-key"
-                ? "bg-[#260f170f] text-[#260f17] font-medium"
-                : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
-            )}
-          >
-            <Key size={16} strokeWidth={1.75} className="shrink-0" />
-            <span className="flex-1">{t("nav.apiKey")}</span>
-            <button
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setApiKeyCopied(true);
-                setTimeout(() => setApiKeyCopied(false), 1500);
-              }}
-              className="opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              {apiKeyCopied
-                ? <Check size={13} className="text-[#969493]" />
-                : <Copy size={13} className="text-[#969493]" />}
-            </button>
-          </Link>
-
-          {/* Usage — card-style button with shadow */}
-          <div ref={usageRef} className="relative mt-1 mb-0.5">
-            <button
-              onClick={() => setUsageOpen((o) => !o)}
-              className="w-full cursor-pointer rounded-md p-3 shadow-md ring-[0.5px] ring-black/[0.07] bg-white transition-shadow duration-150 hover:shadow-sm hover:bg-[#f6f5f5] text-left"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[13px] font-medium text-[#260f17] flex items-center gap-1">
-                  {t("sidebar.usage")}
-                  <ChevronDown
-                    size={13}
-                    className={clsx(
-                      "text-[#969493] transition-transform duration-200",
-                      usageOpen ? "rotate-0" : "-rotate-90"
-                    )}
-                  />
-                </span>
-              </div>
-            </button>
-
-            {usageOpen && (
-              <div className="absolute bottom-full left-0 mb-2 w-64 bg-white rounded-xl shadow-xl ring-[0.5px] ring-black/[0.07] p-4 z-50">
-                <p className="text-[13px] font-semibold text-[#260f17] mb-3">{t("sidebar.usage")}</p>
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-[13px] text-[#514f4f]">{t("sidebar.usageBrowsers")}</span>
-                    <span className="text-[13px] font-medium text-[#260f17]">
-                      {sessions.length} / {maxSessions}
-                    </span>
-                  </div>
-                  <div className="h-1.5 bg-[#edebeb] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-[#260f17] rounded-full transition-all"
-                      style={{ width: `${usagePct}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* User */}
           <div ref={userRef} className="relative">
             <button
@@ -236,6 +158,27 @@ export default function Layout() {
                     <p className="text-xs text-[#cac8c7] mt-0.5">
                       {t("user.joinedAt")}: {user?.createdAt ? formatDateTime(user.createdAt) : "—"}
                     </p>
+                  </div>
+                </div>
+
+                <div className="h-px bg-[#edebeb]" />
+
+                {/* Usage */}
+                <div className="px-4 py-3">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <span className="text-[12px] text-[#969493]">{t("sidebar.usageBrowsers")}</span>
+                    <span className="text-[12px] font-medium text-[#260f17]">
+                      {sessions.length} / {maxSessions}
+                    </span>
+                  </div>
+                  <div className="h-1 bg-[#edebeb] rounded-full overflow-hidden">
+                    <div
+                      className={clsx(
+                        "h-full rounded-full transition-all",
+                        usagePct >= 90 ? "bg-red-500" : usagePct >= 70 ? "bg-amber-500" : "bg-[#260f17]"
+                      )}
+                      style={{ width: `${usagePct}%` }}
+                    />
                   </div>
                 </div>
 

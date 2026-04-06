@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { config } from "../config.js";
 import { solveRecaptchaEnterprise } from "./capsolver.service.js";
+import { prisma } from "../db/client.js";
 
 // Script injected into every page before any page JavaScript runs.
 // Overrides the WebAuthn JS API so websites see no passkey support,
@@ -406,16 +407,37 @@ export async function initCdpSession(
         } catch {
           return;
         }
+        const capsolverStart = Date.now();
         solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY)
           .then((token) => {
             const expr = `window.__steelyard_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
             console.log(`[cdp] CapSolver: resolved captcha for session ${sessionId}`);
+            prisma.sessionEvent.create({
+              data: {
+                sessionId,
+                operationType: "capsolver",
+                sourceIp: null,
+                requestPath: null,
+                statusCode: 200,
+                metadata: { url: payload.url, durationMs: Date.now() - capsolverStart },
+              },
+            }).catch(() => {});
           })
           .catch((err: Error) => {
             const expr = `window.__steelyard_reject_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(err.message)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
             console.warn(`[cdp] CapSolver failed for session ${sessionId}:`, err.message);
+            prisma.sessionEvent.create({
+              data: {
+                sessionId,
+                operationType: "capsolver",
+                sourceIp: null,
+                requestPath: null,
+                statusCode: 500,
+                metadata: { url: payload.url, durationMs: Date.now() - capsolverStart, error: err.message },
+              },
+            }).catch(() => {});
           });
       }
       return;

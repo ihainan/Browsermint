@@ -1,8 +1,8 @@
 import { useState, FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext.tsx";
-import { Monitor } from "lucide-react";
 import { useI18n } from "../i18n/I18nContext.tsx";
+import browsermintIcon from "../assets/browsermint-icon.png";
 
 export default function LoginPage() {
   const { login, user } = useAuth();
@@ -14,7 +14,7 @@ export default function LoginPage() {
   const [isPending, setIsPending] = useState(false);
 
   if (user) {
-    navigate("/sessions", { replace: true });
+    navigate("/", { replace: true });
     return null;
   }
 
@@ -24,7 +24,7 @@ export default function LoginPage() {
     setIsPending(true);
     try {
       await login(email, password);
-      navigate("/sessions", { replace: true });
+      navigate("/", { replace: true });
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data
@@ -39,8 +39,8 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-100 px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-gray-900 rounded-2xl mb-4 shadow-lg">
-            <Monitor size={22} className="text-white" />
+          <div className="inline-flex items-center justify-center w-16 h-16 mb-0.5">
+            <img src={browsermintIcon} alt="Browsermint" className="w-16 h-16 object-contain" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Browsermint</h1>
           <p className="text-sm text-gray-500 mt-1">{t("login.subtitle")}</p>

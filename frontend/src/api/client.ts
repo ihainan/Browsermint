@@ -102,6 +102,7 @@ export interface EventsStats {
   dailyCounts: { date: string; count: number }[];
   hourlyDistribution: { hour: number; count: number }[];
   byOperationType: Record<string, number>;
+  capsolver: { total: number; success: number; failed: number; avgDurationMs: number | null };
 }
 
 export const sessionsApi = {

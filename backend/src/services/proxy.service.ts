@@ -174,6 +174,12 @@ function getCookieValue(cookieHeader: string | undefined, name: string): string 
   return null;
 }
 
+interface CdpListTarget {
+  id: string;
+  type: string;
+  webSocketDebuggerUrl: string;
+}
+
 async function resolveDevtoolsTarget(
   session: { internalApiUrl: string | null },
   pageId?: string | null
@@ -182,31 +188,31 @@ async function resolveDevtoolsTarget(
     return { pageId: null, wsPath: null };
   }
 
-  const inspectorUrl = new URL("/v1/devtools/inspector.html", session.internalApiUrl);
-  if (pageId) inspectorUrl.searchParams.set("pageId", pageId);
-
-  const res = await fetch(inspectorUrl, {
-    redirect: "manual",
+  // Query Chrome's CDP /json/list directly (port 9223) to get live, up-to-date targets.
+  // Steel Browser's /v1/devtools/inspector.html redirect caches the initial page ID and
+  // becomes stale after navigation, causing "debugging connection was closed" in DevTools.
+  const devtoolsBase = getDevtoolsBaseUrl(session.internalApiUrl);
+  const listRes = await fetch(new URL("/json/list", devtoolsBase), {
     signal: AbortSignal.timeout(5000),
   });
-  const redirectLocation = res.headers.get("location");
-  if (!redirectLocation) {
-    return { pageId: null, wsPath: null };
-  }
+  if (!listRes.ok) return { pageId: null, wsPath: null };
 
-  const target = new URL(redirectLocation, getDevtoolsBaseUrl(session.internalApiUrl));
-  const rawWs = target.searchParams.get("ws");
-  if (!rawWs) {
-    return { pageId: null, wsPath: null };
-  }
+  const targets = await listRes.json() as CdpListTarget[];
+  const pageTargets = targets.filter((t) => t.type === "page");
 
-  const wsTarget = new URL(`http:${rawWs}`);
-  const pageIdMatch = wsTarget.pathname.match(/\/devtools\/page\/([^/?]+)/);
+  // If a specific pageId was requested and it still exists, use it; otherwise fall
+  // back to the first available page target.
+  const chosen = pageId
+    ? (pageTargets.find((t) => t.id === pageId) ?? pageTargets[0])
+    : pageTargets[0];
 
-  return {
-    pageId: pageIdMatch ? decodeURIComponent(pageIdMatch[1]) : null,
-    wsPath: wsTarget.pathname,
-  };
+  if (!chosen) return { pageId: null, wsPath: null };
+
+  // webSocketDebuggerUrl may use any host (container name, IP, etc.) — extract only the path.
+  const wsPathMatch = chosen.webSocketDebuggerUrl.match(/(\/devtools\/[^?]+)/);
+  const wsPath = wsPathMatch ? wsPathMatch[1] : null;
+
+  return { pageId: chosen.id, wsPath };
 }
 
 async function updateLastActiveAt(sessionId: string) {

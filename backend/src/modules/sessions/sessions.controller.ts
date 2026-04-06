@@ -348,7 +348,10 @@ export async function handleGetEventsStats(
   const sessionIds = sessions.map((s) => s.id);
 
   if (sessionIds.length === 0) {
-    return reply.send({ dailyCounts: [], hourlyDistribution: [], byOperationType: {} });
+    return reply.send({
+      dailyCounts: [], hourlyDistribution: [], byOperationType: {},
+      capsolver: { total: 0, success: 0, failed: 0, avgDurationMs: null },
+    });
   }
 
   const thirtyDaysAgo = new Date();
@@ -357,7 +360,9 @@ export async function handleGetEventsStats(
   type DailyRow = { date: string; count: number };
   type HourlyRow = { hour: number; count: number };
 
-  const [dailyRaw, hourlyRaw, byType] = await Promise.all([
+  type CapsolverRow = { total: number; success: number; failed: number; avg_duration_ms: number | null };
+
+  const [dailyRaw, hourlyRaw, byType, capsolverRaw] = await Promise.all([
     prisma.$queryRaw<DailyRow[]>`
       SELECT TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
              COUNT(*)::int AS count
@@ -380,12 +385,29 @@ export async function handleGetEventsStats(
       where: { sessionId: { in: sessionIds } },
       _count: { id: true },
     }),
+    prisma.$queryRaw<CapsolverRow[]>`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE "statusCode" = 200)::int AS success,
+        COUNT(*) FILTER (WHERE "statusCode" != 200)::int AS failed,
+        AVG((metadata->>'durationMs')::numeric)::numeric AS avg_duration_ms
+      FROM session_events
+      WHERE "sessionId" = ANY(${sessionIds}::uuid[])
+        AND "operationType" = 'capsolver'
+    `,
   ]);
 
+  const cap = capsolverRaw[0] ?? { total: 0, success: 0, failed: 0, avg_duration_ms: null };
   return reply.send({
     dailyCounts: dailyRaw,
     hourlyDistribution: hourlyRaw,
     byOperationType: Object.fromEntries(byType.map((t) => [t.operationType, t._count.id])),
+    capsolver: {
+      total: Number(cap.total),
+      success: Number(cap.success),
+      failed: Number(cap.failed),
+      avgDurationMs: cap.avg_duration_ms != null ? Math.round(Number(cap.avg_duration_ms)) : null,
+    },
   });
 }
 

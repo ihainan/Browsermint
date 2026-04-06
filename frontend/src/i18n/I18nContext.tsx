@@ -85,6 +85,11 @@ const messages = {
       hourlyActivitySubtitle: "All time, UTC",
       noEventsYet: "No events yet",
       eventsCount: "{count} events",
+      capsolverTitle: "Captcha Solves",
+      capsolverSuccess: "Succeeded",
+      capsolverFailed: "Failed",
+      capsolverAvgTime: "Avg. Time",
+      capsolverNoData: "No captcha solves yet",
     },
     apiKey: {
       title: "API Key",
@@ -270,6 +275,11 @@ const messages = {
       hourlyActivitySubtitle: "全时段，UTC",
       noEventsYet: "暂无事件",
       eventsCount: "{count} 个事件",
+      capsolverTitle: "验证码求解",
+      capsolverSuccess: "成功",
+      capsolverFailed: "失败",
+      capsolverAvgTime: "平均耗时",
+      capsolverNoData: "暂无验证码求解记录",
     },
     apiKey: {
       title: "API Key",

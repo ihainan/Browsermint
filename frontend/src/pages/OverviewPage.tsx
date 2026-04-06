@@ -342,6 +342,63 @@ export default function OverviewPage() {
             )}
           </div>
         </div>
+
+        {/* Capsolver stats */}
+        {statsData && (statsData.capsolver.total > 0 || true) && (
+          <div className="mt-4 border border-[#edebeb] rounded-lg bg-white px-5 py-4">
+            <div className="flex items-baseline justify-between mb-4">
+              <h3 className="text-[13px] font-medium text-[#260f17]">
+                {t("overview.capsolverTitle")}
+              </h3>
+            </div>
+            {statsData.capsolver.total === 0 ? (
+              <p className="text-[13px] text-[#969493]">{t("overview.capsolverNoData")}</p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {/* Total */}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[11px] text-[#969493] uppercase tracking-wide">Total</span>
+                  <span className="text-[24px] font-normal text-[#260f17] leading-none">
+                    {formatCount(statsData.capsolver.total)}
+                  </span>
+                </div>
+                {/* Success */}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[11px] text-[#969493] uppercase tracking-wide">{t("overview.capsolverSuccess")}</span>
+                  <span className="text-[24px] font-normal text-green-600 leading-none">
+                    {formatCount(statsData.capsolver.success)}
+                  </span>
+                  {statsData.capsolver.total > 0 && (
+                    <span className="text-[11px] text-[#969493]">
+                      {Math.round((statsData.capsolver.success / statsData.capsolver.total) * 100)}%
+                    </span>
+                  )}
+                </div>
+                {/* Failed */}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[11px] text-[#969493] uppercase tracking-wide">{t("overview.capsolverFailed")}</span>
+                  <span className={clsx(
+                    "text-[24px] font-normal leading-none",
+                    statsData.capsolver.failed > 0 ? "text-red-500" : "text-[#260f17]"
+                  )}>
+                    {formatCount(statsData.capsolver.failed)}
+                  </span>
+                </div>
+                {/* Avg duration */}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[11px] text-[#969493] uppercase tracking-wide">{t("overview.capsolverAvgTime")}</span>
+                  <span className="text-[24px] font-normal text-[#260f17] leading-none">
+                    {statsData.capsolver.avgDurationMs != null
+                      ? statsData.capsolver.avgDurationMs >= 60000
+                        ? `${Math.round(statsData.capsolver.avgDurationMs / 60000)}m`
+                        : `${Math.round(statsData.capsolver.avgDurationMs / 1000)}s`
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </section>
     </div>
   );

@@ -309,7 +309,7 @@ export default function BrowsersPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-lg border border-[#edebeb] overflow-hidden">
+      <div className="bg-white rounded-lg border border-[#edebeb]">
         {isPending && sessions.length === 0 ? (
           <div className="flex justify-center py-16">
             <Loader2 size={20} className="animate-spin text-[#cac8c7]" />
