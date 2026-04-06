@@ -431,6 +431,7 @@ export async function initCdpSession(
                   userAgent: userAgent ?? null,
                   durationMs: Date.now() - capsolverStart,
                 },
+                source: "system",
               },
             }).catch(() => {});
           })
@@ -453,6 +454,7 @@ export async function initCdpSession(
                   durationMs: Date.now() - capsolverStart,
                   error: err.message,
                 },
+                source: "system",
               },
             }).catch(() => {});
           });

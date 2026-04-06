@@ -103,16 +103,13 @@ export default function OverviewPage() {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 5);
 
-  const totalEvents = useMemo(() => {
-    if (!statsData) return 0;
-    return Object.values(statsData.byOperationType).reduce((s, v) => s + v, 0);
-  }, [statsData]);
+  const agentEvents = statsData?.agentEventCount ?? 0;
 
   const stats = [
     { label: t("overview.totalBrowsers"),   value: sessions.length },
     { label: t("overview.runningBrowsers"), value: sessions.filter((s) => s.status === "running").length },
     { label: t("overview.stoppedBrowsers"), value: sessions.filter((s) => s.status === "stopped").length },
-    { label: t("overview.totalEvents"),     value: formatCount(totalEvents) },
+    { label: t("overview.agentEvents"),     value: formatCount(agentEvents) },
   ];
 
   // Fill in last 7 days (0 for days with no events)
@@ -143,7 +140,7 @@ export default function OverviewPage() {
     }));
   }, [statsData]);
 
-  const hasEvents = totalEvents > 0;
+  const hasEvents = agentEvents > 0;
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl flex flex-col gap-y-10 px-4 pt-5 pb-12">

@@ -2,7 +2,7 @@ import axios from "axios";
 
 export const api = axios.create({
   baseURL: "/api",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "application/json", "X-Steelyard-Client": "frontend" },
 });
 
 // Attach auth token to every request
@@ -102,6 +102,7 @@ export interface EventsStats {
   dailyCounts: { date: string; count: number }[];
   hourlyDistribution: { hour: number; count: number }[];
   byOperationType: Record<string, number>;
+  agentEventCount: number;
   capsolver: { total: number; success: number; failed: number; avgDurationMs: number | null };
 }
 

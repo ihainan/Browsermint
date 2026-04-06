@@ -43,6 +43,7 @@ model SessionEvent {
   operationType String   @db.VarChar(64)
   sourceIp      String?  @db.VarChar(45)
   requestPath   String?  @db.VarChar(512)
+  source        String?  @db.VarChar(16)  // "frontend" | "agent" | "system"
   statusCode    Int?
   metadata      Json?
   createdAt     DateTime @default(now())

@@ -228,7 +228,8 @@ function logSessionEvent(
   sourceIp: string | null,
   requestPath: string | null,
   statusCode?: number,
-  metadata?: Record<string, string | number | boolean | null>
+  metadata?: Record<string, string | number | boolean | null>,
+  source?: string
 ) {
   prisma.sessionEvent.create({
     data: {
@@ -238,8 +239,33 @@ function logSessionEvent(
       requestPath: requestPath ? requestPath.slice(0, 512) : null,
       statusCode: statusCode ?? null,
       metadata: metadata ?? undefined,
+      source: source ?? null,
     },
   }).catch(() => {});
+}
+
+// Returns "frontend" if the HTTP request carries the SteelYard frontend marker,
+// otherwise "agent". The frontend axios client sets X-Steelyard-Client: frontend
+// on every request, which agents won't do.
+function getHttpSource(request: Pick<FastifyRequest, "headers"> | IncomingMessage): string {
+  const header = request.headers["x-steelyard-client"];
+  const value = Array.isArray(header) ? header[0] : header;
+  return value === "frontend" ? "frontend" : "agent";
+}
+
+// Returns "frontend" if the WebSocket upgrade originates from a browser page
+// served by SteelYard (same-origin), otherwise "agent".
+// Browsers automatically include an Origin header on WebSocket upgrades;
+// non-browser clients (scripts, SDKs) typically omit it or send a different host.
+function getWebSocketSource(request: IncomingMessage): string {
+  const origin = request.headers["origin"];
+  const host = request.headers["host"];
+  if (!origin || !host) return "agent";
+  try {
+    return new URL(origin).host === host ? "frontend" : "agent";
+  } catch {
+    return "agent";
+  }
 }
 
 function getIncomingMessageIp(request: IncomingMessage): string | null {
@@ -303,7 +329,7 @@ export async function handleBrowserProxy(
 
   // Update last active timestamp and log event (fire-and-forget)
   await updateLastActiveAt(sessionId);
-  logSessionEvent(sessionId, "browser_view", request.ip, request.url, 200);
+  logSessionEvent(sessionId, "browser_view", request.ip, request.url, 200, undefined, "frontend");
 
   return reply
     .header("Content-Type", "text/html; charset=utf-8")
@@ -383,7 +409,7 @@ export async function handleDetailsProxy(
       }
     }
 
-    logSessionEvent(sessionId, "session_details", request.ip, request.url, 200);
+    logSessionEvent(sessionId, "session_details", request.ip, request.url, 200, undefined, "frontend");
     return reply.send(sessionDetail);
   } catch (err) {
     console.error(`[details-proxy] Failed to fetch session details for session ${sessionId}:`, err);
@@ -459,7 +485,7 @@ export async function handleDevtoolsProxy(
 
     await updateLastActiveAt(sessionId);
     if (assetPath === "devtools_app.html") {
-      logSessionEvent(sessionId, "devtools", request.ip, request.url, 200);
+      logSessionEvent(sessionId, "devtools", request.ip, request.url, 200, undefined, "frontend");
     }
 
     const body = Buffer.from(await res.arrayBuffer());
@@ -593,7 +619,7 @@ export async function handleWebSocketUpgrade(
     where: { id: sessionId },
     data: { lastActiveAt: new Date() },
   }).catch(() => {});
-  logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101);
+  logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101, undefined, getWebSocketSource(request));
 
   proxyServer.ws(request, socket, head, { target: proxyTarget });
 }
@@ -623,7 +649,7 @@ export async function handleGetTargets(
     const targets = ((result.targetInfos ?? []) as CdpTarget[]).filter(
       (t) => t.type === "page"
     );
-    logSessionEvent(sessionId, "targets_list", request.ip, request.url, 200);
+    logSessionEvent(sessionId, "targets_list", request.ip, request.url, 200, undefined, getHttpSource(request));
     return reply.send({ targets });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -643,7 +669,7 @@ export async function handleCreateTarget(
   const url = (request.body as { url?: string })?.url ?? "chrome://newtab/";
   try {
     const result = await executeCdpCommand(sessionId, "Target.createTarget", { url });
-    logSessionEvent(sessionId, "targets_create", request.ip, request.url, 200, { url });
+    logSessionEvent(sessionId, "targets_create", request.ip, request.url, 200, { url }, getHttpSource(request));
     return reply.send({ targetId: result.targetId });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -662,7 +688,7 @@ export async function handleCloseTarget(
 
   try {
     await executeCdpCommand(sessionId, "Target.closeTarget", { targetId });
-    logSessionEvent(sessionId, "targets_close", request.ip, request.url, 200, { targetId });
+    logSessionEvent(sessionId, "targets_close", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -681,7 +707,7 @@ export async function handleActivateTarget(
 
   try {
     await executeCdpCommand(sessionId, "Target.activateTarget", { targetId });
-    logSessionEvent(sessionId, "targets_activate", request.ip, request.url, 200, { targetId });
+    logSessionEvent(sessionId, "targets_activate", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -703,7 +729,7 @@ export async function handleNavigate(
 
   try {
     const result = await executeCdpCommand(sessionId, "Page.navigate", { url }, targetId);
-    logSessionEvent(sessionId, "navigate", request.ip, request.url, 200, { url, targetId });
+    logSessionEvent(sessionId, "navigate", request.ip, request.url, 200, { url, targetId }, getHttpSource(request));
     return reply.send(result);
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -723,7 +749,7 @@ export async function handleGoBack(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.goBack", {}, targetId);
-    logSessionEvent(sessionId, "go_back", request.ip, request.url, 200, { targetId });
+    logSessionEvent(sessionId, "go_back", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -743,7 +769,7 @@ export async function handleGoForward(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.goForward", {}, targetId);
-    logSessionEvent(sessionId, "go_forward", request.ip, request.url, 200, { targetId });
+    logSessionEvent(sessionId, "go_forward", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -763,7 +789,7 @@ export async function handleReload(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.reload", {}, targetId);
-    logSessionEvent(sessionId, "reload", request.ip, request.url, 200, { targetId });
+    logSessionEvent(sessionId, "reload", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });

@@ -349,7 +349,7 @@ export async function handleGetEventsStats(
 
   if (sessionIds.length === 0) {
     return reply.send({
-      dailyCounts: [], hourlyDistribution: [], byOperationType: {},
+      dailyCounts: [], hourlyDistribution: [], byOperationType: {}, agentEventCount: 0,
       capsolver: { total: 0, success: 0, failed: 0, avgDurationMs: null },
     });
   }
@@ -362,7 +362,7 @@ export async function handleGetEventsStats(
 
   type CapsolverRow = { total: number; success: number; failed: number; avg_duration_ms: number | null };
 
-  const [dailyRaw, hourlyRaw, byType, capsolverRaw] = await Promise.all([
+  const [dailyRaw, hourlyRaw, byType, capsolverRaw, agentEventCountRaw] = await Promise.all([
     prisma.$queryRaw<DailyRow[]>`
       SELECT TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
              COUNT(*)::int AS count
@@ -395,6 +395,9 @@ export async function handleGetEventsStats(
       WHERE "sessionId" = ANY(${sessionIds}::uuid[])
         AND "operationType" = 'capsolver'
     `,
+    prisma.sessionEvent.count({
+      where: { sessionId: { in: sessionIds }, source: "agent" },
+    }),
   ]);
 
   const cap = capsolverRaw[0] ?? { total: 0, success: 0, failed: 0, avg_duration_ms: null };
@@ -402,6 +405,7 @@ export async function handleGetEventsStats(
     dailyCounts: dailyRaw,
     hourlyDistribution: hourlyRaw,
     byOperationType: Object.fromEntries(byType.map((t) => [t.operationType, t._count.id])),
+    agentEventCount: agentEventCountRaw,
     capsolver: {
       total: Number(cap.total),
       success: Number(cap.success),
