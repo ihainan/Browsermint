@@ -358,7 +358,7 @@ export default function SessionsPage() {
                       )}
                       {session.status === "running" && (
                         <p className="text-xs text-gray-500 font-mono truncate">
-                          {session.containerName ? session.containerName.replace("steelyard-session-", "") : "—"}
+                          {session.containerName ? session.containerName.replace("browsermint-session-", "") : "—"}
                         </p>
                       )}
                     </div>

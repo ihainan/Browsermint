@@ -25,7 +25,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Restore session on mount
   useEffect(() => {
-    const storedToken = localStorage.getItem("steelyard_token");
+    const storedToken = localStorage.getItem("browsermint_token");
     if (!storedToken) {
       setIsLoading(false);
       return;
@@ -36,8 +36,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then((res) => setUser(res.data.user))
       .catch((err) => {
         if (err?.response?.status === 401) {
-          localStorage.removeItem("steelyard_token");
-          localStorage.removeItem("steelyard_user");
+          localStorage.removeItem("browsermint_token");
+          localStorage.removeItem("browsermint_user");
         }
       })
       .finally(() => setIsLoading(false));
@@ -46,7 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const res = await authApi.login({ email, password });
     const { user, token } = res.data;
-    localStorage.setItem("steelyard_token", token);
+    localStorage.setItem("browsermint_token", token);
     setToken(token);
     setUser(user);
   }, []);
@@ -55,7 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (username: string, email: string, password: string) => {
       const res = await authApi.register({ username, email, password });
       const { user, token } = res.data;
-      localStorage.setItem("steelyard_token", token);
+      localStorage.setItem("browsermint_token", token);
       setToken(token);
       setUser(user);
     },
@@ -63,7 +63,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(() => {
-    localStorage.removeItem("steelyard_token");
+    localStorage.removeItem("browsermint_token");
     setToken(null);
     setUser(null);
   }, []);

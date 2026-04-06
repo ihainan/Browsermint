@@ -14,7 +14,7 @@ interface I18nContextValue {
   formatTime: (value: string | number | Date) => string;
 }
 
-const STORAGE_KEY = "steelyard.locale";
+const STORAGE_KEY = "browsermint.locale";
 
 const messages = {
   en: {

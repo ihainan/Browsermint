@@ -412,7 +412,7 @@ function PlatformContent({
   ) : null;
 
   if (platform === "openclaw") {
-    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "steelyard",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "steelyard": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
+    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "browsermint",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "browsermint": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.openclawIntro")} /></p>

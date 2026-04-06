@@ -7,7 +7,7 @@ export const api = axios.create({
 
 // Attach auth token to every request
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("steelyard_token");
+  const token = localStorage.getItem("browsermint_token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -27,8 +27,8 @@ api.interceptors.response.use(
     if (err.response?.status === 401) {
       const url: string = err.config?.url ?? "";
       if (!SESSION_PROXY_PATH.test(url)) {
-        localStorage.removeItem("steelyard_token");
-        localStorage.removeItem("steelyard_user");
+        localStorage.removeItem("browsermint_token");
+        localStorage.removeItem("browsermint_user");
         if (window.location.pathname !== "/login") {
           window.location.href = "/login";
         }
