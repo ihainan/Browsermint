@@ -49,7 +49,7 @@ export default function RegisterPage() {
           <div className="inline-flex items-center justify-center w-12 h-12 bg-gray-900 rounded-2xl mb-4 shadow-lg">
             <Monitor size={22} className="text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">SteelYard</h1>
+          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Browsermint</h1>
           <p className="text-sm text-gray-500 mt-1">{t("register.subtitle")}</p>
         </div>
 

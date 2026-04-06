@@ -170,7 +170,7 @@ export default function SessionsPage() {
           <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center">
             <Monitor size={14} className="text-white" />
           </div>
-          <h1 className="text-base font-bold text-gray-900 tracking-tight">SteelYard</h1>
+          <h1 className="text-base font-bold text-gray-900 tracking-tight">Browsermint</h1>
         </div>
 
         <div

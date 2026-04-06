@@ -3,8 +3,11 @@ import { AuthProvider } from "./contexts/AuthContext.tsx";
 import { ProtectedRoute } from "./components/ProtectedRoute.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import RegisterPage from "./pages/RegisterPage.tsx";
-import SessionsPage from "./pages/SessionsPage.tsx";
 import SessionViewPage from "./pages/SessionViewPage.tsx";
+import Layout from "./components/Layout.tsx";
+import OverviewPage from "./pages/OverviewPage.tsx";
+import BrowsersPage from "./pages/BrowsersPage.tsx";
+import ApiKeyPage from "./pages/ApiKeyPage.tsx";
 
 export default function App() {
   return (
@@ -12,14 +15,8 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
-        <Route
-          path="/sessions"
-          element={
-            <ProtectedRoute>
-              <SessionsPage />
-            </ProtectedRoute>
-          }
-        />
+
+        {/* Full-screen session viewer — no sidebar */}
         <Route
           path="/sessions/:id"
           element={
@@ -28,7 +25,21 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route path="/" element={<Navigate to="/sessions" replace />} />
+
+        {/* Sidebar layout */}
+        <Route
+          element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }
+        >
+          <Route path="/" element={<OverviewPage />} />
+          <Route path="/browsers" element={<BrowsersPage />} />
+          <Route path="/api-key" element={<ApiKeyPage />} />
+          {/* Keep old /sessions URL working */}
+          <Route path="/sessions" element={<Navigate to="/browsers" replace />} />
+        </Route>
       </Routes>
     </AuthProvider>
   );

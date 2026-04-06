@@ -19,7 +19,7 @@ const STORAGE_KEY = "steelyard.locale";
 const messages = {
   en: {
     common: {
-      appName: "SteelYard",
+      appName: "Browsermint",
       email: "Email",
       password: "Password",
       username: "Username",
@@ -58,6 +58,46 @@ const messages = {
       passwordHint: "min. 8 characters",
       passwordTooShort: "Password must be at least 8 characters",
       registrationFailed: "Registration failed",
+    },
+    nav: {
+      overview: "Overview",
+      browsers: "Browsers",
+      apiKey: "API Key",
+    },
+    sidebar: {
+      usage: "Usage",
+      usageBrowsers: "Browsers created",
+    },
+    overview: {
+      title: "Overview",
+      recentBrowsers: "Recent browsers",
+      viewAll: "View all",
+      analyticsTitle: "Analytics",
+      totalBrowsers: "Total Browsers",
+      runningBrowsers: "Running",
+      stoppedBrowsers: "Stopped",
+      errorBrowsers: "Error",
+      noBrowsersYet: "No browsers yet",
+    },
+    apiKey: {
+      title: "API Key",
+      comingSoon: "Coming soon",
+      description: "API key management will be available here.",
+    },
+    browsers: {
+      title: "Browsers",
+      filterStatus: "Status",
+      allStatuses: "All",
+      browserId: "Browser ID",
+      name: "Name",
+      started: "Started",
+      lastActive: "Last Active",
+      viewing: "Viewing {from}–{to} of {total} results",
+      previous: "Previous",
+      next: "Next",
+    },
+    user: {
+      joinedAt: "Joined",
     },
     sessions: {
       title: "Cloud Browsers",
@@ -157,7 +197,7 @@ const messages = {
   },
   zh: {
     common: {
-      appName: "SteelYard",
+      appName: "Browsermint",
       email: "邮箱",
       password: "密码",
       username: "用户名",
@@ -196,6 +236,46 @@ const messages = {
       passwordHint: "至少 8 个字符",
       passwordTooShort: "密码至少需要 8 个字符",
       registrationFailed: "注册失败",
+    },
+    nav: {
+      overview: "概览",
+      browsers: "浏览器",
+      apiKey: "API Key",
+    },
+    sidebar: {
+      usage: "用量",
+      usageBrowsers: "已创建浏览器",
+    },
+    overview: {
+      title: "概览",
+      recentBrowsers: "最近浏览器",
+      viewAll: "查看全部",
+      analyticsTitle: "数据统计",
+      totalBrowsers: "总浏览器数",
+      runningBrowsers: "运行中",
+      stoppedBrowsers: "已停止",
+      errorBrowsers: "错误",
+      noBrowsersYet: "还没有浏览器",
+    },
+    apiKey: {
+      title: "API Key",
+      comingSoon: "即将推出",
+      description: "API Key 管理功能即将上线。",
+    },
+    browsers: {
+      title: "浏览器",
+      filterStatus: "状态",
+      allStatuses: "全部",
+      browserId: "浏览器 ID",
+      name: "名称",
+      started: "创建时间",
+      lastActive: "最后活跃",
+      viewing: "显示第 {from}–{to} 条，共 {total} 条",
+      previous: "上一页",
+      next: "下一页",
+    },
+    user: {
+      joinedAt: "注册时间",
     },
     sessions: {
       title: "云浏览器",
