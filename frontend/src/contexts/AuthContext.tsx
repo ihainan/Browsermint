@@ -34,9 +34,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authApi
       .me()
       .then((res) => setUser(res.data.user))
-      .catch(() => {
-        localStorage.removeItem("steelyard_token");
-        localStorage.removeItem("steelyard_user");
+      .catch((err) => {
+        if (err?.response?.status === 401) {
+          localStorage.removeItem("steelyard_token");
+          localStorage.removeItem("steelyard_user");
+        }
       })
       .finally(() => setIsLoading(false));
   }, []);
