@@ -2,7 +2,12 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, ChevronRight, Copy, Check } from "lucide-react";
 import clsx from "clsx";
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer,
+} from "recharts";
+import type { TooltipProps } from "recharts";
 import { sessionsApi, Session } from "../api/client.ts";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
@@ -12,17 +17,17 @@ function StatusBadge({ status }: { status: Session["status"] }) {
   const { locale } = useI18n();
 
   const styles: Record<Session["status"], string> = {
-    running:  "ring-green-600/20  bg-green-600/10  text-green-700",
+    running:  "ring-green-600/20  bg-green-600/10  text-green-600",
     stopped:  "ring-black/10      bg-black/5       text-[#514f4f]",
-    creating: "ring-amber-600/20  bg-amber-600/10  text-amber-700",
-    stopping: "ring-orange-600/20 bg-orange-600/10 text-orange-700",
-    error:    "ring-red-600/20    bg-red-600/10    text-red-700",
+    creating: "ring-amber-600/20  bg-amber-600/10  text-amber-600",
+    stopping: "ring-orange-600/20 bg-orange-600/10 text-orange-600",
+    error:    "ring-red-600/20    bg-red-600/10    text-red-600",
   };
 
   return (
     <span
       className={clsx(
-        "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-normal ring-[0.5px] ring-inset",
+        "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-normal ring-[0.5px] ring-inset capitalize",
         styles[status]
       )}
     >
@@ -57,6 +62,27 @@ function IdCell({ id }: { id: string }) {
   );
 }
 
+function ChartTooltip(props: TooltipProps<number, string>) {
+  const { active, payload, label } = props as {
+    active?: boolean;
+    payload?: { value: number }[];
+    label?: string;
+  };
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-white border border-[#edebeb] rounded-lg px-3 py-2 shadow-md text-[12px]">
+      <p className="text-[#514f4f] mb-0.5">{label}</p>
+      <p className="text-[#260f17] font-medium">{payload[0].value}</p>
+    </div>
+  );
+}
+
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
+  return String(n);
+}
+
 export default function OverviewPage() {
   const { t, formatDateTime } = useI18n();
 
@@ -67,16 +93,52 @@ export default function OverviewPage() {
   });
   const sessions = data ?? [];
 
+  const { data: statsData } = useQuery({
+    queryKey: ["eventsStats"],
+    queryFn: () => sessionsApi.getEventsStats().then((r) => r.data),
+    refetchInterval: 60000,
+  });
+
   const recentSessions = [...sessions]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 5);
+
+  const totalEvents = useMemo(() => {
+    if (!statsData) return 0;
+    return Object.values(statsData.byOperationType).reduce((s, v) => s + v, 0);
+  }, [statsData]);
 
   const stats = [
     { label: t("overview.totalBrowsers"),   value: sessions.length },
     { label: t("overview.runningBrowsers"), value: sessions.filter((s) => s.status === "running").length },
     { label: t("overview.stoppedBrowsers"), value: sessions.filter((s) => s.status === "stopped").length },
-    { label: t("overview.errorBrowsers"),   value: sessions.filter((s) => s.status === "error").length },
+    { label: t("overview.totalEvents"),     value: formatCount(totalEvents) },
   ];
+
+  // Fill in last 7 days (0 for days with no events)
+  const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dailyData = useMemo(() => {
+    const map = new Map(statsData?.dailyCounts.map((d) => [d.date, d.count]) ?? []);
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = new Date();
+      date.setDate(date.getDate() - (6 - i));
+      const key = date.toISOString().slice(0, 10);
+      const label = `${DAY_NAMES[date.getDay()]} ${date.getMonth() + 1}/${date.getDate()}`;
+      return { date: key, label, count: map.get(key) ?? 0 };
+    });
+  }, [statsData]);
+
+  // Fill in all 24 hours (0 for hours with no events)
+  const hourlyData = useMemo(() => {
+    const map = new Map(statsData?.hourlyDistribution.map((h) => [h.hour, h.count]) ?? []);
+    return Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      label: `${hour.toString().padStart(2, "0")}:00`,
+      count: map.get(hour) ?? 0,
+    }));
+  }, [statsData]);
+
+  const hasEvents = totalEvents > 0;
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl flex flex-col gap-y-10 px-4 pt-5 pb-12">
@@ -177,8 +239,8 @@ export default function OverviewPage() {
           </h2>
         </header>
 
-        {/* Stats — single container, border-r separators, matching Browserbase exactly */}
-        <section className="border border-[#edebeb] overflow-hidden rounded-lg p-0 bg-white">
+        {/* Stats row */}
+        <section className="border border-[#edebeb] overflow-hidden rounded-lg p-0 bg-white mb-4">
           <div className="grid grid-cols-1 gap-px bg-white sm:grid-cols-2 lg:grid-cols-4">
             {stats.map(({ label, value }, i) => (
               <div
@@ -198,6 +260,88 @@ export default function OverviewPage() {
             ))}
           </div>
         </section>
+
+        {/* Charts row */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Daily Events */}
+          <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
+            <div className="flex items-baseline justify-between mb-4">
+              <h3 className="text-[13px] font-medium text-[#260f17]">
+                {t("overview.dailyEvents")}
+              </h3>
+              <span className="text-[11px] text-[#969493]">
+                {t("overview.dailyEventsSubtitle")}
+              </span>
+            </div>
+            {!hasEvents ? (
+              <div className="flex items-center justify-center h-[160px]">
+                <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart data={dailyData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }} barCategoryGap="35%">
+                  <CartesianGrid vertical={false} stroke="#edebeb" strokeDasharray="0" />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 10, fill: "#969493" }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval={0}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: "#969493" }}
+                    tickLine={false}
+                    axisLine={false}
+                    allowDecimals={false}
+                    width={28}
+                  />
+                  <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
+                  <Bar dataKey="count" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={32} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Hourly Activity */}
+          <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
+            <div className="flex items-baseline justify-between mb-4">
+              <h3 className="text-[13px] font-medium text-[#260f17]">
+                {t("overview.hourlyActivity")}
+              </h3>
+              <span className="text-[11px] text-[#969493]">
+                {t("overview.hourlyActivitySubtitle")}
+              </span>
+            </div>
+            {!hasEvents ? (
+              <div className="flex items-center justify-center h-[160px]">
+                <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart data={hourlyData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }} barCategoryGap="20%">
+                  <CartesianGrid vertical={false} stroke="#edebeb" strokeDasharray="0" />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 10, fill: "#969493" }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval={3}
+                    tickFormatter={(v: string) => v.slice(0, 2)}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: "#969493" }}
+                    tickLine={false}
+                    axisLine={false}
+                    allowDecimals={false}
+                    width={28}
+                  />
+                  <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
+                  <Bar dataKey="count" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={16} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
       </section>
     </div>
   );

@@ -305,6 +305,90 @@ export async function handleStartSession(
   }
 }
 
+// ─── List Session Events ──────────────────────────────────────────────────────
+
+export async function handleListSessionEvents(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>,
+  reply: FastifyReply
+) {
+  const { id } = request.params;
+  const session = await prisma.session.findFirst({
+    where: { id, userId: request.user.sub, deletedAt: null },
+  });
+  if (!session) return reply.status(404).send({ error: "Session not found" });
+
+  const limit = Math.min(200, parseInt(request.query.limit ?? "50", 10) || 50);
+  const offset = parseInt(request.query.offset ?? "0", 10) || 0;
+
+  const [events, total] = await Promise.all([
+    prisma.sessionEvent.findMany({
+      where: { sessionId: id },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.sessionEvent.count({ where: { sessionId: id } }),
+  ]);
+
+  return reply.send({ events, total, limit, offset });
+}
+
+// ─── Events Stats (user-wide) ─────────────────────────────────────────────────
+
+export async function handleGetEventsStats(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  const userId = request.user.sub;
+
+  const sessions = await prisma.session.findMany({
+    where: { userId },
+    select: { id: true },
+  });
+  const sessionIds = sessions.map((s) => s.id);
+
+  if (sessionIds.length === 0) {
+    return reply.send({ dailyCounts: [], hourlyDistribution: [], byOperationType: {} });
+  }
+
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 7);
+
+  type DailyRow = { date: string; count: number };
+  type HourlyRow = { hour: number; count: number };
+
+  const [dailyRaw, hourlyRaw, byType] = await Promise.all([
+    prisma.$queryRaw<DailyRow[]>`
+      SELECT TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
+             COUNT(*)::int AS count
+      FROM session_events
+      WHERE "sessionId" = ANY(${sessionIds}::uuid[])
+        AND "createdAt" >= ${thirtyDaysAgo}
+      GROUP BY TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+      ORDER BY date
+    `,
+    prisma.$queryRaw<HourlyRow[]>`
+      SELECT EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')::int AS hour,
+             COUNT(*)::int AS count
+      FROM session_events
+      WHERE "sessionId" = ANY(${sessionIds}::uuid[])
+      GROUP BY EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')
+      ORDER BY hour
+    `,
+    prisma.sessionEvent.groupBy({
+      by: ["operationType"],
+      where: { sessionId: { in: sessionIds } },
+      _count: { id: true },
+    }),
+  ]);
+
+  return reply.send({
+    dailyCounts: dailyRaw,
+    hourlyDistribution: hourlyRaw,
+    byOperationType: Object.fromEntries(byType.map((t) => [t.operationType, t._count.id])),
+  });
+}
+
 // ─── Issue Session Token ──────────────────────────────────────────────────────
 
 export async function handleCreateSessionToken(

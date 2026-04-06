@@ -9,10 +9,15 @@ import {
   handleListSessions,
   handleStartSession,
   handleStopSession,
+  handleListSessionEvents,
+  handleGetEventsStats,
 } from "./sessions.controller.js";
 
 export default async function sessionsRoutes(server: FastifyInstance) {
   server.addHook("preHandler", authMiddleware);
+
+  // Static routes first to prevent /:id capturing them
+  server.get("/events/stats", { handler: handleGetEventsStats });
 
   server.post("/", {
     schema: { body: { type: "object" } },
@@ -66,6 +71,14 @@ export default async function sessionsRoutes(server: FastifyInstance) {
     handler: async (request, reply) =>
       handleCreateSessionToken(
         request as Parameters<typeof handleCreateSessionToken>[0],
+        reply
+      ),
+  });
+
+  server.get("/:id/events", {
+    handler: async (request, reply) =>
+      handleListSessionEvents(
+        request as Parameters<typeof handleListSessionEvents>[0],
         reply
       ),
   });

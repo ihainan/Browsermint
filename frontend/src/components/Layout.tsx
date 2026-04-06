@@ -110,7 +110,7 @@ export default function Layout() {
               key={path}
               to={path}
               className={clsx(
-                "flex w-full items-center gap-2 rounded-sm p-2 text-left text-[13px] h-8 transition-colors",
+                "flex w-full items-center gap-2 rounded-sm p-2 text-left text-sm h-8 transition-colors",
                 isNavActive(path, exact)
                   ? "bg-[#260f170f] text-[#260f17] font-medium"
                   : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
@@ -135,7 +135,7 @@ export default function Layout() {
           <Link
             to="/api-key"
             className={clsx(
-              "group flex w-full items-center gap-2 rounded-sm p-2 h-8 text-[13px] transition-colors",
+              "group flex w-full items-center gap-2 rounded-sm p-2 h-8 text-sm transition-colors",
               location.pathname === "/api-key"
                 ? "bg-[#260f170f] text-[#260f17] font-medium"
                 : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
@@ -206,7 +206,7 @@ export default function Layout() {
                 setUserOpen((o) => !o);
                 setLanguageOpen(false);
               }}
-              className="w-full flex items-center gap-2 rounded-sm p-2 h-8 text-[13px] text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17] transition-colors"
+              className="w-full flex items-center gap-2 rounded-sm p-2 h-8 text-sm text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17] transition-colors"
             >
               <div
                 className={clsx(

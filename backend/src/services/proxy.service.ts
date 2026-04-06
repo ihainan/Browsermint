@@ -216,6 +216,35 @@ async function updateLastActiveAt(sessionId: string) {
   }).catch(() => {});
 }
 
+function logSessionEvent(
+  sessionId: string,
+  operationType: string,
+  sourceIp: string | null,
+  requestPath: string | null,
+  statusCode?: number,
+  metadata?: Record<string, string | number | boolean | null>
+) {
+  prisma.sessionEvent.create({
+    data: {
+      sessionId,
+      operationType,
+      sourceIp,
+      requestPath,
+      statusCode: statusCode ?? null,
+      metadata: metadata ?? undefined,
+    },
+  }).catch(() => {});
+}
+
+function getIncomingMessageIp(request: IncomingMessage): string | null {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (forwarded) {
+    const first = Array.isArray(forwarded) ? forwarded[0] : forwarded.split(",")[0];
+    return first?.trim() ?? null;
+  }
+  return request.socket?.remoteAddress ?? null;
+}
+
 // ─── HTTP Proxy: Browser View ─────────────────────────────────────────────────
 // GET /api/sessions/:id/browser?token=xxx
 // Fetches debug HTML from container, rewrites the embedded wsUrl, and returns it.
@@ -266,8 +295,9 @@ export async function handleBrowserProxy(
     html = keyboardScript + html;
   }
 
-  // Update last active timestamp (fire-and-forget)
+  // Update last active timestamp and log event (fire-and-forget)
   await updateLastActiveAt(sessionId);
+  logSessionEvent(sessionId, "browser_view", request.ip, request.url, 200);
 
   return reply
     .header("Content-Type", "text/html; charset=utf-8")
@@ -347,6 +377,7 @@ export async function handleDetailsProxy(
       }
     }
 
+    logSessionEvent(sessionId, "session_details", request.ip, request.url, 200);
     return reply.send(sessionDetail);
   } catch (err) {
     console.error(`[details-proxy] Failed to fetch session details for session ${sessionId}:`, err);
@@ -421,6 +452,9 @@ export async function handleDevtoolsProxy(
     );
 
     await updateLastActiveAt(sessionId);
+    if (assetPath === "devtools_app.html") {
+      logSessionEvent(sessionId, "devtools", request.ip, request.url, 200);
+    }
 
     const body = Buffer.from(await res.arrayBuffer());
     return reply.send(body);
@@ -548,11 +582,12 @@ export async function handleWebSocketUpgrade(
     if (innerQsStr) request.url += `?${innerQsStr}`;
   }
 
-  // Update last active timestamp (fire-and-forget)
+  // Update last active timestamp and log event (fire-and-forget)
   prisma.session.update({
     where: { id: sessionId },
     data: { lastActiveAt: new Date() },
   }).catch(() => {});
+  logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101);
 
   proxyServer.ws(request, socket, head, { target: proxyTarget });
 }
@@ -582,6 +617,7 @@ export async function handleGetTargets(
     const targets = ((result.targetInfos ?? []) as CdpTarget[]).filter(
       (t) => t.type === "page"
     );
+    logSessionEvent(sessionId, "targets_list", request.ip, request.url, 200);
     return reply.send({ targets });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -601,6 +637,7 @@ export async function handleCreateTarget(
   const url = (request.body as { url?: string })?.url ?? "chrome://newtab/";
   try {
     const result = await executeCdpCommand(sessionId, "Target.createTarget", { url });
+    logSessionEvent(sessionId, "targets_create", request.ip, request.url, 200, { url });
     return reply.send({ targetId: result.targetId });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -619,6 +656,7 @@ export async function handleCloseTarget(
 
   try {
     await executeCdpCommand(sessionId, "Target.closeTarget", { targetId });
+    logSessionEvent(sessionId, "targets_close", request.ip, request.url, 200, { targetId });
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -637,6 +675,7 @@ export async function handleActivateTarget(
 
   try {
     await executeCdpCommand(sessionId, "Target.activateTarget", { targetId });
+    logSessionEvent(sessionId, "targets_activate", request.ip, request.url, 200, { targetId });
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -658,6 +697,7 @@ export async function handleNavigate(
 
   try {
     const result = await executeCdpCommand(sessionId, "Page.navigate", { url }, targetId);
+    logSessionEvent(sessionId, "navigate", request.ip, request.url, 200, { url, targetId });
     return reply.send(result);
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -677,6 +717,7 @@ export async function handleGoBack(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.goBack", {}, targetId);
+    logSessionEvent(sessionId, "go_back", request.ip, request.url, 200, { targetId });
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -696,6 +737,7 @@ export async function handleGoForward(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.goForward", {}, targetId);
+    logSessionEvent(sessionId, "go_forward", request.ip, request.url, 200, { targetId });
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
@@ -715,6 +757,7 @@ export async function handleReload(
   const { targetId } = request.body as { targetId: string };
   try {
     await executeCdpCommand(sessionId, "Page.reload", {}, targetId);
+    logSessionEvent(sessionId, "reload", request.ip, request.url, 200, { targetId });
     return reply.send({ ok: true });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });

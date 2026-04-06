@@ -98,6 +98,12 @@ export const authApi = {
   me: () => api.get<{ user: User }>("/auth/me"),
 };
 
+export interface EventsStats {
+  dailyCounts: { date: string; count: number }[];
+  hourlyDistribution: { hour: number; count: number }[];
+  byOperationType: Record<string, number>;
+}
+
 export const sessionsApi = {
   list: () => api.get<{ sessions: Session[] }>("/sessions"),
   get: (id: string) => api.get<{ session: Session }>(`/sessions/${id}`),
@@ -128,4 +134,5 @@ export const sessionsApi = {
     api.post(`/sessions/${id}/go-forward?token=${token}`, { targetId }),
   browserReload: (id: string, token: string, targetId: string) =>
     api.post(`/sessions/${id}/reload?token=${token}`, { targetId }),
+  getEventsStats: () => api.get<EventsStats>("/sessions/events/stats"),
 };

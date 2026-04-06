@@ -18,19 +18,36 @@ model User {
 }
 
 model Session {
-  id             String    @id @default(uuid()) @db.Uuid
-  userId         String    @db.Uuid
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name           String?   @db.VarChar(256)
-  status         String    @default("creating") // creating | running | stopping | stopped | error
-  containerId    String?   @db.VarChar(128)
-  containerName  String?   @db.VarChar(128)
-  internalApiUrl String?   @db.VarChar(256)
-  savedTabs      Json?     // Array of URLs saved before stop, restored on resume
-  createdAt      DateTime  @default(now())
-  lastActiveAt   DateTime  @default(now())
+  id             String         @id @default(uuid()) @db.Uuid
+  userId         String         @db.Uuid
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String?        @db.VarChar(256)
+  status         String         @default("creating") // creating | running | stopping | stopped | error
+  containerId    String?        @db.VarChar(128)
+  containerName  String?        @db.VarChar(128)
+  internalApiUrl String?        @db.VarChar(256)
+  savedTabs      Json?          // Array of URLs saved before stop, restored on resume
+  createdAt      DateTime       @default(now())
+  lastActiveAt   DateTime       @default(now())
   deletedAt      DateTime?
+  events         SessionEvent[]
 
   @@index([userId, deletedAt])
   @@index([containerId])
+}
+
+model SessionEvent {
+  id            String   @id @default(uuid()) @db.Uuid
+  sessionId     String   @db.Uuid
+  session       Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  operationType String   @db.VarChar(64)
+  sourceIp      String?  @db.VarChar(45)
+  requestPath   String?  @db.VarChar(512)
+  statusCode    Int?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([createdAt])
+  @@map("session_events")
 }
