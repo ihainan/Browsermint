@@ -26,6 +26,7 @@ model Session {
   containerId    String?   @db.VarChar(128)
   containerName  String?   @db.VarChar(128)
   internalApiUrl String?   @db.VarChar(256)
+  savedTabs      Json?     // Array of URLs saved before stop, restored on resume
   createdAt      DateTime  @default(now())
   lastActiveAt   DateTime  @default(now())
   deletedAt      DateTime?

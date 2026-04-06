@@ -7,21 +7,6 @@ import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
 
-const STATUS_STYLES: Record<Session["status"], string> = {
-  creating: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
-  running: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
-  stopping: "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
-  stopped: "bg-gray-100 text-gray-500 ring-1 ring-gray-200",
-  error: "bg-red-50 text-red-600 ring-1 ring-red-200",
-};
-
-const STATUS_DOT: Record<Session["status"], string> = {
-  creating: "bg-amber-400 animate-pulse",
-  running: "bg-emerald-500",
-  stopping: "bg-orange-400 animate-pulse",
-  stopped: "bg-gray-400",
-  error: "bg-red-500",
-};
 
 const BROWSER_GRADIENTS = [
   "from-sky-400 to-blue-500",
@@ -118,12 +103,38 @@ export default function SessionsPage() {
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => sessionsApi.stop(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onMutate: (id) => {
+      // Optimistic update: immediately show "stopping" so the card reflects the action
+      queryClient.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.map((s) => s.id === id ? { ...s, status: "stopping" as const } : s)
+      );
+    },
+    onSuccess: (res) => {
+      queryClient.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.map((s) => s.id === res.data.session.id ? res.data.session : s)
+      );
+    },
+    onError: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 
   const startMutation = useMutation({
     mutationFn: (id: string) => sessionsApi.start(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onMutate: (id) => {
+      // Optimistic update: immediately show "creating" so the card reflects the action
+      queryClient.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.map((s) => s.id === id ? { ...s, status: "creating" as const } : s)
+      );
+    },
+    onSuccess: (res) => {
+      queryClient.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.map((s) => s.id === res.data.session.id ? res.data.session : s)
+      );
+    },
+    onError: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 
   function getNameValidationError(name: string): string {
@@ -327,9 +338,25 @@ export default function SessionsPage() {
                     </div>
                     <div>
                       <p className="text-xs text-gray-400 mb-0.5">{t("sessions.container")}</p>
-                      {session.status === "stopped" || session.status === "stopping" ? (
+                      {session.status === "stopping" && (
+                        <p className="text-xs text-orange-400 flex items-center gap-1">
+                          <Loader2 size={10} className="animate-spin" />
+                          {getSessionStatusLabel(locale, "stopping")}
+                        </p>
+                      )}
+                      {session.status === "stopped" && (
                         <p className="text-xs text-gray-400 italic">{t("sessions.disabled")}</p>
-                      ) : (
+                      )}
+                      {session.status === "creating" && (
+                        <p className="text-xs text-amber-500 flex items-center gap-1">
+                          <Loader2 size={10} className="animate-spin" />
+                          {getSessionStatusLabel(locale, "creating")}
+                        </p>
+                      )}
+                      {session.status === "error" && (
+                        <p className="text-xs text-red-500">{getSessionStatusLabel(locale, "error")}</p>
+                      )}
+                      {session.status === "running" && (
                         <p className="text-xs text-gray-500 font-mono truncate">
                           {session.containerName ? session.containerName.replace("steelyard-session-", "") : "—"}
                         </p>
@@ -338,18 +365,6 @@ export default function SessionsPage() {
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    {session.status !== "running" && session.status !== "stopping" && session.status !== "stopped" && (
-                      <span
-                        className={clsx(
-                          "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium",
-                          STATUS_STYLES[session.status]
-                        )}
-                      >
-                        <span className={clsx("w-1.5 h-1.5 rounded-full", STATUS_DOT[session.status])} />
-                        {getSessionStatusLabel(locale, session.status)}
-                      </span>
-                    )}
-
                     <div className="relative">
                       <button
                         onClick={(e) => {
@@ -375,7 +390,9 @@ export default function SessionsPage() {
                               disabled={stopMutation.isPending && stopMutation.variables === session.id}
                               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
                             >
-                              <Pause size={13} />
+                              {stopMutation.isPending && stopMutation.variables === session.id
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : <Pause size={13} />}
                               {t("sessions.disable")}
                             </button>
                           )}
@@ -388,7 +405,9 @@ export default function SessionsPage() {
                               disabled={startMutation.isPending && startMutation.variables === session.id}
                               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
                             >
-                              <Play size={13} />
+                              {startMutation.isPending && startMutation.variables === session.id
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : <Play size={13} />}
                               {t("sessions.resume")}
                             </button>
                           )}

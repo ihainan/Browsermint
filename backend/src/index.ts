@@ -8,6 +8,7 @@ import sessionsRoutes from "./modules/sessions/sessions.routes.js";
 import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
+import { initCdpSession } from "./services/cdp.service.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
 
 const server = Fastify({
@@ -135,15 +136,53 @@ function runStartupTask(name: string, task: () => Promise<void>) {
   });
 }
 
+const RECONCILE_INTERVAL_MS = 30_000;
+let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+
 server.addHook("onReady", async () => {
+  // Reconcile first (synchronously) so broken sessions are marked error before
+  // we try to re-attach CDP — no point connecting to a session we're about to fix.
   server.log.info("Reconciling containers...");
-  runStartupTask("Container reconcile", reconcileContainers);
+  await reconcileContainers(true).catch((err) => {
+    server.log.warn({ err }, "Container reconcile failed");
+  });
+
+  // Re-attach CDP WebSockets for sessions that were running before this restart.
+  // activeSessions is in-memory and is wiped on every restart; without this,
+  // closeBrowserGracefully would have no WebSocket and fall back to docker stop
+  // (SIGKILL), corrupting Chrome's profile.
+  const runningSessions = await prisma.session.findMany({
+    where: { status: "running", deletedAt: null, internalApiUrl: { not: null } },
+  });
+  if (runningSessions.length > 0) {
+    server.log.info(`Re-attaching CDP for ${runningSessions.length} running session(s) after restart`);
+    for (const s of runningSessions) {
+      void initCdpSession(s.id, s.internalApiUrl!).then((ok) => {
+        if (!ok) {
+          server.log.warn(`[session] Session ${s.id}: CDP unreachable after restart — marking error`);
+          return prisma.session.update({ where: { id: s.id }, data: { status: "error" } });
+        }
+        server.log.info(`[session] Session ${s.id}: CDP re-attached after restart`);
+      }).catch((err) => {
+        server.log.warn({ err }, `[session] Failed to re-attach CDP for session ${s.id}`);
+      });
+    }
+  }
 
   server.log.info("Pulling steel-browser image...");
   runStartupTask("Image pull", pullImageIfNeeded);
+
+  // Periodically reconcile to recover sessions stuck in creating/stopping
+  // (e.g., after a backend crash or restart mid-operation).
+  reconcileTimer = setInterval(() => {
+    void reconcileContainers().catch((err) => {
+      server.log.warn({ err }, "Periodic reconcile failed");
+    });
+  }, RECONCILE_INTERVAL_MS);
 });
 
 server.addHook("onClose", async () => {
+  if (reconcileTimer) clearInterval(reconcileTimer);
   await prisma.$disconnect();
 });
 

@@ -14,15 +14,24 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Redirect to /login on 401
+// Redirect to /login on 401, but only for auth-protected API calls.
+// Session proxy endpoints (/sessions/:id/details|browser|devtools*|devtools-target)
+// return 401 when the session is not running, not when the user is unauthenticated.
+// Treating those as auth failures would log the user out whenever a session stops
+// while its details page is still open.
+const SESSION_PROXY_PATH = /^\/sessions\/[^/]+\/(details|browser|devtools|devtools-target)/;
+
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem("steelyard_token");
-      localStorage.removeItem("steelyard_user");
-      if (window.location.pathname !== "/login") {
-        window.location.href = "/login";
+      const url: string = err.config?.url ?? "";
+      if (!SESSION_PROXY_PATH.test(url)) {
+        localStorage.removeItem("steelyard_token");
+        localStorage.removeItem("steelyard_user");
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
       }
     }
     return Promise.reject(err);

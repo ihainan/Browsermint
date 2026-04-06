@@ -988,7 +988,13 @@ export default function SessionViewPage() {
   const session = sessionData;
 
   useEffect(() => {
-    if (!id || session?.status !== "running") return;
+    if (!id || session?.status !== "running") {
+      // Clear the token so polling in sidebars stops immediately; otherwise
+      // the still-running intervals would hit proxy endpoints that return 401
+      // for non-running sessions, triggering a global auth logout.
+      setSessionToken(null);
+      return;
+    }
     setTokenError("");
     sessionsApi.getToken(id).then((res) => setSessionToken(res.data.token)).catch(() => setTokenError(t("sessionView.tokenFailed")));
   }, [id, session?.status, t]);

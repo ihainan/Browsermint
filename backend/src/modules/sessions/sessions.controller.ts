@@ -10,7 +10,13 @@ import {
   stopContainer,
   stopAndRemoveContainer,
 } from "../../services/docker.service.js";
-import { initCdpSession, cleanupCdpSession } from "../../services/cdp.service.js";
+import {
+  initCdpSession,
+  cleanupCdpSession,
+  closeBrowserGracefully,
+  getOpenPageUrls,
+  openSavedTabs,
+} from "../../services/cdp.service.js";
 import { CreateSessionBody } from "./sessions.schema.js";
 
 // ─── Create Session ───────────────────────────────────────────────────────────
@@ -46,6 +52,8 @@ export async function handleCreateSession(
     data: { id: sessionId, userId, name: name ?? null, status: "creating" },
   });
 
+  console.info(`[session] Creating session ${sessionId} (user ${userId})`);
+
   try {
     const containerInfo = await createAndStartContainer(sessionId);
     await waitForContainerReady(containerInfo.internalApiUrl);
@@ -69,9 +77,10 @@ export async function handleCreateSession(
       },
     });
 
+    console.info(`[session] Session ${sessionId} created and running (container ${containerInfo.containerName})`);
     return reply.status(201).send({ session: updated });
   } catch (err) {
-    console.error("Session creation failed:", err);
+    console.error(`[session] Failed to create session ${sessionId}:`, err);
     await prisma.session.update({
       where: { id: sessionId },
       data: { status: "error" },
@@ -124,14 +133,20 @@ export async function handleDeleteSession(
   });
   if (!session) return reply.status(404).send({ error: "Session not found" });
 
+  console.info(`[session] Deleting session ${id}`);
+
   await prisma.session.update({
     where: { id },
     data: { status: "stopping" },
   });
 
+  // Close Chrome gracefully so it flushes data before container removal
+  await closeBrowserGracefully(id).catch(() => {});
   cleanupCdpSession(id);
   if (session.containerId) {
-    await stopAndRemoveContainer(session.containerId).catch(console.error);
+    await stopAndRemoveContainer(session.containerId).catch((err) =>
+      console.error(`[session] Failed to remove container for session ${id}:`, err)
+    );
   }
 
   await prisma.session.update({
@@ -139,6 +154,7 @@ export async function handleDeleteSession(
     data: { status: "stopped", deletedAt: new Date() },
   });
 
+  console.info(`[session] Session ${id} deleted`);
   return reply.send({ success: true });
 }
 
@@ -157,21 +173,42 @@ export async function handleStopSession(
     return reply.status(400).send({ error: "Session is not running" });
   }
 
+  console.info(`[session] Stopping session ${id}`);
+
   await prisma.session.update({ where: { id }, data: { status: "stopping" } });
 
+  // Save open tab URLs before closing, so they can be restored on resume
+  const savedUrls = await getOpenPageUrls(id);
+  if (savedUrls.length > 0) {
+    console.info(`[session] Session ${id}: saving ${savedUrls.length} open tab(s)`);
+  }
+
+  // Ask Chrome to close itself cleanly — this flushes session data and removes
+  // lock files, preventing profile corruption on the next container start.
+  const graceful = await closeBrowserGracefully(id);
+  if (!graceful) {
+    console.warn(`[session] Session ${id}: graceful Chrome close failed, proceeding with docker stop`);
+  }
   cleanupCdpSession(id);
+
   if (session.containerId) {
     // Stop-only: container filesystem (cookies, browser data) is preserved for resume.
-    await stopContainer(session.containerId).catch(console.error);
+    await stopContainer(session.containerId).catch((err) =>
+      console.error(`[session] Failed to stop container for session ${id}:`, err)
+    );
   }
 
   const updated = await prisma.session.update({
     where: { id },
-    data: { status: "stopped" },
-    // containerId / containerName / internalApiUrl intentionally kept so
-    // handleStartSession can restart the same container.
+    data: {
+      status: "stopped",
+      // containerId / containerName / internalApiUrl intentionally kept so
+      // handleStartSession can restart the same container.
+      savedTabs: savedUrls.length > 0 ? savedUrls : null,
+    },
   });
 
+  console.info(`[session] Session ${id} stopped`);
   return reply.send({ session: updated });
 }
 
@@ -206,23 +243,45 @@ export async function handleStartSession(
     });
   }
 
+  console.info(`[session] Resuming session ${id} (had container: ${session.containerId ? "yes" : "no"})`);
+
   await prisma.session.update({ where: { id }, data: { status: "creating" } });
 
   try {
     // If a container already exists (session was stopped, not deleted), restart it
     // so the browser's cookies and local storage are preserved.
     // Otherwise create a fresh container.
-    const containerInfo = session.containerId
+    let containerInfo = session.containerId
       ? await startExistingContainer(session.containerId)
       : await createAndStartContainer(id);
 
     await waitForContainerReady(containerInfo.internalApiUrl);
-    await initCdpSession(id, containerInfo.internalApiUrl);
+    const cdpReady = await initCdpSession(id, containerInfo.internalApiUrl);
+
+    if (!cdpReady) {
+      // Chrome failed to start inside the existing container (likely a corrupted profile
+      // from a previous forced SIGKILL). Discard the broken container and create a fresh
+      // one. Browser state (cookies, local storage) will be lost for this session.
+      console.warn(`[session] Session ${id}: Chrome unreachable — discarding broken container, creating fresh one (browser state lost)`);
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      containerInfo = await createAndStartContainer(id);
+      await waitForContainerReady(containerInfo.internalApiUrl);
+      await initCdpSession(id, containerInfo.internalApiUrl);
+    }
 
     const current = await prisma.session.findUnique({ where: { id } });
     if (!current || current.deletedAt) {
       await stopContainer(containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during startup" });
+    }
+
+    // Restore tabs saved before the session was stopped
+    const savedTabs = Array.isArray(session.savedTabs)
+      ? (session.savedTabs as unknown[]).filter((u): u is string => typeof u === "string")
+      : [];
+    if (savedTabs.length > 0) {
+      console.info(`[session] Session ${id}: restoring ${savedTabs.length} saved tab(s)`);
+      await openSavedTabs(id, savedTabs);
     }
 
     const updated = await prisma.session.update({
@@ -233,12 +292,14 @@ export async function handleStartSession(
         containerName: containerInfo.containerName,
         internalApiUrl: containerInfo.internalApiUrl,
         lastActiveAt: new Date(),
+        savedTabs: null, // Clear after restore
       },
     });
 
+    console.info(`[session] Session ${id} resumed (container ${containerInfo.containerName})`);
     return reply.send({ session: updated });
   } catch (err) {
-    console.error("Session start failed:", err);
+    console.error(`[session] Failed to resume session ${id}:`, err);
     await prisma.session.update({ where: { id }, data: { status: "error" } });
     return reply.status(500).send({ error: "Failed to start browser session" });
   }

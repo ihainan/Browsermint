@@ -21,6 +21,7 @@ export async function createAndStartContainer(
 ): Promise<ContainerInfo> {
   const containerName = `${CONTAINER_PREFIX}${sessionId}`;
 
+  console.info(`[docker] Creating container ${containerName}`);
   const container = await docker.createContainer({
     name: containerName,
     Image: config.STEEL_BROWSER_IMAGE,
@@ -50,6 +51,7 @@ export async function createAndStartContainer(
     },
   });
 
+  console.info(`[docker] Container ${containerName} created (ID: ${container.id.slice(0, 12)}), starting...`);
   await container.start();
 
   // Container name DNS only resolves inside Docker networks.
@@ -63,6 +65,7 @@ export async function createAndStartContainer(
   }
   const internalApiUrl = `http://${networkInfo.IPAddress}:3000`;
 
+  console.info(`[docker] Container ${containerName} started (IP: ${networkInfo.IPAddress})`);
   return {
     containerId: container.id,
     containerName,
@@ -76,10 +79,14 @@ export async function waitForContainerReady(
   const healthUrl = `${internalApiUrl}/v1/health`;
   const startTime = Date.now();
 
+  console.info(`[docker] Waiting for Steel Browser API to be ready at ${internalApiUrl}...`);
   while (Date.now() - startTime < HEALTH_POLL_TIMEOUT_MS) {
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
-      if (res.ok) return;
+      if (res.ok) {
+        console.info(`[docker] Steel Browser API ready at ${internalApiUrl} (${Date.now() - startTime}ms)`);
+        return;
+      }
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       // ENOTFOUND / ECONNREFUSED are expected during startup
@@ -96,12 +103,17 @@ export async function waitForContainerReady(
 // Stop-only: preserves the container filesystem so data survives across stop/start.
 // Use this for the Stop action. Use stopAndRemoveContainer for Delete.
 export async function stopContainer(containerId: string): Promise<void> {
+  console.info(`[docker] Stopping container ${containerId.slice(0, 12)}`);
   try {
     const container = docker.getContainer(containerId);
     await container.stop({ t: 5 }).catch(() => {});
+    console.info(`[docker] Container ${containerId.slice(0, 12)} stopped`);
   } catch (err: unknown) {
     const statusCode = (err as { statusCode?: number }).statusCode;
-    if (statusCode === 404) return; // Already gone
+    if (statusCode === 404) {
+      console.info(`[docker] Container ${containerId.slice(0, 12)} already gone`);
+      return;
+    }
     throw err;
   }
 }
@@ -111,8 +123,44 @@ export async function stopContainer(containerId: string): Promise<void> {
 export async function startExistingContainer(
   containerId: string
 ): Promise<ContainerInfo> {
+  console.info(`[docker] Starting existing container ${containerId.slice(0, 12)}`);
   const container = docker.getContainer(containerId);
-  await container.start();
+  try {
+    await container.start();
+  } catch (err: unknown) {
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    // 304: container is already running (e.g., backend crashed mid-init) — that's fine
+    if (statusCode !== 304) throw err;
+    console.info(`[docker] Container ${containerId.slice(0, 12)} was already running`);
+  }
+
+  // Xvfb fails to start on container restart because /tmp/.X10-lock is left behind
+  // from the previous run. Its PID collides with the new Xvfb process (both get the
+  // same PID in the container's fresh PID namespace). Xvfb reads the lock, sees its
+  // own PID as "already running", and exits. Chrome then has no display and crashes.
+  //
+  // Fix: kill stale Xvfb, remove lock files, restart Xvfb fresh. Chrome is safe to
+  // do this before because it is started by the Node.js API ~2s after container boot
+  // (the entrypoint sleeps 2 seconds before launching the API, which then starts Chrome).
+  try {
+    console.info(`[docker] Clearing stale Xvfb lock and restarting display for container ${containerId.slice(0, 12)}`);
+    const exec = await container.exec({
+      Cmd: [
+        "sh", "-c",
+        "pkill -x Xvfb 2>/dev/null || true; " +
+        "rm -f /tmp/.X10-lock /tmp/.X11-unix/X10; " +
+        "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &",
+      ],
+      AttachStdout: false,
+      AttachStderr: false,
+    });
+    await exec.start({ Detach: true });
+    // Brief pause so Xvfb is ready before Chrome starts (which happens ~2s after boot)
+    await new Promise((r) => setTimeout(r, 500));
+    console.info(`[docker] Xvfb restarted for container ${containerId.slice(0, 12)}`);
+  } catch (err) {
+    console.warn(`[docker] Failed to restart Xvfb for container ${containerId.slice(0, 12)}:`, (err as Error).message);
+  }
 
   const info = await container.inspect();
   const networkInfo = info.NetworkSettings.Networks[config.DOCKER_NETWORK_NAME];
@@ -120,6 +168,7 @@ export async function startExistingContainer(
     throw new Error(`Container did not get an IP on network ${config.DOCKER_NETWORK_NAME}`);
   }
 
+  console.info(`[docker] Container ${containerId.slice(0, 12)} started (IP: ${networkInfo.IPAddress})`);
   return {
     containerId: container.id,
     containerName: info.Name.replace(/^\//, ""),
@@ -130,18 +179,35 @@ export async function startExistingContainer(
 export async function stopAndRemoveContainer(
   containerId: string
 ): Promise<void> {
+  console.info(`[docker] Stopping and removing container ${containerId.slice(0, 12)}`);
   try {
     const container = docker.getContainer(containerId);
     await container.stop({ t: 5 }).catch(() => {});
     await container.remove({ force: true }).catch(() => {});
+    console.info(`[docker] Container ${containerId.slice(0, 12)} removed`);
   } catch (err: unknown) {
     const statusCode = (err as { statusCode?: number }).statusCode;
-    if (statusCode === 404) return; // Already gone
+    if (statusCode === 404) {
+      console.info(`[docker] Container ${containerId.slice(0, 12)} already gone`);
+      return;
+    }
     throw err;
   }
 }
 
-export async function reconcileContainers(): Promise<void> {
+let reconcileRunning = false;
+
+export async function reconcileContainers(startup = false): Promise<void> {
+  if (reconcileRunning) return;
+  reconcileRunning = true;
+  try {
+    await _reconcileContainers(startup);
+  } finally {
+    reconcileRunning = false;
+  }
+}
+
+async function _reconcileContainers(startup: boolean): Promise<void> {
   let managedContainers: Docker.ContainerInfo[] = [];
   try {
     managedContainers = await docker.listContainers({
@@ -149,7 +215,7 @@ export async function reconcileContainers(): Promise<void> {
       filters: JSON.stringify({ label: [`${MANAGED_LABEL}=true`] }),
     });
   } catch (err) {
-    console.error("Failed to list Docker containers during reconcile:", err);
+    console.error("[reconcile] Failed to list Docker containers:", err);
     return;
   }
 
@@ -160,25 +226,50 @@ export async function reconcileContainers(): Promise<void> {
 
     const session = await prisma.session.findUnique({ where: { id: sessionId } });
     if (!session || session.deletedAt) {
-      console.log(`Reconcile: removing orphan container ${c.Id.slice(0, 12)}`);
-      await stopAndRemoveContainer(c.Id).catch(console.error);
+      console.info(`[reconcile] Removing orphan container ${c.Id.slice(0, 12)} (session ${sessionId} not in DB)`);
+      await stopAndRemoveContainer(c.Id).catch((err) =>
+        console.error(`[reconcile] Failed to remove orphan container ${c.Id.slice(0, 12)}:`, err)
+      );
     }
   }
 
-  // DB sessions with status=running/creating but no matching container → mark error
-  const runningInDb = await prisma.session.findMany({
+  const containerById = new Map(managedContainers.map((c) => [c.Id, c]));
+
+  // DB sessions with status=running/creating but container missing or not running → mark error
+  const activeSessions = await prisma.session.findMany({
     where: { status: { in: ["running", "creating"] }, deletedAt: null },
   });
 
-  const containerIdSet = new Set(managedContainers.map((c) => c.Id));
-  for (const session of runningInDb) {
-    if (session.containerId && !containerIdSet.has(session.containerId)) {
-      console.log(`Reconcile: container missing for session ${session.id}, marking error`);
-      await prisma.session.update({
-        where: { id: session.id },
-        data: { status: "error" },
-      });
+  for (const session of activeSessions) {
+    const container = session.containerId ? containerById.get(session.containerId) : undefined;
+
+    if (!container) {
+      console.info(`[reconcile] Session ${session.id}: container not found — marking error`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+    } else if (container.State !== "running") {
+      // Container exists but stopped/crashed — user can retry resume
+      console.info(`[reconcile] Session ${session.id}: container state is "${container.State}" — marking error`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+    } else if (session.status === "creating" && startup) {
+      // Container is running but session is stuck in "creating" (backend crashed mid-init).
+      // Only fix this on startup — during normal operation handleStartSession may still be
+      // actively initializing the session (can take 90+ seconds), so we must not interfere.
+      console.info(`[reconcile] Session ${session.id}: stuck in "creating" since last startup — marking error`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
     }
+  }
+
+  // Fix stuck "stopping" sessions — backend crashed before completing the stop
+  const stoppingSessions = await prisma.session.findMany({
+    where: { status: "stopping", deletedAt: null },
+  });
+
+  for (const session of stoppingSessions) {
+    console.info(`[reconcile] Session ${session.id}: stuck in "stopping" — completing stop`);
+    if (session.containerId) {
+      await stopContainer(session.containerId).catch(() => {});
+    }
+    await prisma.session.update({ where: { id: session.id }, data: { status: "stopped" } });
   }
 }
 
@@ -187,12 +278,12 @@ export async function pullImageIfNeeded(): Promise<void> {
     docker.pull(config.STEEL_BROWSER_IMAGE, (err: Error | null, stream: NodeJS.ReadableStream) => {
       if (err) {
         // Non-fatal: image may already be present locally
-        console.warn("Image pull warning:", err.message);
+        console.warn("[docker] Image pull failed (non-fatal):", err.message);
         return resolve();
       }
       docker.modem.followProgress(stream, (err: Error | null) => {
         if (err) {
-          console.warn("Image pull progress error:", err.message);
+          console.warn("[docker] Image pull error:", err.message);
         }
         resolve();
       });

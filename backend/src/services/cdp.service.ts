@@ -327,10 +327,12 @@ async function applyScriptToPage(
   await waitForResponse(ws, evalId);
 }
 
+// Returns true if Chrome CDP is reachable and scripts were injected.
+// Returns false if Chrome is not running (crashed / not yet started).
 export async function initCdpSession(
   sessionId: string,
   internalApiUrl: string
-): Promise<void> {
+): Promise<boolean> {
   // Extract container IP from internalApiUrl (e.g. http://192.168.x.x:3000)
   const url = new URL(internalApiUrl);
   const containerIp = url.hostname;
@@ -347,6 +349,7 @@ export async function initCdpSession(
     let lastErr: unknown;
     let resolved = false;
 
+    console.info(`[cdp] Waiting for Chrome to start for session ${sessionId} (timeout: ${CDP_TIMEOUT_MS / 1000}s)...`);
     while (Date.now() < deadline) {
       try {
         const versionResp = await fetch(`${cdpBase}/json/version`, { signal: AbortSignal.timeout(3000) });
@@ -368,8 +371,9 @@ export async function initCdpSession(
 
     if (!resolved) {
       console.warn(`[cdp] Failed to get CDP version for session ${sessionId}:`, lastErr);
-      return;
+      return false;
     }
+    console.info(`[cdp] Chrome CDP responding for session ${sessionId}, connecting WebSocket...`);
   }
 
   const ws = new WebSocket(browserWsUrl);
@@ -437,6 +441,7 @@ export async function initCdpSession(
     const timeout = setTimeout(() => reject(new Error("CDP WebSocket open timeout")), 8000);
     ws.once("open", () => {
       clearTimeout(timeout);
+      console.info(`[cdp] WebSocket connected for session ${sessionId}`);
       resolve();
     });
     ws.once("error", (err) => {
@@ -449,7 +454,7 @@ export async function initCdpSession(
   });
 
   // If the WebSocket failed to open, activeSessions won't have this session
-  if (!activeSessions.has(sessionId)) return;
+  if (!activeSessions.has(sessionId)) return false;
 
   try {
     // Enable auto-attach so we get notified when new tabs/pages are created
@@ -479,6 +484,111 @@ export async function initCdpSession(
   } catch (err) {
     console.warn(`[cdp] CDP initialization failed for session ${sessionId}:`, err);
     // Don't rethrow — session is still usable, override is best-effort
+  }
+  return true;
+}
+
+// Sends Browser.close via CDP and waits for Chrome to exit cleanly.
+// Returns true if Chrome closed within the timeout, false otherwise.
+// A graceful close lets Chrome flush session data and remove lock files,
+// preventing profile corruption on the next container start.
+export async function closeBrowserGracefully(
+  sessionId: string,
+  timeoutMs = 8000
+): Promise<boolean> {
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn(`[cdp] Browser.close timed out for session ${sessionId} after ${timeoutMs}ms`);
+      resolve(false);
+    }, timeoutMs);
+
+    // Chrome closes the WebSocket connection when it exits cleanly.
+    ws.once("close", () => {
+      clearTimeout(timer);
+      console.info(`[cdp] Browser closed gracefully for session ${sessionId}`);
+      resolve(true);
+    });
+
+    sendCmd(ws, "Browser.close", {});
+  });
+}
+
+// Returns the URLs of all real (http/https) pages currently open in the browser.
+// Used to save tab state before stopping a session.
+export async function getOpenPageUrls(sessionId: string): Promise<string[]> {
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return [];
+
+  try {
+    const getTargetsId = sendCmd(ws, "Target.getTargets", {});
+    const targetsResp = await waitForResponse(ws, getTargetsId, 5000);
+    const targets = (
+      (targetsResp.result as Record<string, unknown>)?.targetInfos ?? []
+    ) as Array<Record<string, unknown>>;
+
+    return targets
+      .filter(t => t.type === "page")
+      .map(t => t.url as string)
+      .filter(url => url.startsWith("http://") || url.startsWith("https://"));
+  } catch (err) {
+    console.warn(`[cdp] Failed to get open page URLs for session ${sessionId}:`, err);
+    return [];
+  }
+}
+
+// Opens a list of saved URLs after a session resumes.
+// Reuses the initial blank "New Tab" page for the first URL to avoid leaving
+// a stray empty tab; remaining URLs are opened as new targets.
+export async function openSavedTabs(sessionId: string, urls: string[]): Promise<void> {
+  if (!urls.length) return;
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  try {
+    const getTargetsId = sendCmd(ws, "Target.getTargets", {});
+    const targetsResp = await waitForResponse(ws, getTargetsId, 5000);
+    const targets = (
+      (targetsResp.result as Record<string, unknown>)?.targetInfos ?? []
+    ) as Array<Record<string, unknown>>;
+
+    // Find the initial blank/newtab page Chrome opens on startup
+    const blankTarget = targets.find(
+      t => t.type === "page" &&
+        ((t.url as string) === "about:blank" || (t.url as string).startsWith("chrome://newtab"))
+    );
+
+    const [firstUrl, ...restUrls] = urls;
+
+    if (blankTarget) {
+      // Navigate the existing blank tab to the first URL instead of creating a new one
+      const attachId = sendCmd(ws, "Target.attachToTarget", {
+        targetId: blankTarget.targetId as string,
+        flatten: true,
+      });
+      const attachResp = await waitForResponse(ws, attachId, 5000);
+      const pageSessionId = (
+        (attachResp.result as Record<string, unknown>)?.sessionId
+      ) as string | undefined;
+
+      if (pageSessionId) {
+        sendCmd(ws, "Page.navigate", { url: firstUrl }, pageSessionId);
+      } else {
+        sendCmd(ws, "Target.createTarget", { url: firstUrl });
+      }
+    } else {
+      sendCmd(ws, "Target.createTarget", { url: firstUrl });
+    }
+
+    for (const url of restUrls) {
+      sendCmd(ws, "Target.createTarget", { url });
+    }
+
+    console.info(`[cdp] Restoring ${urls.length} tab(s) for session ${sessionId}`);
+  } catch (err) {
+    console.warn(`[cdp] Failed to restore tabs for session ${sessionId}:`, err);
   }
 }
 

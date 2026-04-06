@@ -36,7 +36,7 @@ interface ResolvedDevtoolsTarget {
 export const proxyServer = httpProxy.createProxyServer({});
 
 proxyServer.on("error", (err, _req, res) => {
-  console.error("Proxy error:", err.message);
+  console.error("[proxy] Proxy error:", err.message);
   if (res instanceof net.Socket) {
     res.destroy();
   } else if (res instanceof ServerResponse && !res.headersSent) {
@@ -242,7 +242,7 @@ export async function handleBrowserProxy(
     if (!res.ok) throw new Error(`Upstream returned ${res.status}`);
     html = await res.text();
   } catch (err) {
-    console.error("Failed to fetch debug view:", err);
+    console.error(`[browser-proxy] Failed to fetch debug view for session ${sessionId}:`, err);
     return reply.status(502).send({ error: "Failed to reach browser session" });
   }
 
@@ -252,7 +252,6 @@ export async function handleBrowserProxy(
   const host = getPublicRequestHost(request);
   const { ws: wsProto } = getRequestProtocols(request);
   const publicWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/cast?token=${token}`;
-  const originalBaseWsUrlMatch = html.match(/const\s+baseWsUrl\s*=\s*['"]([^'"]+)['"];/);
 
   html = html.replace(
     /const\s+baseWsUrl\s*=\s*['"][^'"]+['"];/,
@@ -266,14 +265,6 @@ export async function handleBrowserProxy(
   } else {
     html = keyboardScript + html;
   }
-
-  console.info("[browser-proxy] rewrote session debug HTML", {
-    sessionId,
-    host,
-    upstreamDebugUrl: debugUrl,
-    originalBaseWsUrl: originalBaseWsUrlMatch?.[1] ?? null,
-    rewrittenBaseWsUrl: publicWsUrl,
-  });
 
   // Update last active timestamp (fire-and-forget)
   await updateLastActiveAt(sessionId);
@@ -341,6 +332,10 @@ export async function handleDetailsProxy(
       // Non-fatal: keep whatever websocketUrl Steel Browser returned
     }
 
+    // Reflect SteelYard's own capsolver state rather than Steel Browser's value,
+    // since SteelYard handles captcha solving independently via CDP injection.
+    sessionDetail.solveCaptcha = Boolean(config.CAPSOLVER_API_KEY);
+
     if (token) {
       const host = getPublicRequestHost(request);
       const proto = getRequestProtocols(request).http;
@@ -354,7 +349,7 @@ export async function handleDetailsProxy(
 
     return reply.send(sessionDetail);
   } catch (err) {
-    console.error("Failed to fetch session details:", err);
+    console.error(`[details-proxy] Failed to fetch session details for session ${sessionId}:`, err);
     return reply.status(502).send({ error: "Failed to reach browser session" });
   }
 }
@@ -407,7 +402,7 @@ export async function handleDevtoolsProxy(
         );
       }
     } catch (err) {
-      console.error("Failed to resolve DevTools target:", err);
+      console.error(`[devtools-proxy] Failed to resolve DevTools target for session ${sessionId}:`, err);
     }
   }
 
@@ -430,7 +425,7 @@ export async function handleDevtoolsProxy(
     const body = Buffer.from(await res.arrayBuffer());
     return reply.send(body);
   } catch (err) {
-    console.error("Failed to fetch DevTools asset:", err);
+    console.error(`[devtools-proxy] Failed to fetch asset "${assetPath}" for session ${sessionId}:`, err);
     return reply.status(502).send({ error: "Failed to reach DevTools frontend" });
   }
 }
@@ -453,7 +448,7 @@ export async function handleDevtoolsTargetProxy(
     const target = await resolveDevtoolsTarget(context.session);
     return reply.send(target);
   } catch (err) {
-    console.error("Failed to resolve DevTools target:", err);
+    console.error(`[devtools-proxy] Failed to resolve DevTools target for session ${sessionId}:`, err);
     return reply.status(502).send({ error: "Failed to resolve DevTools target" });
   }
 }
@@ -552,15 +547,6 @@ export async function handleWebSocketUpgrade(
     const innerQsStr = innerQs.toString();
     if (innerQsStr) request.url += `?${innerQsStr}`;
   }
-
-  console.info("[ws-proxy] proxying upgrade", {
-    sessionId,
-    userId: payload.userId,
-    wsType,
-    proxyTarget,
-    rewrittenUrl: request.url,
-    originalUrl: url,
-  });
 
   // Update last active timestamp (fire-and-forget)
   prisma.session.update({
