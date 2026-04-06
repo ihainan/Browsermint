@@ -128,13 +128,18 @@ export default function OverviewPage() {
     });
   }, [statsData]);
 
-  // Fill in all 24 hours (0 for hours with no events)
+  // Fill in all 24 hours (0 for hours with no events), shifting UTC hours to local timezone
   const hourlyData = useMemo(() => {
-    const map = new Map(statsData?.hourlyDistribution.map((h) => [h.hour, h.count]) ?? []);
+    const tzOffsetHours = -new Date().getTimezoneOffset() / 60;
+    const localMap = new Map<number, number>();
+    for (const { hour, count } of statsData?.hourlyDistribution ?? []) {
+      const localHour = ((hour + tzOffsetHours) % 24 + 24) % 24;
+      localMap.set(localHour, (localMap.get(localHour) ?? 0) + count);
+    }
     return Array.from({ length: 24 }, (_, hour) => ({
       hour,
       label: `${hour.toString().padStart(2, "0")}:00`,
-      count: map.get(hour) ?? 0,
+      count: localMap.get(hour) ?? 0,
     }));
   }, [statsData]);
 

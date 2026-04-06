@@ -15,25 +15,43 @@ interface GetTaskResultResponse {
   solution?: { gRecaptchaResponse: string };
 }
 
+export interface SolveResult {
+  token: string;
+  taskId: string;
+}
+
 export async function solveRecaptchaEnterprise(
   siteKey: string,
   pageURL: string,
   action: string,
-  apiKey: string
-): Promise<string> {
+  apiKey: string,
+  userAgent?: string
+): Promise<SolveResult> {
+  // Strip JS challenge query params (solution=, js_challenge=, token=) so
+  // capsolver receives a clean origin URL. Those params are ephemeral and are
+  // not part of the reCAPTCHA Enterprise site registration.
+  let cleanURL = pageURL;
+  try {
+    const u = new URL(pageURL);
+    u.searchParams.delete("solution");
+    u.searchParams.delete("js_challenge");
+    u.searchParams.delete("token");
+    cleanURL = u.toString();
+  } catch { /* keep original if URL is malformed */ }
+
+  const task: Record<string, unknown> = {
+    type: "ReCaptchaV3EnterpriseTaskProxyless",
+    websiteURL: cleanURL,
+    websiteKey: siteKey,
+    pageAction: action || "login",
+    minScore: 0.9,
+  };
+  if (userAgent) task.userAgent = userAgent;
+
   const createResp = await fetch(`${CAPSOLVER_API}/createTask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      clientKey: apiKey,
-      task: {
-        type: "ReCaptchaV3EnterpriseTaskProxyless",
-        websiteURL: pageURL,
-        websiteKey: siteKey,
-        pageAction: action || "login",
-        minScore: 0.7,
-      },
-    }),
+    body: JSON.stringify({ clientKey: apiKey, task }),
   });
 
   const createData = (await createResp.json()) as CreateTaskResponse;
@@ -59,7 +77,7 @@ export async function solveRecaptchaEnterprise(
     }
 
     if (resultData.status === "ready") {
-      return resultData.solution!.gRecaptchaResponse;
+      return { token: resultData.solution!.gRecaptchaResponse, taskId };
     }
   }
 

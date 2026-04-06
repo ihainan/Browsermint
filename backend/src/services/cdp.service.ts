@@ -233,6 +233,7 @@ const RECAPTCHA_INTERCEPT_SCRIPT = `
 
 // One persistent browser-level CDP WebSocket per session.
 const activeSessions = new Map<string, WebSocket>();
+const sessionUserAgents = new Map<string, string>();
 
 let msgIdCounter = 1;
 
@@ -408,8 +409,9 @@ export async function initCdpSession(
           return;
         }
         const capsolverStart = Date.now();
-        solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY)
-          .then((token) => {
+        const userAgent = sessionUserAgents.get(sessionId);
+        solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY, userAgent)
+          .then(({ token, taskId }) => {
             const expr = `window.__steelyard_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
             console.log(`[cdp] CapSolver: resolved captcha for session ${sessionId}`);
@@ -420,7 +422,15 @@ export async function initCdpSession(
                 sourceIp: null,
                 requestPath: null,
                 statusCode: 200,
-                metadata: { url: payload.url, durationMs: Date.now() - capsolverStart },
+                metadata: {
+                  url: payload.url,
+                  siteKey: payload.siteKey,
+                  action: payload.action,
+                  taskId,
+                  tokenLength: token.length,
+                  userAgent: userAgent ?? null,
+                  durationMs: Date.now() - capsolverStart,
+                },
               },
             }).catch(() => {});
           })
@@ -435,7 +445,14 @@ export async function initCdpSession(
                 sourceIp: null,
                 requestPath: null,
                 statusCode: 500,
-                metadata: { url: payload.url, durationMs: Date.now() - capsolverStart, error: err.message },
+                metadata: {
+                  url: payload.url,
+                  siteKey: payload.siteKey,
+                  action: payload.action,
+                  userAgent: userAgent ?? null,
+                  durationMs: Date.now() - capsolverStart,
+                  error: err.message,
+                },
               },
             }).catch(() => {});
           });
@@ -479,6 +496,15 @@ export async function initCdpSession(
   if (!activeSessions.has(sessionId)) return false;
 
   try {
+    // Fetch the browser user-agent once per session so capsolver can use it
+    // when solving reCAPTCHA Enterprise (matching UA improves token score).
+    try {
+      const versionId = sendCmd(ws, "Browser.getVersion", {});
+      const versionResp = await waitForResponse(ws, versionId, 5000);
+      const ua = (versionResp.result as Record<string, unknown>)?.userAgent as string | undefined;
+      if (ua) sessionUserAgents.set(sessionId, ua);
+    } catch { /* non-fatal */ }
+
     // Enable auto-attach so we get notified when new tabs/pages are created
     const autoAttachId = sendCmd(ws, "Target.setAutoAttach", {
       autoAttach: true,
@@ -620,6 +646,7 @@ export function cleanupCdpSession(sessionId: string): void {
     ws.terminate();
     activeSessions.delete(sessionId);
   }
+  sessionUserAgents.delete(sessionId);
 }
 
 export async function executeCdpCommand(

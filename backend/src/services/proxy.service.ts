@@ -235,7 +235,7 @@ function logSessionEvent(
       sessionId,
       operationType,
       sourceIp,
-      requestPath,
+      requestPath: requestPath ? requestPath.slice(0, 512) : null,
       statusCode: statusCode ?? null,
       metadata: metadata ?? undefined,
     },
