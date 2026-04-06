@@ -93,8 +93,8 @@ export default function Layout() {
             DASHED_BORDER
           )}
         >
-          <img src={browsermintIcon} alt="Browsermint" className="w-7 h-7 rounded-md shrink-0" />
-          <span className="text-[13px] font-semibold text-[#260f17] tracking-tight">Browsermint</span>
+          <img src={browsermintIcon} alt="Browsermint" className="w-8 h-8 rounded-md shrink-0" />
+          <span className="text-[15px] font-semibold text-[#260f17] tracking-tight">Browsermint</span>
         </div>
 
         {/* Navigation */}
@@ -106,7 +106,7 @@ export default function Layout() {
               className={clsx(
                 "flex w-full items-center gap-2 rounded-sm p-2 text-left text-sm h-8 transition-colors",
                 isNavActive(path, exact)
-                  ? "bg-[#260f170f] text-[#260f17] font-medium"
+                  ? "bg-[#260f1726] text-[#260f17] font-medium"
                   : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
               )}
             >

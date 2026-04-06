@@ -190,8 +190,8 @@ export default function OverviewPage() {
                   <tr
                     key={session.id}
                     className={clsx(
-                      "border-t border-[#edebeb] transition-colors",
-                      session.status === "running" && "hover:bg-[#fafafa] cursor-pointer"
+                      "border-t border-[#edebeb] transition-colors hover:bg-[#f6f5f5]",
+                      session.status === "running" && "cursor-pointer"
                     )}
                     onClick={() =>
                       session.status === "running" &&
@@ -231,6 +231,8 @@ export default function OverviewPage() {
         )}
       </section>
 
+      <hr className="border-t border-[#e8d5dc] mx-2" />
+
       {/* ── Analytics ── */}
       <section>
         <header className="flex items-center gap-x-3 mb-4 px-2">
@@ -239,8 +241,10 @@ export default function OverviewPage() {
           </h2>
         </header>
 
+        <div className="bg-[#fafafa] rounded-lg border border-[#edebeb] p-4 flex flex-col gap-4">
+
         {/* Stats row */}
-        <section className="border border-[#edebeb] overflow-hidden rounded-lg p-0 bg-white mb-4">
+        <section className="border border-[#edebeb] overflow-hidden rounded-lg p-0 bg-white">
           <div className="grid grid-cols-1 gap-px bg-white sm:grid-cols-2 lg:grid-cols-4">
             {stats.map(({ label, value }, i) => (
               <div
@@ -262,7 +266,7 @@ export default function OverviewPage() {
         </section>
 
         {/* Charts row */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 m-0">
           {/* Daily Events */}
           <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
             <div className="flex items-baseline justify-between mb-4">
@@ -345,7 +349,7 @@ export default function OverviewPage() {
 
         {/* Capsolver stats */}
         {statsData && (statsData.capsolver.total > 0 || true) && (
-          <div className="mt-4 border border-[#edebeb] rounded-lg bg-white px-5 py-4">
+          <div className="border border-[#edebeb] rounded-lg bg-white px-5 py-4">
             <div className="flex items-baseline justify-between mb-4">
               <h3 className="text-[13px] font-medium text-[#260f17]">
                 {t("overview.capsolverTitle")}
@@ -399,6 +403,8 @@ export default function OverviewPage() {
             )}
           </div>
         )}
+
+        </div>{/* end analytics block */}
       </section>
     </div>
   );
