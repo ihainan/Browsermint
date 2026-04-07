@@ -711,6 +711,68 @@ function LogsSidebar({ sessionId, sessionToken }: { sessionId: string; sessionTo
   );
 }
 
+function BrowserContextMenu({
+  x, y, onClose, onCopy, onPaste,
+}: {
+  x: number; y: number;
+  onClose: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Adjust position so the menu doesn't overflow the viewport
+  const [pos, setPos] = useState({ x, y });
+  useEffect(() => {
+    if (!menuRef.current) return;
+    const { offsetWidth: w, offsetHeight: h } = menuRef.current;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    setPos({
+      x: x + w > vw ? Math.max(0, vw - w - 4) : x,
+      y: y + h > vh ? Math.max(0, vh - h - 4) : y,
+    });
+  }, [x, y]);
+
+  // Close on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const item = "flex items-center gap-2 px-3 py-1.5 text-[13px] text-gray-700 hover:bg-gray-100 rounded cursor-pointer select-none";
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-lg py-1 min-w-[140px]"
+      style={{ left: pos.x, top: pos.y }}
+    >
+      <div className={item} onMouseDown={(e) => { e.preventDefault(); onCopy(); onClose(); }}>
+        <Copy size={13} className="text-gray-400" />
+        Copy
+      </div>
+      <div className={item} onMouseDown={(e) => { e.preventDefault(); onPaste(); onClose(); }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-gray-400">
+          <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+          <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+        </svg>
+        Paste
+      </div>
+    </div>
+  );
+}
+
 export default function SessionViewPage() {
   const { locale, t } = useI18n();
   const { id } = useParams<{ id: string }>();
@@ -720,6 +782,7 @@ export default function SessionViewPage() {
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const browserContainerRef = useRef<HTMLDivElement>(null);
 
@@ -727,6 +790,11 @@ export default function SessionViewPage() {
   const handleClipboardMessage = useCallback(async (event: MessageEvent) => {
     if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
     switch (event.data?.type) {
+      case "showContextMenu": {
+        const rect = iframeRef.current.getBoundingClientRect();
+        setContextMenu({ x: rect.left + event.data.clientX, y: rect.top + event.data.clientY });
+        break;
+      }
       case "requestClipboardRead": {
         let response: Record<string, unknown>;
         try {
@@ -750,6 +818,17 @@ export default function SessionViewPage() {
         break;
       }
     }
+  }, []);
+
+  const handleContextMenuCopy = useCallback(() => {
+    iframeRef.current?.contentWindow?.postMessage({ type: "triggerCopy" }, "*");
+  }, []);
+
+  const handleContextMenuPaste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) iframeRef.current?.contentWindow?.postMessage({ type: "triggerPaste", text }, "*");
+    } catch { /* clipboard permission denied */ }
   }, []);
 
   // Ctrl+V pressed while the browser container (not the iframe itself) is focused.
@@ -947,6 +1026,16 @@ export default function SessionViewPage() {
           )}
           </div>
         </div>
+
+        {contextMenu && (
+          <BrowserContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            onCopy={handleContextMenuCopy}
+            onPaste={handleContextMenuPaste}
+          />
+        )}
 
         <aside className="w-96 bg-white border-l border-slate-200 flex flex-col shrink-0 shadow-[-10px_0_30px_-24px_rgba(15,23,42,0.25)]">
           <div className="flex border-b border-slate-100 shrink-0 bg-slate-50/80">

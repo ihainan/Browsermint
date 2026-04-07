@@ -322,10 +322,15 @@ export async function handleBrowserProxy(
   // Inject macOS keyboard remapper: forwards Cmd+key as Ctrl+key to the remote Linux browser.
   // Skips remapping when the URL input is focused so native macOS shortcuts (Cmd+A/C/X/Z) work correctly.
   const keyboardScript = `<script>(function(){var _r=false;function remap(e){if(_r||!e.metaKey||e.ctrlKey)return;var u=document.getElementById('url-text');if(u&&document.activeElement===u)return;_r=true;e.preventDefault();e.stopImmediatePropagation();(e.target||document).dispatchEvent(new e.constructor(e.type,{bubbles:e.bubbles,cancelable:e.cancelable,composed:e.composed,view:e.view||window,ctrlKey:true,metaKey:false,shiftKey:e.shiftKey,altKey:e.altKey,key:e.key,code:e.code,keyCode:e.keyCode,which:e.which,charCode:e.charCode||0,repeat:e.repeat}));_r=false;}document.addEventListener('keydown',remap,true);document.addEventListener('keyup',remap,true);})();</script>`;
+
+  // Suppress the host browser's native context menu on the canvas and notify the parent
+  // frame so it can show a custom context menu overlay instead.
+  const contextMenuScript = `<script>document.addEventListener('contextmenu',function(e){if(e.target&&e.target.tagName==='CANVAS'){e.preventDefault();window.parent.postMessage({type:'showContextMenu',clientX:e.clientX,clientY:e.clientY},'*');}},true);</script>`;
+
   if (html.includes('</head>')) {
-    html = html.replace('</head>', keyboardScript + '</head>');
+    html = html.replace('</head>', keyboardScript + contextMenuScript + '</head>');
   } else {
-    html = keyboardScript + html;
+    html = keyboardScript + contextMenuScript + html;
   }
 
   // Update last active timestamp and log event (fire-and-forget)
