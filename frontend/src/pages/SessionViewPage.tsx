@@ -391,7 +391,7 @@ function RichText({ text }: { text: string }) {
   return (
     <>
       {parseRichText(text).map((seg, i) => {
-        if (seg.type === "bold") return <strong key={i} className="font-semibold text-indigo-600">{seg.value}</strong>;
+        if (seg.type === "bold") return <strong key={i} className="font-semibold text-[#0d7a5f]">{seg.value}</strong>;
         if (seg.type === "code") return <code key={i} className="font-mono bg-slate-100 text-slate-700 px-1 rounded text-[0.82em]">{seg.value}</code>;
         return <span key={i}>{seg.value}</span>;
       })}
