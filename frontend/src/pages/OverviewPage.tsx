@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, ChevronRight, Copy, Check } from "lucide-react";
+import { Loader2, ChevronRight, Copy, Check, AlertTriangle } from "lucide-react";
 import clsx from "clsx";
 import { useState, useMemo } from "react";
 import {
@@ -106,6 +106,13 @@ function ChartLegend() {
   );
 }
 
+const EXPIRY_WARNING_DAYS = 30;
+
+export function daysUntilExpiry(expiresAt: string | null): number | null {
+  if (!expiresAt) return null;
+  return Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+}
+
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
@@ -184,8 +191,31 @@ export default function OverviewPage() {
 
   const hasEvents = agentEvents > 0;
 
+  const expiringSoonCount = sessions.filter((s) => {
+    const days = daysUntilExpiry(s.expiresAt);
+    return days !== null && days <= EXPIRY_WARNING_DAYS;
+  }).length;
+
   return (
     <div className="mx-auto w-full max-w-screen-2xl flex flex-col gap-y-10 px-4 pt-5 pb-12">
+
+      {/* ── Expiring soon banner ── */}
+      {expiringSoonCount > 0 && (
+        <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 -mb-4">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={15} className="text-amber-500 shrink-0" />
+            <span className="text-[13px] text-amber-800">
+              {t("overview.expiringSoon", { count: expiringSoonCount })}
+            </span>
+          </div>
+          <Link
+            to="/browsers"
+            className="text-[13px] font-medium text-amber-700 hover:text-amber-900 whitespace-nowrap transition-colors"
+          >
+            {t("overview.expiringSoonLink")} →
+          </Link>
+        </div>
+      )}
 
       {/* ── Recent browsers ── */}
       <section>
@@ -219,10 +249,11 @@ export default function OverviewPage() {
                     t("browsers.name"),
                     t("browsers.started"),
                     t("browsers.lastActive"),
+                    t("browsers.expiresAt"),
                   ].map((h) => (
                     <th
                       key={h}
-                      className="text-[#969493] text-xs px-2 pb-2 text-left font-normal"
+                      className="text-[#969493] text-xs px-2 py-3 text-left font-normal"
                     >
                       {h}
                     </th>
@@ -265,6 +296,17 @@ export default function OverviewPage() {
                     <td className="p-0 whitespace-nowrap">
                       <div className="flex h-12 items-center px-2 text-[#514f4f]">
                         {formatDateTime(session.lastActiveAt)}
+                      </div>
+                    </td>
+                    <td className="p-0 whitespace-nowrap">
+                      <div className="flex h-12 items-center px-2">
+                        {(() => {
+                          const days = daysUntilExpiry(session.expiresAt);
+                          if (days === null) return <span className="text-[#cac8c7]">—</span>;
+                          if (days <= 0) return <span className="text-red-500 font-medium">Expired</span>;
+                          if (days <= EXPIRY_WARNING_DAYS) return <span className="text-amber-600">{formatDateTime(session.expiresAt!)}</span>;
+                          return <span className="text-[#514f4f]">{formatDateTime(session.expiresAt!)}</span>;
+                        })()}
                       </div>
                     </td>
                   </tr>

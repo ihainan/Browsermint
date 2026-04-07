@@ -58,6 +58,7 @@ export interface Session {
   internalApiUrl: string | null;
   createdAt: string;
   lastActiveAt: string;
+  expiresAt: string | null;
   deletedAt: string | null;
 }
 
@@ -120,6 +121,8 @@ export const sessionsApi = {
     api.get<SteelDevtoolsTarget>(`/sessions/${id}/devtools-target?token=${token}`),
   getToken: (id: string) =>
     api.post<{ token: string }>(`/sessions/${id}/token`),
+  refreshToken: (id: string) =>
+    api.post<{ token: string; session: Session }>(`/sessions/${id}/refresh-token`),
   getTargets: (id: string, token: string) =>
     api.get<{ targets: BrowserTab[] }>(`/sessions/${id}/targets?token=${token}`),
   createTarget: (id: string, token: string, url?: string) =>

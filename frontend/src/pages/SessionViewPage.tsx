@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
-import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Plug, ExternalLink, ChevronRight } from "lucide-react";
+import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Plug, ExternalLink, ChevronRight, AlertTriangle } from "lucide-react";
+import { daysUntilExpiry } from "./OverviewPage.tsx";
 import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
@@ -150,6 +151,18 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
 
 type SidebarTab = "details" | "logs" | "devtools";
 
+function InlineCopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => { void navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+      className="absolute top-1.5 right-1.5 p-1 rounded bg-white/90 hover:bg-white text-gray-400 hover:text-gray-700 border border-slate-200 transition-colors opacity-0 group-hover:opacity-100"
+    >
+      {copied ? <Check size={11} /> : <Copy size={11} />}
+    </button>
+  );
+}
+
 function DetailRow({ label, value, mono = false, copyable = false }: { label: string; value: string; mono?: boolean; copyable?: boolean }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -177,9 +190,19 @@ function DetailRow({ label, value, mono = false, copyable = false }: { label: st
   );
 }
 
-function DetailsSidebar({ session, sessionToken }: { session: Session; sessionToken: string | null }) {
+function DetailsSidebar({
+  session,
+  sessionToken,
+  onTokenRefreshed,
+}: {
+  session: Session;
+  sessionToken: string | null;
+  onTokenRefreshed: (newToken: string) => void;
+}) {
   const { t, formatDateTime } = useI18n();
+  const queryClient = useQueryClient();
   const [details, setDetails] = useState<SteelSessionDetails | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!sessionToken) return;
@@ -190,10 +213,91 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
     return () => clearInterval(interval);
   }, [session.id, sessionToken]);
 
+  const refreshMutation = useMutation({
+    mutationFn: () => sessionsApi.refreshToken(session.id),
+    onSuccess: (res) => {
+      onTokenRefreshed(res.data.token);
+      queryClient.setQueryData(["session", session.id], res.data.session);
+      setConfirmOpen(false);
+    },
+  });
+
+  const cdpUrl = sessionToken
+    ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/sessions/${session.id}/cdp?token=${sessionToken}`
+    : null;
+
+  const days = daysUntilExpiry(session.expiresAt);
+  const isExpired = days !== null && days <= 0;
+  const isExpiringSoon = days !== null && days > 0 && days <= 30;
+
   return (
     <div className="overflow-y-auto flex-1 px-3 pb-4 font-mono text-xs">
       <DetailRow label={t("sessionView.details.id")} value={session.id} mono />
       <DetailRow label={t("sessionView.details.name")} value={session.name ?? "—"} />
+
+      {/* CDP WebSocket URL */}
+      {cdpUrl && (
+        <div className="flex flex-col gap-0.5 py-2.5 border-b border-gray-100">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">{t("sessionView.details.cdpWebsocketUrl")}</span>
+            <button
+              onClick={() => setConfirmOpen(true)}
+              className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-700 transition-colors"
+              title={t("sessionView.refreshToken")}
+            >
+              <RefreshCw size={11} />
+              {t("sessionView.refreshToken")}
+            </button>
+          </div>
+          <div className="relative group mt-0.5">
+            <pre className="bg-slate-50 text-gray-700 text-xs rounded-md p-2 pr-8 whitespace-pre-wrap break-all leading-relaxed border border-slate-200 font-mono">{cdpUrl}</pre>
+            <InlineCopyButton value={cdpUrl} />
+          </div>
+        </div>
+      )}
+
+      {/* Expiry info */}
+      {session.expiresAt && (
+        <div className="flex flex-col gap-0.5 py-2.5 border-b border-gray-100">
+          <span className="text-xs text-gray-500">{t("sessionView.details.expiresAt")}</span>
+          <span className={clsx(
+            "text-xs break-all",
+            isExpired ? "text-red-500 font-medium" : isExpiringSoon ? "text-amber-600" : "text-gray-700"
+          )}>
+            {formatDateTime(session.expiresAt)}
+          </span>
+        </div>
+      )}
+
+      {/* Expiry warning banner */}
+      {(isExpired || isExpiringSoon) && (
+        <div className={clsx(
+          "flex flex-col gap-2 rounded-md px-3 py-2.5 my-2 border",
+          isExpired ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"
+        )}>
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle size={12} className={clsx("mt-0.5 shrink-0", isExpired ? "text-red-500" : "text-amber-500")} />
+            <span className={clsx("text-xs leading-relaxed", isExpired ? "text-red-700" : "text-amber-700")}>
+              {isExpired
+                ? t("sessionView.refreshTokenExpired")
+                : t("sessionView.refreshTokenExpiringSoon", { days: String(days) })}
+            </span>
+          </div>
+          {session.status === "running" && (
+            <button
+              onClick={() => setConfirmOpen(true)}
+              className={clsx(
+                "self-start text-xs font-medium px-2.5 py-1 rounded-md transition-colors",
+                isExpired
+                  ? "bg-red-100 hover:bg-red-200 text-red-700"
+                  : "bg-amber-100 hover:bg-amber-200 text-amber-700"
+              )}
+            >
+              {t("sessionView.refreshToken")}
+            </button>
+          )}
+        </div>
+      )}
       <DetailRow label={t("sessionView.details.created")} value={formatDateTime(session.createdAt)} />
       <DetailRow label={t("sessionView.details.lastActive")} value={formatDateTime(session.lastActiveAt)} />
       {session.containerName && <DetailRow label={t("sessionView.details.container")} value={session.containerName} mono />}
@@ -207,6 +311,43 @@ function DetailsSidebar({ session, sessionToken }: { session: Session; sessionTo
       {details?.creditsUsed !== undefined && <DetailRow label={t("sessionView.details.cost")} value={String(details.creditsUsed)} />}
       {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={details.websocketUrl} copyable />}
       {details?.tokenExpiresAt && <DetailRow label={t("sessionView.details.tokenExpiresAt")} value={formatDateTime(details.tokenExpiresAt)} />}
+
+      {/* Refresh token confirmation dialog */}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div
+            className="bg-white rounded-lg shadow-2xl border border-gray-200 p-6 w-80 mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
+                <AlertTriangle size={15} className="text-amber-600" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 mb-1">{t("sessionView.refreshToken")}</h3>
+                <p className="text-xs text-gray-500 leading-relaxed">{t("sessionView.refreshTokenWarning")}</p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setConfirmOpen(false)}
+                disabled={refreshMutation.isPending}
+                className="px-3.5 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors disabled:opacity-50"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={() => refreshMutation.mutate()}
+                disabled={refreshMutation.isPending}
+                className="px-3.5 py-2 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-md transition-colors disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {refreshMutation.isPending && <Loader2 size={11} className="animate-spin" />}
+                {t("sessionView.refreshTokenConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1052,7 +1193,13 @@ export default function SessionViewPage() {
             ))}
           </div>
 
-          {activeTab === "details" && <DetailsSidebar session={session} sessionToken={sessionToken} />}
+          {activeTab === "details" && (
+            <DetailsSidebar
+              session={session}
+              sessionToken={sessionToken}
+              onTokenRefreshed={(newToken) => setSessionToken(newToken)}
+            />
+          )}
           {activeTab === "logs" && <LogsSidebar sessionId={session.id} sessionToken={sessionToken} />}
           {activeTab === "devtools" && <DevToolsSidebar sessionId={session.id} sessionToken={sessionToken} onPageIdChange={setActivePageId} />}
         </aside>

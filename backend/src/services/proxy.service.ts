@@ -15,6 +15,7 @@ interface SessionTokenPayload {
   sub: string;
   sessionId: string;
   type: string;
+  iat: number;
 }
 
 interface SessionProxyContext {
@@ -50,14 +51,14 @@ proxyServer.on("error", (err, _req, res) => {
 
 async function validateSessionToken(
   token: string
-): Promise<{ userId: string; sessionId: string } | null> {
+): Promise<{ userId: string; sessionId: string; iat: number } | null> {
   try {
     const payload = jwt.verify(
       token,
       config.JWT_SESSION_TOKEN_SECRET
     ) as SessionTokenPayload;
     if (payload.type !== "session") return null;
-    return { userId: payload.sub, sessionId: payload.sessionId };
+    return { userId: payload.sub, sessionId: payload.sessionId, iat: payload.iat };
   } catch {
     return null;
   }
@@ -81,10 +82,17 @@ async function getSessionProxyContext(
       id: true,
       containerName: true,
       internalApiUrl: true,
+      tokenIssuedAt: true,
     },
   });
 
   if (!session?.internalApiUrl) return null;
+
+  // Reject tokens issued before the last refresh (revocation check).
+  if (session.tokenIssuedAt && payload.iat * 1000 < session.tokenIssuedAt.getTime()) {
+    console.warn("[ws-proxy] rejecting upgrade: token has been superseded", { sessionId });
+    return null;
+  }
 
   return { userId: payload.userId, sessionId, session };
 }
@@ -591,6 +599,13 @@ export async function handleWebSocketUpgrade(
       wsType,
       userId: payload.userId,
     });
+    socket.destroy();
+    return;
+  }
+
+  // Reject tokens that were issued before the last token refresh.
+  if (session.tokenIssuedAt && payload.iat * 1000 < session.tokenIssuedAt.getTime()) {
+    console.warn("[ws-proxy] rejecting upgrade: token has been superseded", { sessionId });
     socket.destroy();
     return;
   }

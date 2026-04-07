@@ -4,6 +4,7 @@ import { CreateSessionBodySchema } from "./sessions.schema.js";
 import {
   handleCreateSession,
   handleCreateSessionToken,
+  handleRefreshSessionToken,
   handleDeleteSession,
   handleGetSession,
   handleListSessions,
@@ -71,6 +72,14 @@ export default async function sessionsRoutes(server: FastifyInstance) {
     handler: async (request, reply) =>
       handleCreateSessionToken(
         request as Parameters<typeof handleCreateSessionToken>[0],
+        reply
+      ),
+  });
+
+  server.post("/:id/refresh-token", {
+    handler: async (request, reply) =>
+      handleRefreshSessionToken(
+        request as Parameters<typeof handleRefreshSessionToken>[0],
         reply
       ),
   });

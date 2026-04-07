@@ -29,6 +29,8 @@ model Session {
   savedTabs      Json?          // Array of URLs saved before stop, restored on resume
   createdAt      DateTime       @default(now())
   lastActiveAt   DateTime       @default(now())
+  expiresAt      DateTime?
+  tokenIssuedAt  DateTime?
   deletedAt      DateTime?
   events         SessionEvent[]
 

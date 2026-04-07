@@ -39,8 +39,8 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-100 px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 mb-0.5">
-            <img src={browsermintIcon} alt="Browsermint" className="w-16 h-16 object-contain" />
+          <div className="inline-flex items-center justify-center w-24 h-24 mb-0.5">
+            <img src={browsermintIcon} alt="Browsermint" className="w-24 h-24 object-contain" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Browsermint</h1>
           <p className="text-sm text-gray-500 mt-1">{t("login.subtitle")}</p>

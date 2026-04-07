@@ -1,5 +1,8 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
+
+// Session token validity: 180 days. TODO: make this configurable via config.
+const SESSION_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000;
 import { v4 as uuidv4 } from "uuid";
 import { prisma } from "../../db/client.js";
 import { config } from "../../config.js";
@@ -74,6 +77,7 @@ export async function handleCreateSession(
         containerName: containerInfo.containerName,
         internalApiUrl: containerInfo.internalApiUrl,
         lastActiveAt: new Date(),
+        expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
       },
     });
 
@@ -293,6 +297,7 @@ export async function handleStartSession(
         internalApiUrl: containerInfo.internalApiUrl,
         lastActiveAt: new Date(),
         savedTabs: null, // Clear after restore
+        expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
       },
     });
 
@@ -439,4 +444,42 @@ export async function handleCreateSessionToken(
   );
 
   return reply.send({ token });
+}
+
+// ─── Refresh Session Token ────────────────────────────────────────────────────
+// Issues a new token AND updates expiresAt on the session record. Called when
+// the user explicitly requests a token refresh from the session detail page.
+
+export async function handleRefreshSessionToken(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const { id } = request.params;
+  const session = await prisma.session.findFirst({
+    where: { id, userId: request.user.sub, deletedAt: null },
+  });
+  if (!session) return reply.status(404).send({ error: "Session not found" });
+  if (session.status !== "running") {
+    return reply.status(400).send({ error: "Session is not running" });
+  }
+
+  const token = jwt.sign(
+    { sub: request.user.sub, sessionId: id, type: "session" },
+    config.JWT_SESSION_TOKEN_SECRET,
+    { expiresIn: "180d" }
+  );
+
+  // Decode to get the exact iat so we can reject tokens issued before this one.
+  const decoded = jwt.decode(token) as { iat: number };
+  const tokenIssuedAt = new Date(decoded.iat * 1000);
+
+  const updated = await prisma.session.update({
+    where: { id },
+    data: {
+      expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
+      tokenIssuedAt,
+    },
+  });
+
+  return reply.send({ token, session: updated });
 }

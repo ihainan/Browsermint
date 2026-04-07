@@ -17,7 +17,9 @@ import {
 import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
-import { StatusBadge } from "./OverviewPage.tsx";
+import { StatusBadge, daysUntilExpiry } from "./OverviewPage.tsx";
+
+const EXPIRY_WARNING_DAYS = 30;
 
 const PER_PAGE = 25;
 
@@ -326,20 +328,23 @@ export default function BrowsersPage() {
             <table className="text-[#260f17] text-[13px] w-full border-separate border-spacing-0 table-auto">
               <thead>
                 <tr>
-                  <th className="text-[#969493] text-xs px-2 pb-2 text-left font-normal w-[10%]">
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[10%]">
                     {t("browsers.filterStatus")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 pb-2 text-left font-normal w-[20%]">
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[20%]">
                     {t("browsers.browserId")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 pb-2 text-left font-normal">
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal">
                     {t("browsers.name")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 pb-2 text-left font-normal w-[22%]">
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[22%]">
                     {t("browsers.started")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 pb-2 text-left font-normal w-[22%]">
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[22%]">
                     {t("browsers.lastActive")}
+                  </th>
+                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[18%]">
+                    {t("browsers.expiresAt")}
                   </th>
                   <th className="w-20" />
                 </tr>
@@ -385,6 +390,18 @@ export default function BrowsersPage() {
                     <td className="p-0 whitespace-nowrap">
                       <div className="flex h-12 items-center px-2 text-[#514f4f]">
                         {formatDateTime(session.lastActiveAt)}
+                      </div>
+                    </td>
+                    <td className="p-0 whitespace-nowrap">
+                      <div className="flex h-12 items-center px-2">
+                        {(() => {
+                          const days = daysUntilExpiry(session.expiresAt);
+                          if (days === null) return <span className="text-[#cac8c7]">—</span>;
+                          if (days <= 0) return <span className="text-red-500 text-[13px] font-medium">Expired</span>;
+                          if (days <= 7) return <span className="text-red-500 text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
+                          if (days <= EXPIRY_WARNING_DAYS) return <span className="text-amber-600 text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
+                          return <span className="text-[#514f4f] text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
+                        })()}
                       </div>
                     </td>
                     <td className="p-0">
