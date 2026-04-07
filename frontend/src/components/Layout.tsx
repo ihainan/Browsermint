@@ -106,7 +106,7 @@ export default function Layout() {
               className={clsx(
                 "flex w-full items-center gap-2 rounded-sm p-2 text-left text-sm h-8 transition-colors",
                 isNavActive(path, exact)
-                  ? "bg-[#260f1726] text-[#260f17] font-medium"
+                  ? "bg-[#1dc99a18] text-[#0d7a5f] font-medium"
                   : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
               )}
             >
@@ -175,7 +175,7 @@ export default function Layout() {
                     <div
                       className={clsx(
                         "h-full rounded-full transition-all",
-                        usagePct >= 90 ? "bg-red-500" : usagePct >= 70 ? "bg-amber-500" : "bg-[#260f17]"
+                        usagePct >= 90 ? "bg-red-500" : usagePct >= 70 ? "bg-amber-500" : "bg-[#1dc99a]"
                       )}
                       style={{ width: `${usagePct}%` }}
                     />

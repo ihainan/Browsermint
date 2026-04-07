@@ -798,7 +798,7 @@ function DevToolsSidebar({ sessionId, sessionToken, onPageIdChange }: { sessionI
       <button
         onClick={openDevTools}
         disabled={!sessionToken || !devtoolsWsPath}
-        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors shadow-sm"
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#1dc99a] hover:bg-[#17a87f] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors shadow-sm"
       >
         <ExternalLink size={13} />
         {t("sessionView.devtools.open")}
@@ -1047,7 +1047,7 @@ export default function SessionViewPage() {
   return (
     <div className="flex flex-col h-screen bg-slate-100">
       <header className="bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-3 flex items-center gap-3 shrink-0 shadow-sm">
-        <div className="w-7 h-7 bg-gray-900 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
+        <div className="w-7 h-7 bg-[#1dc99a] rounded-lg flex items-center justify-center shrink-0 shadow-sm">
           <Monitor size={13} className="text-white" />
         </div>
 
@@ -1061,7 +1061,7 @@ export default function SessionViewPage() {
         {session.status === "running" && sessionToken ? (
           <button
             onClick={() => setConnectModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-900 hover:bg-gray-800 text-white text-xs font-medium transition-colors shrink-0 shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1dc99a] hover:bg-[#17a87f] text-white text-xs font-medium transition-colors shrink-0 shadow-sm"
           >
             <Plug size={12} />
             {t("sessionView.connectAgent")}

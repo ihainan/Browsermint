@@ -303,7 +303,7 @@ export default function BrowsersPage() {
         <StatusFilterDropdown value={statusFilter} onChange={setStatusFilter} />
         <button
           onClick={() => setNewBrowserModalOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-[#260f17] text-white text-[13px] font-medium rounded-sm hover:opacity-90 transition-opacity"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1dc99a] text-white text-[13px] font-medium rounded-sm hover:bg-[#17a87f] transition-colors"
         >
           <Plus size={13} />
           {t("sessions.newBrowser")}
@@ -502,7 +502,7 @@ export default function BrowsersPage() {
               <button
                 onClick={handleCreate}
                 disabled={!canCreate}
-                className="px-3.5 py-2 text-xs font-medium text-white bg-[#260f17] hover:opacity-90 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="px-3.5 py-2 text-xs font-medium text-white bg-[#1dc99a] hover:bg-[#17a87f] rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {createMutation.isPending ? (
                   <Loader2 size={11} className="animate-spin" />

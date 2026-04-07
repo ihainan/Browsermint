@@ -73,7 +73,7 @@ function ChartTooltip(props: TooltipProps<number, string>) {
     <div className="bg-white border border-[#edebeb] rounded-lg px-3 py-2 shadow-md text-[12px]">
       <p className="text-[#514f4f] mb-1">{label}</p>
       <div className="flex items-center gap-1.5 leading-5">
-        <span className="inline-block w-2 h-2 rounded-sm bg-[#260f17] shrink-0" />
+        <span className="inline-block w-2 h-2 rounded-sm bg-[#1dc99a] shrink-0" />
         <span className="text-[#260f17] font-medium">{payload[0].value}</span>
       </div>
     </div>
@@ -360,7 +360,7 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="agentCount" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={32} />
+                  <Bar dataKey="agentCount" fill="#1dc99a" radius={[2, 2, 0, 0]} maxBarSize={32} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -400,7 +400,7 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="agentCount" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={16} />
+                  <Bar dataKey="agentCount" fill="#1dc99a" radius={[2, 2, 0, 0]} maxBarSize={16} />
                 </BarChart>
               </ResponsiveContainer>
             )}

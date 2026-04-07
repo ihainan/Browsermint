@@ -36,7 +36,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-100 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-[#f0fdf9] to-[#ecfdf5] px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-24 h-24 mb-0.5">
@@ -65,7 +65,7 @@ export default function LoginPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400 transition-colors"
+                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
                 placeholder="you@example.com"
               />
             </div>
@@ -79,7 +79,7 @@ export default function LoginPage() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400 transition-colors"
+                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
                 placeholder="••••••••"
               />
             </div>
@@ -87,7 +87,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isPending}
-              className="w-full py-2.5 px-4 bg-gray-900 text-white text-sm font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm mt-2"
+              className="w-full py-2.5 px-4 bg-[#1dc99a] text-white text-sm font-semibold rounded-xl hover:bg-[#17a87f] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm mt-2"
             >
               {isPending ? t("login.submitting") : t("login.submit")}
             </button>
@@ -95,7 +95,7 @@ export default function LoginPage() {
 
           <p className="mt-5 text-sm text-center text-gray-400">
             {t("login.noAccount")}{" "}
-            <Link to="/register" className="text-gray-700 font-medium hover:text-gray-900 transition-colors">
+            <Link to="/register" className="text-[#1dc99a] font-medium hover:text-[#17a87f] transition-colors">
               {t("login.createOne")}
             </Link>
           </p>
