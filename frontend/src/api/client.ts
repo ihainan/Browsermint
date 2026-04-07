@@ -99,8 +99,8 @@ export const authApi = {
 };
 
 export interface EventsStats {
-  dailyCounts: { date: string; count: number }[];
-  hourlyDistribution: { hour: number; count: number }[];
+  dailyCounts: { date: string; count: number; agentCount: number }[];
+  hourlyDistribution: { hour: number; count: number; agentCount: number }[];
   byOperationType: Record<string, number>;
   agentEventCount: number;
   capsolver: { total: number; success: number; failed: number; avgDurationMs: number | null };

@@ -65,14 +65,43 @@ function IdCell({ id }: { id: string }) {
 function ChartTooltip(props: TooltipProps<number, string>) {
   const { active, payload, label } = props as {
     active?: boolean;
-    payload?: { value: number }[];
+    payload?: { name: string; value: number; fill: string }[];
     label?: string;
   };
   if (!active || !payload?.length) return null;
+  const total = payload.reduce((s, p) => s + (p.value ?? 0), 0);
   return (
     <div className="bg-white border border-[#edebeb] rounded-lg px-3 py-2 shadow-md text-[12px]">
-      <p className="text-[#514f4f] mb-0.5">{label}</p>
-      <p className="text-[#260f17] font-medium">{payload[0].value}</p>
+      <p className="text-[#514f4f] mb-1">{label}</p>
+      {payload.map((p) => (
+        <div key={p.name} className="flex items-center gap-1.5 leading-5">
+          <span className="inline-block w-2 h-2 rounded-sm shrink-0" style={{ background: p.fill }} />
+          <span className="text-[#514f4f]">{p.name === "agentCount" ? "Agent" : "Other"}:</span>
+          <span className="text-[#260f17] font-medium">{p.value}</span>
+        </div>
+      ))}
+      {payload.length > 1 && (
+        <div className="flex items-center gap-1.5 leading-5 border-t border-[#edebeb] mt-1 pt-1">
+          <span className="inline-block w-2 h-2 shrink-0" />
+          <span className="text-[#514f4f]">Total:</span>
+          <span className="text-[#260f17] font-medium">{total}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChartLegend() {
+  return (
+    <div className="flex items-center gap-3 mb-2">
+      <span className="flex items-center gap-1 text-[11px] text-[#514f4f]">
+        <span className="inline-block w-2 h-2 rounded-sm bg-[#260f17]" />
+        Other
+      </span>
+      <span className="flex items-center gap-1 text-[11px] text-[#514f4f]">
+        <span className="inline-block w-2 h-2 rounded-sm bg-[#be123c]" />
+        Agent
+      </span>
     </div>
   );
 }
@@ -115,29 +144,42 @@ export default function OverviewPage() {
   // Fill in last 7 days (0 for days with no events)
   const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const dailyData = useMemo(() => {
-    const map = new Map(statsData?.dailyCounts.map((d) => [d.date, d.count]) ?? []);
+    const map = new Map(statsData?.dailyCounts.map((d) => [d.date, d]) ?? []);
     return Array.from({ length: 7 }, (_, i) => {
       const date = new Date();
       date.setDate(date.getDate() - (6 - i));
       const key = date.toISOString().slice(0, 10);
       const label = `${DAY_NAMES[date.getDay()]} ${date.getMonth() + 1}/${date.getDate()}`;
-      return { date: key, label, count: map.get(key) ?? 0 };
+      const entry = map.get(key);
+      const agentCount = entry?.agentCount ?? 0;
+      const total = entry?.count ?? 0;
+      return { date: key, label, agentCount, otherCount: total - agentCount };
     });
   }, [statsData]);
 
-  // Fill in all 24 hours (0 for hours with no events), shifting UTC hours to local timezone
+  // Fill in all 24 hours (0 for hours with no events), shifting UTC hours to local timezone.
+  // The array is ordered so the current hour is always the last column (rolling window).
   const hourlyData = useMemo(() => {
     const tzOffsetHours = -new Date().getTimezoneOffset() / 60;
     const localMap = new Map<number, number>();
-    for (const { hour, count } of statsData?.hourlyDistribution ?? []) {
+    const localAgentMap = new Map<number, number>();
+    for (const { hour, count, agentCount } of statsData?.hourlyDistribution ?? []) {
       const localHour = ((hour + tzOffsetHours) % 24 + 24) % 24;
       localMap.set(localHour, (localMap.get(localHour) ?? 0) + count);
+      localAgentMap.set(localHour, (localAgentMap.get(localHour) ?? 0) + agentCount);
     }
-    return Array.from({ length: 24 }, (_, hour) => ({
-      hour,
-      label: `${hour.toString().padStart(2, "0")}:00`,
-      count: localMap.get(hour) ?? 0,
-    }));
+    const currentHour = new Date().getHours();
+    return Array.from({ length: 24 }, (_, i) => {
+      const hour = (currentHour - 23 + i + 24) % 24;
+      const total = localMap.get(hour) ?? 0;
+      const agentCount = localAgentMap.get(hour) ?? 0;
+      return {
+        hour,
+        label: `${hour.toString().padStart(2, "0")}:00`,
+        agentCount,
+        otherCount: total - agentCount,
+      };
+    });
   }, [statsData]);
 
   const hasEvents = agentEvents > 0;
@@ -271,7 +313,7 @@ export default function OverviewPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 m-0">
           {/* Daily Events */}
           <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
-            <div className="flex items-baseline justify-between mb-4">
+            <div className="flex items-baseline justify-between mb-3">
               <h3 className="text-[13px] font-medium text-[#260f17]">
                 {t("overview.dailyEvents")}
               </h3>
@@ -279,6 +321,7 @@ export default function OverviewPage() {
                 {t("overview.dailyEventsSubtitle")}
               </span>
             </div>
+            <ChartLegend />
             {!hasEvents ? (
               <div className="flex items-center justify-center h-[160px]">
                 <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
@@ -302,7 +345,8 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="count" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={32} />
+                  <Bar dataKey="otherCount" name="otherCount" fill="#260f17" radius={[0, 0, 0, 0]} maxBarSize={32} stackId="a" />
+                  <Bar dataKey="agentCount" name="agentCount" fill="#be123c" radius={[2, 2, 0, 0]} maxBarSize={32} stackId="a" />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -310,7 +354,7 @@ export default function OverviewPage() {
 
           {/* Hourly Activity */}
           <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
-            <div className="flex items-baseline justify-between mb-4">
+            <div className="flex items-baseline justify-between mb-3">
               <h3 className="text-[13px] font-medium text-[#260f17]">
                 {t("overview.hourlyActivity")}
               </h3>
@@ -318,6 +362,7 @@ export default function OverviewPage() {
                 {t("overview.hourlyActivitySubtitle")}
               </span>
             </div>
+            <ChartLegend />
             {!hasEvents ? (
               <div className="flex items-center justify-center h-[160px]">
                 <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
@@ -342,7 +387,8 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="count" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={16} />
+                  <Bar dataKey="otherCount" name="otherCount" fill="#260f17" radius={[0, 0, 0, 0]} maxBarSize={16} stackId="a" />
+                  <Bar dataKey="agentCount" name="agentCount" fill="#be123c" radius={[2, 2, 0, 0]} maxBarSize={16} stackId="a" />
                 </BarChart>
               </ResponsiveContainer>
             )}

@@ -357,15 +357,16 @@ export async function handleGetEventsStats(
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 7);
 
-  type DailyRow = { date: string; count: number };
-  type HourlyRow = { hour: number; count: number };
+  type DailyRow = { date: string; count: number; agent_count: number };
+  type HourlyRow = { hour: number; count: number; agent_count: number };
 
   type CapsolverRow = { total: number; success: number; failed: number; avg_duration_ms: number | null };
 
   const [dailyRaw, hourlyRaw, byType, capsolverRaw, agentEventCountRaw] = await Promise.all([
     prisma.$queryRaw<DailyRow[]>`
       SELECT TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
-             COUNT(*)::int AS count
+             COUNT(*)::int AS count,
+             COUNT(*) FILTER (WHERE source = 'agent')::int AS agent_count
       FROM session_events
       WHERE "sessionId" = ANY(${sessionIds}::uuid[])
         AND "createdAt" >= ${thirtyDaysAgo}
@@ -374,7 +375,8 @@ export async function handleGetEventsStats(
     `,
     prisma.$queryRaw<HourlyRow[]>`
       SELECT EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')::int AS hour,
-             COUNT(*)::int AS count
+             COUNT(*)::int AS count,
+             COUNT(*) FILTER (WHERE source = 'agent')::int AS agent_count
       FROM session_events
       WHERE "sessionId" = ANY(${sessionIds}::uuid[])
       GROUP BY EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')
@@ -402,8 +404,8 @@ export async function handleGetEventsStats(
 
   const cap = capsolverRaw[0] ?? { total: 0, success: 0, failed: 0, avg_duration_ms: null };
   return reply.send({
-    dailyCounts: dailyRaw,
-    hourlyDistribution: hourlyRaw,
+    dailyCounts: dailyRaw.map((r) => ({ date: r.date, count: Number(r.count), agentCount: Number(r.agent_count) })),
+    hourlyDistribution: hourlyRaw.map((r) => ({ hour: r.hour, count: Number(r.count), agentCount: Number(r.agent_count) })),
     byOperationType: Object.fromEntries(byType.map((t) => [t.operationType, t._count.id])),
     agentEventCount: agentEventCountRaw,
     capsolver: {
