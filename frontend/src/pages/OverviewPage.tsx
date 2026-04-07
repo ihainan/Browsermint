@@ -65,43 +65,17 @@ function IdCell({ id }: { id: string }) {
 function ChartTooltip(props: TooltipProps<number, string>) {
   const { active, payload, label } = props as {
     active?: boolean;
-    payload?: { name: string; value: number; fill: string }[];
+    payload?: { value: number }[];
     label?: string;
   };
   if (!active || !payload?.length) return null;
-  const total = payload.reduce((s, p) => s + (p.value ?? 0), 0);
   return (
     <div className="bg-white border border-[#edebeb] rounded-lg px-3 py-2 shadow-md text-[12px]">
       <p className="text-[#514f4f] mb-1">{label}</p>
-      {payload.map((p) => (
-        <div key={p.name} className="flex items-center gap-1.5 leading-5">
-          <span className="inline-block w-2 h-2 rounded-sm shrink-0" style={{ background: p.fill }} />
-          <span className="text-[#514f4f]">{p.name === "agentCount" ? "Agent" : "Other"}:</span>
-          <span className="text-[#260f17] font-medium">{p.value}</span>
-        </div>
-      ))}
-      {payload.length > 1 && (
-        <div className="flex items-center gap-1.5 leading-5 border-t border-[#edebeb] mt-1 pt-1">
-          <span className="inline-block w-2 h-2 shrink-0" />
-          <span className="text-[#514f4f]">Total:</span>
-          <span className="text-[#260f17] font-medium">{total}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChartLegend() {
-  return (
-    <div className="flex items-center gap-3 mb-2">
-      <span className="flex items-center gap-1 text-[11px] text-[#514f4f]">
-        <span className="inline-block w-2 h-2 rounded-sm bg-[#260f17]" />
-        Other
-      </span>
-      <span className="flex items-center gap-1 text-[11px] text-[#514f4f]">
-        <span className="inline-block w-2 h-2 rounded-sm bg-[#be123c]" />
-        Agent
-      </span>
+      <div className="flex items-center gap-1.5 leading-5">
+        <span className="inline-block w-2 h-2 rounded-sm bg-[#260f17] shrink-0" />
+        <span className="text-[#260f17] font-medium">{payload[0].value}</span>
+      </div>
     </div>
   );
 }
@@ -353,7 +327,7 @@ export default function OverviewPage() {
 
         {/* Charts row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 m-0">
-          {/* Daily Events */}
+          {/* Daily Agent Connections */}
           <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
             <div className="flex items-baseline justify-between mb-3">
               <h3 className="text-[13px] font-medium text-[#260f17]">
@@ -363,7 +337,6 @@ export default function OverviewPage() {
                 {t("overview.dailyEventsSubtitle")}
               </span>
             </div>
-            <ChartLegend />
             {!hasEvents ? (
               <div className="flex items-center justify-center h-[160px]">
                 <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
@@ -387,14 +360,13 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="otherCount" name="otherCount" fill="#260f17" radius={[0, 0, 0, 0]} maxBarSize={32} stackId="a" />
-                  <Bar dataKey="agentCount" name="agentCount" fill="#be123c" radius={[2, 2, 0, 0]} maxBarSize={32} stackId="a" />
+                  <Bar dataKey="agentCount" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={32} />
                 </BarChart>
               </ResponsiveContainer>
             )}
           </div>
 
-          {/* Hourly Activity */}
+          {/* Hourly Agent Activity */}
           <div className="border border-[#edebeb] rounded-lg bg-white px-5 pt-4 pb-3">
             <div className="flex items-baseline justify-between mb-3">
               <h3 className="text-[13px] font-medium text-[#260f17]">
@@ -404,7 +376,6 @@ export default function OverviewPage() {
                 {t("overview.hourlyActivitySubtitle")}
               </span>
             </div>
-            <ChartLegend />
             {!hasEvents ? (
               <div className="flex items-center justify-center h-[160px]">
                 <p className="text-[13px] text-[#969493]">{t("overview.noEventsYet")}</p>
@@ -429,8 +400,7 @@ export default function OverviewPage() {
                     width={28}
                   />
                   <Tooltip content={<ChartTooltip />} cursor={{ fill: "#f6f5f5" }} />
-                  <Bar dataKey="otherCount" name="otherCount" fill="#260f17" radius={[0, 0, 0, 0]} maxBarSize={16} stackId="a" />
-                  <Bar dataKey="agentCount" name="agentCount" fill="#be123c" radius={[2, 2, 0, 0]} maxBarSize={16} stackId="a" />
+                  <Bar dataKey="agentCount" fill="#260f17" radius={[2, 2, 0, 0]} maxBarSize={16} />
                 </BarChart>
               </ResponsiveContainer>
             )}

@@ -362,28 +362,30 @@ export async function handleGetEventsStats(
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 7);
 
-  type DailyRow = { date: string; count: number; agent_count: number };
-  type HourlyRow = { hour: number; count: number; agent_count: number };
+  type DailyRow = { date: string; count: number };
+  type HourlyRow = { hour: number; count: number };
 
   type CapsolverRow = { total: number; success: number; failed: number; avg_duration_ms: number | null };
 
   const [dailyRaw, hourlyRaw, byType, capsolverRaw, agentEventCountRaw] = await Promise.all([
     prisma.$queryRaw<DailyRow[]>`
       SELECT TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
-             COUNT(*)::int AS count,
-             COUNT(*) FILTER (WHERE source = 'agent')::int AS agent_count
+             COUNT(*)::int AS count
       FROM session_events
       WHERE "sessionId" = ANY(${sessionIds}::uuid[])
+        AND "operationType" = 'ws_cdp'
+        AND source = 'agent'
         AND "createdAt" >= ${thirtyDaysAgo}
       GROUP BY TO_CHAR("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD')
       ORDER BY date
     `,
     prisma.$queryRaw<HourlyRow[]>`
       SELECT EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')::int AS hour,
-             COUNT(*)::int AS count,
-             COUNT(*) FILTER (WHERE source = 'agent')::int AS agent_count
+             COUNT(*)::int AS count
       FROM session_events
       WHERE "sessionId" = ANY(${sessionIds}::uuid[])
+        AND "operationType" = 'ws_cdp'
+        AND source = 'agent'
       GROUP BY EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC')
       ORDER BY hour
     `,
@@ -403,14 +405,14 @@ export async function handleGetEventsStats(
         AND "operationType" = 'capsolver'
     `,
     prisma.sessionEvent.count({
-      where: { sessionId: { in: sessionIds }, source: "agent" },
+      where: { sessionId: { in: sessionIds }, operationType: "ws_cdp", source: "agent" },
     }),
   ]);
 
   const cap = capsolverRaw[0] ?? { total: 0, success: 0, failed: 0, avg_duration_ms: null };
   return reply.send({
-    dailyCounts: dailyRaw.map((r) => ({ date: r.date, count: Number(r.count), agentCount: Number(r.agent_count) })),
-    hourlyDistribution: hourlyRaw.map((r) => ({ hour: r.hour, count: Number(r.count), agentCount: Number(r.agent_count) })),
+    dailyCounts: dailyRaw.map((r) => ({ date: r.date, count: Number(r.count), agentCount: Number(r.count) })),
+    hourlyDistribution: hourlyRaw.map((r) => ({ hour: r.hour, count: Number(r.count), agentCount: Number(r.count) })),
     byOperationType: Object.fromEntries(byType.map((t) => [t.operationType, t._count.id])),
     agentEventCount: agentEventCountRaw,
     capsolver: {

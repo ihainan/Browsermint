@@ -58,7 +58,7 @@ export default function Layout() {
   const navItems = [
     { path: "/", label: t("nav.overview"), icon: LayoutDashboard, exact: true },
     { path: "/browsers", label: t("nav.browsers"), icon: Monitor, exact: false },
-    { path: "/api-key", label: t("nav.apiKey"), icon: Key, exact: true },
+    // { path: "/api-key", label: t("nav.apiKey"), icon: Key, exact: true },
   ];
 
   function isNavActive(path: string, exact: boolean) {
