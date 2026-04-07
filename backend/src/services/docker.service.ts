@@ -43,7 +43,10 @@ export async function createAndStartContainer(
     ],
     Entrypoint: ["/bin/sh", "-c"],
     Cmd: [
-      "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 2 && exec /app/api/entrypoint.sh",
+      "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 2 && " +
+      "x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 &>/tmp/x0vnc.log & " +
+      "sleep 1 && websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
+      "exec /app/api/entrypoint.sh",
     ],
     HostConfig: {
       NetworkMode: config.DOCKER_NETWORK_NAME,
@@ -149,7 +152,12 @@ export async function startExistingContainer(
         "sh", "-c",
         "pkill -x Xvfb 2>/dev/null || true; " +
         "rm -f /tmp/.X10-lock /tmp/.X11-unix/X10; " +
-        "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &",
+        "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & " +
+        "sleep 1; " +
+        "pkill -f x0vncserver 2>/dev/null || true; " +
+        "x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 &>/tmp/x0vnc.log & " +
+        "pkill -f 'websockify 6080' 2>/dev/null || true; " +
+        "websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 &",
       ],
       AttachStdout: false,
       AttachStderr: false,
@@ -274,10 +282,19 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
 }
 
 export async function pullImageIfNeeded(): Promise<void> {
-  return new Promise((resolve, reject) => {
+  // If the image already exists locally (e.g. a locally-built image like steelyard-browser:latest),
+  // skip the pull entirely — docker.pull would fail with 404 for images not on Docker Hub.
+  try {
+    await docker.getImage(config.STEEL_BROWSER_IMAGE).inspect();
+    console.info(`[docker] Image ${config.STEEL_BROWSER_IMAGE} already present locally, skipping pull`);
+    return;
+  } catch {
+    // Image not found locally — proceed with pull
+  }
+
+  return new Promise((resolve) => {
     docker.pull(config.STEEL_BROWSER_IMAGE, (err: Error | null, stream: NodeJS.ReadableStream) => {
       if (err) {
-        // Non-fatal: image may already be present locally
         console.warn("[docker] Image pull failed (non-fatal):", err.message);
         return resolve();
       }

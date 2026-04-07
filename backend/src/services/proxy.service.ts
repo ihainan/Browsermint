@@ -529,7 +529,7 @@ export async function handleDevtoolsTargetProxy(
 // Handles the HTTP upgrade event from Fastify's underlying server.
 // Matches: /ws/sessions/:id/(cast|logs|pageId|cdp[/subpath])?token=xxx
 
-const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|pageId|cdp)(\/[^?]*)?/;
+const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|pageId|cdp|vnc)(\/[^?]*)?/;
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -545,7 +545,7 @@ export async function handleWebSocketUpgrade(
   }
 
   const sessionId = match[1];
-  const wsType = match[2] as "cast" | "logs" | "pageId" | "cdp";
+  const wsType = match[2] as "cast" | "logs" | "pageId" | "cdp" | "vnc";
   const wsSubPath = match[3] ?? "/";
   // The session player appends params with "?" even when baseWsUrl already
   // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
@@ -606,6 +606,14 @@ export async function handleWebSocketUpgrade(
     // /ws/sessions/{id}/cdp/devtools/page/{id} → /devtools/page/{id}
     request.url = wsSubPath;
     proxyTarget = getDevtoolsBaseUrl(session.internalApiUrl!).origin;
+  } else if (wsType === "vnc") {
+    // Forward to websockify (port 6080) which bridges the noVNC WebSocket client to
+    // x0vncserver's plain TCP VNC port (5900). x0vncserver (TigerVNC) has no built-in
+    // WebSocket support, so websockify can bridge cleanly without protocol conflicts.
+    const containerUrl = new URL(session.internalApiUrl!);
+    containerUrl.port = "6080";
+    proxyTarget = containerUrl.origin;
+    request.url = "/";
   } else {
     // cast: rewrite /ws/sessions/{id}/cast → /v1/sessions/cast, preserve player params
     request.url = "/v1/sessions/cast";
@@ -800,4 +808,81 @@ export async function handleReload(
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
   }
+}
+
+// ─── VNC Viewer ───────────────────────────────────────────────────────────────
+// GET /api/sessions/:id/vnc-viewer?token=xxx
+// Serves an HTML page with the noVNC client connected to the session's VNC stream.
+// The noVNC client connects via WebSocket to /ws/sessions/:id/vnc, which is proxied
+// to the container's websockify bridge (port 6080) → x11vnc → Xvfb :10 (full Chrome UI).
+
+export async function handleVncViewer(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const host = getPublicRequestHost(request);
+  const { ws: wsProto } = getRequestProtocols(request);
+  const vncWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/vnc?token=${encodeURIComponent(token)}`;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Session</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #1a1a1a; overflow: hidden; }
+    #screen { width: 100%; height: 100%; }
+    #screen canvas { display: block; }
+    #status {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #999; font-family: sans-serif; font-size: 13px;
+      background: rgba(0,0,0,0.6); padding: 8px 16px; border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="screen"></div>
+  <div id="status">Connecting...</div>
+  <script type="module">
+    import RFB from '/novnc/core/rfb.js';
+
+    const statusEl = document.getElementById('status');
+    const screenEl = document.getElementById('screen');
+
+    const rfb = new RFB(screenEl, '${vncWsUrl}');
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+    rfb.viewOnly = false;
+
+    rfb.addEventListener('connect', () => {
+      statusEl.style.display = 'none';
+    });
+    rfb.addEventListener('disconnect', (e) => {
+      statusEl.style.display = '';
+      statusEl.textContent = e.detail.clean ? 'Session ended' : 'Connection lost';
+    });
+    rfb.addEventListener('credentialsrequired', () => {
+      // x11vnc is started with -nopw so no password is needed.
+      rfb.sendCredentials({ password: '' });
+    });
+  </script>
+</body>
+</html>`;
+
+  await updateLastActiveAt(sessionId);
+  logSessionEvent(sessionId, "vnc_view", request.ip, request.url, 200, undefined, "frontend");
+  return reply
+    .header("Content-Type", "text/html; charset=utf-8")
+    .header("X-Frame-Options", "SAMEORIGIN")
+    .send(html);
 }

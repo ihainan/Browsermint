@@ -1,0 +1,13 @@
+ARG STEEL_IMAGE=ghcr.io/steel-dev/steel-browser-api:latest
+FROM ${STEEL_IMAGE}
+
+USER root
+
+# x0vncserver (TigerVNC): connects to an existing X display and serves plain VNC
+# without built-in WebSocket support, so websockify can bridge cleanly.
+# python3-websockify: bridges the noVNC WebSocket client to x0vncserver's plain TCP VNC.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      tigervnc-scraping-server \
+      python3-websockify && \
+    rm -rf /var/lib/apt/lists/*

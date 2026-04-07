@@ -1,11 +1,14 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
+import staticFiles from "@fastify/static";
+import { createRequire } from "module";
+import { dirname } from "path";
 import { config } from "./config.js";
 import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
-import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload } from "./services/proxy.service.js";
+import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload, handleVncViewer } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
 import { initCdpSession } from "./services/cdp.service.js";
@@ -40,6 +43,16 @@ await server.register(cors, {
 });
 await server.register(sensible);
 
+// Serve @novnc/novnc package files at /novnc/ for the VNC viewer HTML page.
+// createRequire resolves the package path correctly regardless of build output directory.
+const _require = createRequire(import.meta.url);
+const novncDir = dirname(_require.resolve("@novnc/novnc/package.json"));
+await server.register(staticFiles, {
+  root: novncDir,
+  prefix: "/novnc/",
+  decorateReply: false,
+});
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 await server.register(authRoutes, { prefix: "/api/auth" });
@@ -59,6 +72,15 @@ server.get("/api/sessions/:id/browser", {
   handler: async (request, reply) =>
     handleBrowserProxy(
       request as Parameters<typeof handleBrowserProxy>[0],
+      reply
+    ),
+});
+
+// VNC viewer endpoint — serves the noVNC HTML client for full Chrome UI streaming
+server.get("/api/sessions/:id/vnc-viewer", {
+  handler: async (request, reply) =>
+    handleVncViewer(
+      request as Parameters<typeof handleVncViewer>[0],
       reply
     ),
 });

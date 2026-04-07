@@ -14,6 +14,7 @@ export default defineConfig({
     port: 24700,
     proxy: {
       "/api": "http://localhost:24710",
+      "/novnc": "http://localhost:24710",
       "/ws": {
         target: "http://localhost:24710",
         ws: true,

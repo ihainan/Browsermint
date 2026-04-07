@@ -896,7 +896,7 @@ export default function SessionViewPage() {
     );
   }
 
-  const browserSrc = sessionToken ? `/api/sessions/${id}/browser?token=${sessionToken}&clipboardBridge=true` : null;
+  const browserSrc = sessionToken ? `/api/sessions/${id}/vnc-viewer?token=${sessionToken}` : null;
   const tabs: { id: SidebarTab; label: string }[] = [
     { id: "details", label: t("sessionView.tabDetails") },
     { id: "logs", label: t("sessionView.tabLogs") },
@@ -1001,8 +1001,7 @@ export default function SessionViewPage() {
               src={browserSrc}
               className="w-full h-full border-0"
               title={t("sessionView.iframeTitle")}
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
-              allow="clipboard-read; clipboard-write"
+              sandbox="allow-scripts allow-same-origin"
             />
           )}
 
