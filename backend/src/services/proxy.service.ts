@@ -7,6 +7,7 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
 import { executeCdpCommand } from "./cdp.service.js";
+import { setContainerClipboard } from "./docker.service.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -830,6 +831,7 @@ export async function handleVncViewer(
   const host = getPublicRequestHost(request);
   const { ws: wsProto } = getRequestProtocols(request);
   const vncWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/vnc?token=${encodeURIComponent(token)}`;
+  const clipboardApiUrl = `/api/sessions/${sessionId}/clipboard?token=${encodeURIComponent(token)}`;
 
   const html = `<!DOCTYPE html>
 <html>
@@ -859,21 +861,131 @@ export async function handleVncViewer(
     const statusEl = document.getElementById('status');
     const screenEl = document.getElementById('screen');
 
-    const rfb = new RFB(screenEl, '${vncWsUrl}');
+    // --- Clipboard bridge ---
+    // noVNC registers its keydown listener on window in capture phase. Any
+    // listener added AFTER new RFB() is queued behind noVNC's, and noVNC calls
+    // stopImmediatePropagation(), so real keyboard events never reach our handler
+    // (synthetic dispatchEvent bypasses this, which is why manual testing worked).
+    //
+    // Fix: register on window BEFORE new RFB() — same target + capture phase,
+    // first registered wins. Clipboard API is also unreliable in iframes, so we
+    // delegate reads to the parent via postMessage.
+
+    const pendingClipboard = new Map();
+    let rfb = null; // assigned below, after listeners are registered
+
+    function requestClipboardFromParent() {
+      return new Promise((resolve, reject) => {
+        const id = Math.random().toString(36).slice(2);
+        const timer = setTimeout(() => {
+          pendingClipboard.delete(id);
+          reject(new Error('timeout'));
+        }, 2000);
+        pendingClipboard.set(id, { resolve, reject, timer });
+        window.parent.postMessage({ type: 'requestClipboardRead', requestId: id }, '*');
+      });
+    }
+
+    async function pasteText(text) {
+      if (!rfb || !text) return;
+      try {
+        // Ask the backend to set the X11 CLIPBOARD selection via xclip inside
+        // the container. x0vncserver's ClientCutText only sets PRIMARY, which
+        // Chrome ignores; xclip sets CLIPBOARD directly so Ctrl+V works.
+        const res = await fetch('${clipboardApiUrl}', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) throw new Error('clipboard API ' + res.status);
+      } catch (err) {
+        console.warn('[vnc] clipboard API failed, falling back to keystroke typing:', err);
+        // Fallback: type character by character via X11 keysyms
+        for (const char of text) {
+          const cp = char.codePointAt(0);
+          const keysym = cp <= 0x7e ? cp : (0x01000000 + cp);
+          rfb.sendKey(keysym, '', true);
+          rfb.sendKey(keysym, '', false);
+          if (text.length > 1) await new Promise(r => setTimeout(r, 8));
+        }
+        return;
+      }
+      // xclip has set CLIPBOARD — send Ctrl+V to remote Chrome
+      rfb.sendKey(0xffe3, 'ControlLeft', true);
+      rfb.sendKey(0x76,   'KeyV',        true);
+      rfb.sendKey(0x76,   'KeyV',        false);
+      rfb.sendKey(0xffe3, 'ControlLeft', false);
+    }
+
+    // Register BEFORE new RFB() to guarantee priority over noVNC's listener
+    window.addEventListener('keydown', async (e) => {
+      if (!rfb) return;
+      const isPaste = (e.ctrlKey || e.metaKey) && e.key === 'v';
+      if (!isPaste) return;
+      e.stopPropagation();
+      e.preventDefault();
+      let text = '';
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        try {
+          text = await requestClipboardFromParent();
+        } catch (err) {
+          console.warn('[vnc] clipboard unavailable:', err);
+        }
+      }
+      // Release any locally-held modifier keys before typing so they don't
+      // bleed into the typed characters on the remote side.
+      if (e.ctrlKey)  rfb.sendKey(0xffe3, 'ControlLeft',  false);
+      if (e.metaKey)  rfb.sendKey(0xffe7, 'MetaLeft',     false);
+      if (e.shiftKey) rfb.sendKey(0xffe1, 'ShiftLeft',    false);
+      if (e.altKey)   rfb.sendKey(0xffe9, 'AltLeft',      false);
+      await pasteText(text);
+    }, true /* capture phase */);
+
+    // Handle messages from parent page (triggerPaste, clipboard responses)
+    window.addEventListener('message', async (e) => {
+      if (e.data?.type === 'clipboardReadResponse') {
+        const req = pendingClipboard.get(e.data.requestId);
+        if (req) {
+          clearTimeout(req.timer);
+          pendingClipboard.delete(e.data.requestId);
+          if (e.data.error) req.reject(new Error(e.data.error));
+          else req.resolve(e.data.text || '');
+        }
+      }
+      if (e.data?.type === 'triggerPaste') {
+        await pasteText(e.data.text || '');
+      }
+    });
+
+    // Create the VNC connection (after listeners, so our keydown handler runs first)
+    rfb = new RFB(screenEl, '${vncWsUrl}');
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
     rfb.viewOnly = false;
 
     rfb.addEventListener('connect', () => {
       statusEl.style.display = 'none';
+      screenEl.focus();
     });
     rfb.addEventListener('disconnect', (e) => {
       statusEl.style.display = '';
       statusEl.textContent = e.detail.clean ? 'Session ended' : 'Connection lost';
     });
     rfb.addEventListener('credentialsrequired', () => {
-      // x11vnc is started with -nopw so no password is needed.
       rfb.sendCredentials({ password: '' });
+    });
+
+    // Sync clipboard from VNC session back to the local browser clipboard
+    rfb.addEventListener('clipboard', async (e) => {
+      const text = e.detail.text;
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        window.parent.postMessage({ type: 'requestClipboardWrite', text, requestId: Math.random().toString(36).slice(2) }, '*');
+      }
     });
   </script>
 </body>
@@ -885,4 +997,27 @@ export async function handleVncViewer(
     .header("Content-Type", "text/html; charset=utf-8")
     .header("X-Frame-Options", "SAMEORIGIN")
     .send(html);
+}
+
+export async function handleSetClipboard(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { text: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const body = request.body as { text?: unknown };
+  if (typeof body?.text !== "string" || !body.text) {
+    return reply.status(400).send({ error: "Missing text" });
+  }
+
+  const session = await prisma.session.findUnique({ where: { id: sessionId } });
+  if (!session?.containerId) return reply.status(404).send({ error: "Container not found" });
+
+  await setContainerClipboard(session.containerId, body.text);
+  return reply.send({ ok: true });
 }

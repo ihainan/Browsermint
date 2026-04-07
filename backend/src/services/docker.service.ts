@@ -281,6 +281,29 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
   }
 }
 
+// Set the X11 CLIPBOARD selection inside the container via xclip.
+// This is the reliable way to paste text into Chrome running in the container —
+// ClientCutText (VNC clipboard) only sets PRIMARY, which Chrome's Ctrl+V ignores.
+export async function setContainerClipboard(containerId: string, text: string): Promise<void> {
+  const container = docker.getContainer(containerId);
+  const exec = await container.exec({
+    Cmd: ["sh", "-c", "cat | DISPLAY=:10 xclip -selection clipboard -i"],
+    AttachStdin: true,
+    AttachStdout: false,
+    AttachStderr: false,
+  });
+  await new Promise<void>((resolve, reject) => {
+    exec.start({ hijack: true, stdin: true }, (err: Error | null, stream: NodeJS.ReadWriteStream | undefined) => {
+      if (err) return reject(err);
+      if (!stream) return reject(new Error("No exec stream"));
+      stream.write(Buffer.from(text, "utf-8"));
+      stream.end();
+      // Give xclip a moment to process before the caller sends Ctrl+V
+      setTimeout(resolve, 80);
+    });
+  });
+}
+
 export async function pullImageIfNeeded(): Promise<void> {
   // If the image already exists locally (e.g. a locally-built image like steelyard-browser:latest),
   // skip the pull entirely — docker.pull would fail with 404 for images not on Docker Hub.

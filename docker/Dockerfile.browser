@@ -9,5 +9,6 @@ USER root
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       tigervnc-scraping-server \
-      python3-websockify && \
+      python3-websockify \
+      xclip && \
     rm -rf /var/lib/apt/lists/*

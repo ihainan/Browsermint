@@ -8,7 +8,7 @@ import { config } from "./config.js";
 import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
-import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload, handleVncViewer } from "./services/proxy.service.js";
+import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload, handleVncViewer, handleSetClipboard } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
 import { initCdpSession } from "./services/cdp.service.js";
@@ -72,6 +72,15 @@ server.get("/api/sessions/:id/browser", {
   handler: async (request, reply) =>
     handleBrowserProxy(
       request as Parameters<typeof handleBrowserProxy>[0],
+      reply
+    ),
+});
+
+// Set X11 CLIPBOARD inside the session container (used by VNC viewer for paste)
+server.post("/api/sessions/:id/clipboard", {
+  handler: async (request, reply) =>
+    handleSetClipboard(
+      request as Parameters<typeof handleSetClipboard>[0],
       reply
     ),
 });
