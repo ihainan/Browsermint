@@ -5,6 +5,7 @@ import { config } from "../config.js";
 export interface JwtPayload {
   sub: string;
   username: string;
+  isAdmin: boolean;
   iat: number;
   exp: number;
 }
@@ -39,5 +40,16 @@ export async function authMiddleware(
     request.user = payload;
   } catch {
     return reply.status(401).send({ error: "Unauthorized" });
+  }
+}
+
+export async function adminMiddleware(
+  request: FastifyRequest,
+  reply: FastifyReply
+) {
+  await authMiddleware(request, reply);
+  if (reply.sent) return;
+  if (!request.user.isAdmin) {
+    return reply.status(403).send({ error: "Forbidden" });
   }
 }

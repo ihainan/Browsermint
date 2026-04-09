@@ -9,6 +9,7 @@ import { config } from "./config.js";
 import { prisma, bindPrismaLogger } from "./db/client.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import sessionsRoutes from "./modules/sessions/sessions.routes.js";
+import adminRoutes from "./modules/admin/admin.routes.js";
 import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload, handleVncViewer, handleSetClipboard } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
@@ -63,6 +64,7 @@ await server.register(staticFiles, {
 
 await server.register(authRoutes, { prefix: "/api/auth" });
 await server.register(sessionsRoutes, { prefix: "/api/sessions" });
+await server.register(adminRoutes, { prefix: "/api/admin" });
 
 // Session details proxy (session-token auth via query string)
 server.get("/api/sessions/:id/details", {

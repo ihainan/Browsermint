@@ -10,8 +10,8 @@ const AUTH_ERROR_MSG = "Invalid email or password";
 const AUTH_COOKIE_NAME = "steelyard_auth";
 const AUTH_COOKIE_MAX_AGE = 24 * 60 * 60; // 24 hours, matching JWT expiry
 
-function signToken(userId: string, username: string): string {
-  return jwt.sign({ sub: userId, username }, config.JWT_SECRET, {
+function signToken(userId: string, username: string, isAdmin: boolean): string {
+  return jwt.sign({ sub: userId, username, isAdmin }, config.JWT_SECRET, {
     expiresIn: "24h",
   });
 }
@@ -52,13 +52,16 @@ export async function handleRegister(
     return reply.status(409).send({ error: "Username or email already exists" });
   }
 
+  const userCount = await prisma.user.count();
+  const isAdmin = userCount === 0;
+
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   const user = await prisma.user.create({
-    data: { username, email, passwordHash },
-    select: { id: true, username: true, email: true, createdAt: true, maxSessions: true },
+    data: { username, email, passwordHash, isAdmin },
+    select: { id: true, username: true, email: true, isAdmin: true, createdAt: true, maxSessions: true },
   });
 
-  const token = signToken(user.id, user.username);
+  const token = signToken(user.id, user.username, user.isAdmin);
   setAuthCookie(reply, token);
   return reply.status(201).send({ user });
 }
@@ -78,13 +81,14 @@ export async function handleLogin(
     return reply.status(401).send({ error: AUTH_ERROR_MSG });
   }
 
-  const token = signToken(user.id, user.username);
+  const token = signToken(user.id, user.username, user.isAdmin);
   setAuthCookie(reply, token);
   return reply.send({
     user: {
       id: user.id,
       username: user.username,
       email: user.email,
+      isAdmin: user.isAdmin,
       createdAt: user.createdAt,
       maxSessions: user.maxSessions,
     },
@@ -97,7 +101,7 @@ export async function handleMe(
 ) {
   const user = await prisma.user.findUnique({
     where: { id: request.user.sub },
-    select: { id: true, username: true, email: true, createdAt: true, maxSessions: true },
+    select: { id: true, username: true, email: true, isAdmin: true, createdAt: true, maxSessions: true },
   });
   if (!user) {
     return reply.status(404).send({ error: "User not found" });

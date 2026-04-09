@@ -12,6 +12,7 @@ model User {
   username     String    @unique @db.VarChar(64)
   email        String    @unique @db.VarChar(256)
   passwordHash String    @db.VarChar(256)
+  isAdmin      Boolean   @default(false)
   maxSessions  Int       @default(5)
   createdAt    DateTime  @default(now())
   sessions     Session[]
