@@ -12,6 +12,7 @@ import {
   waitForContainerReady,
   stopContainer,
   stopAndRemoveContainer,
+  type ContainerInfo,
 } from "../../services/docker.service.js";
 import {
   initCdpSession,
@@ -57,8 +58,9 @@ export async function handleCreateSession(
 
   console.info(`[session] Creating session ${sessionId} (user ${userId})`);
 
+  let containerInfo: ContainerInfo | undefined;
   try {
-    const containerInfo = await createAndStartContainer(sessionId);
+    containerInfo = await createAndStartContainer(sessionId);
     await waitForContainerReady(containerInfo.internalApiUrl);
     await initCdpSession(sessionId, containerInfo.internalApiUrl);
 
@@ -89,9 +91,9 @@ export async function handleCreateSession(
       where: { id: sessionId },
       data: { status: "error" },
     });
-    // Try to clean up any partially-created container
-    if (session.containerId) {
-      await stopAndRemoveContainer(session.containerId).catch(() => {});
+    // Clean up any container that was started before the failure
+    if (containerInfo) {
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
     }
     return reply.status(500).send({ error: "Failed to start browser session" });
   }
@@ -197,9 +199,13 @@ export async function handleStopSession(
 
   if (session.containerId) {
     // Stop-only: container filesystem (cookies, browser data) is preserved for resume.
-    await stopContainer(session.containerId).catch((err) =>
-      console.error(`[session] Failed to stop container for session ${id}:`, err)
-    );
+    try {
+      await stopContainer(session.containerId);
+    } catch (err) {
+      console.error(`[session] Failed to stop container for session ${id}:`, err);
+      await prisma.session.update({ where: { id }, data: { status: "error" } });
+      return reply.status(500).send({ error: "Failed to stop browser session" });
+    }
   }
 
   const updated = await prisma.session.update({
@@ -251,11 +257,12 @@ export async function handleStartSession(
 
   await prisma.session.update({ where: { id }, data: { status: "creating" } });
 
+  let containerInfo: ContainerInfo | undefined;
   try {
     // If a container already exists (session was stopped, not deleted), restart it
     // so the browser's cookies and local storage are preserved.
     // Otherwise create a fresh container.
-    let containerInfo = session.containerId
+    containerInfo = session.containerId
       ? await startExistingContainer(session.containerId)
       : await createAndStartContainer(id);
 
@@ -306,6 +313,10 @@ export async function handleStartSession(
   } catch (err) {
     console.error(`[session] Failed to resume session ${id}:`, err);
     await prisma.session.update({ where: { id }, data: { status: "error" } });
+    // Clean up any container that was started before the failure
+    if (containerInfo) {
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+    }
     return reply.status(500).send({ error: "Failed to start browser session" });
   }
 }

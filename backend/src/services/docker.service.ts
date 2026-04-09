@@ -109,12 +109,13 @@ export async function stopContainer(containerId: string): Promise<void> {
   console.info(`[docker] Stopping container ${containerId.slice(0, 12)}`);
   try {
     const container = docker.getContainer(containerId);
-    await container.stop({ t: 5 }).catch(() => {});
+    await container.stop({ t: 5 });
     console.info(`[docker] Container ${containerId.slice(0, 12)} stopped`);
   } catch (err: unknown) {
     const statusCode = (err as { statusCode?: number }).statusCode;
-    if (statusCode === 404) {
-      console.info(`[docker] Container ${containerId.slice(0, 12)} already gone`);
+    if (statusCode === 304 || statusCode === 404) {
+      // 304: already stopped, 404: already gone — both are fine
+      console.info(`[docker] Container ${containerId.slice(0, 12)} already ${statusCode === 404 ? "gone" : "stopped"}`);
       return;
     }
     throw err;
@@ -278,6 +279,26 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
       await stopContainer(session.containerId).catch(() => {});
     }
     await prisma.session.update({ where: { id: session.id }, data: { status: "stopped" } });
+  }
+
+  // Clean up running containers left behind by failed create/start operations.
+  // These sessions are in "error" state but their container was started before the failure.
+  const errorSessionsWithContainer = await prisma.session.findMany({
+    where: { status: "error", deletedAt: null, containerId: { not: null } },
+  });
+
+  for (const session of errorSessionsWithContainer) {
+    const container = session.containerId ? containerById.get(session.containerId) : undefined;
+    if (container && container.State === "running") {
+      console.info(`[reconcile] Session ${session.id}: error status but container still running — removing`);
+      await stopAndRemoveContainer(session.containerId!).catch((err) =>
+        console.error(`[reconcile] Failed to remove container for error session ${session.id}:`, err)
+      );
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { containerId: null, containerName: null, internalApiUrl: null },
+      });
+    }
   }
 }
 
