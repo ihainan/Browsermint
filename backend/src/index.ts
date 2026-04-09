@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
 import staticFiles from "@fastify/static";
 import { createRequire } from "module";
@@ -26,13 +27,17 @@ const server = Fastify({
 
 bindPrismaLogger(server.log);
 
-// Log requests at debug level
+// Log requests at debug level — redact session token from URL to avoid leaking it into logs
+function redactTokenFromUrl(url: string): string {
+  return url.replace(/([?&])token=[^&]*/g, "$1[redacted]").replace(/[?&]$/, "");
+}
+
 server.addHook("onRequest", async (request) => {
-  request.log.debug({ method: request.method, url: request.url }, "incoming request");
+  request.log.debug({ method: request.method, url: redactTokenFromUrl(request.url) }, "incoming request");
 });
 server.addHook("onResponse", async (request, reply) => {
   request.log.debug(
-    { method: request.method, url: request.url, statusCode: reply.statusCode, responseTime: reply.elapsedTime },
+    { method: request.method, url: redactTokenFromUrl(request.url), statusCode: reply.statusCode, responseTime: reply.elapsedTime },
     "request completed"
   );
 });
@@ -41,6 +46,7 @@ await server.register(cors, {
   origin: true,
   credentials: true,
 });
+await server.register(rateLimit, { global: false });
 await server.register(sensible);
 
 // Serve @novnc/novnc package files at /novnc/ for the VNC viewer HTML page.
