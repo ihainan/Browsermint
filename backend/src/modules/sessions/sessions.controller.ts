@@ -31,30 +31,34 @@ export async function handleCreateSession(
 ) {
   const userId = request.user.sub;
   const { name } = request.body;
-
-  // Enforce per-user session limit
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) return reply.status(404).send({ error: "User not found" });
-
-  const activeCount = await prisma.session.count({
-    where: {
-      userId,
-      deletedAt: null,
-      status: { in: ["creating", "running"] },
-    },
-  });
-  if (activeCount >= user.maxSessions) {
-    return reply.status(429).send({
-      error: `Session limit reached (max ${user.maxSessions})`,
-    });
-  }
-
   const sessionId = uuidv4();
 
-  // Insert DB record first so reconcile can find it
-  const session = await prisma.session.create({
-    data: { id: sessionId, userId, name: name ?? null, status: "creating" },
-  });
+  // Atomically check the per-user session limit and insert the new session record.
+  // SELECT...FOR UPDATE on the user row serializes concurrent requests from the same
+  // user, preventing the TOCTOU race where two simultaneous requests both pass the
+  // count check and create sessions beyond maxSessions.
+  let session!: Awaited<ReturnType<typeof prisma.session.create>>;
+  try {
+    session = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT id FROM "User" WHERE id = ${userId}::uuid FOR UPDATE`;
+      const user = await tx.user.findUnique({ where: { id: userId } });
+      if (!user) throw Object.assign(new Error(), { _code: "USER_NOT_FOUND" });
+      const activeCount = await tx.session.count({
+        where: { userId, deletedAt: null, status: { in: ["creating", "running"] } },
+      });
+      if (activeCount >= user.maxSessions) {
+        throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
+      }
+      return tx.session.create({
+        data: { id: sessionId, userId, name: name ?? null, status: "creating" },
+      });
+    });
+  } catch (err: unknown) {
+    const e = err as Record<string, unknown>;
+    if (e._code === "USER_NOT_FOUND") return reply.status(404).send({ error: "User not found" });
+    if (e._code === "LIMIT_EXCEEDED") return reply.status(429).send({ error: `Session limit reached (max ${e._max})` });
+    throw err;
+  }
 
   console.info(`[session] Creating session ${sessionId} (user ${userId})`);
 
@@ -237,25 +241,30 @@ export async function handleStartSession(
     return reply.status(400).send({ error: "Session is not stopped" });
   }
 
-  const user = await prisma.user.findUnique({ where: { id: request.user.sub } });
-  if (!user) return reply.status(404).send({ error: "User not found" });
-
-  const activeCount = await prisma.session.count({
-    where: {
-      userId: request.user.sub,
-      deletedAt: null,
-      status: { in: ["creating", "running"] },
-    },
-  });
-  if (activeCount >= user.maxSessions) {
-    return reply.status(429).send({
-      error: `Session limit reached (max ${user.maxSessions})`,
+  // Atomically check the per-user session limit and mark the session as "creating".
+  // Same SELECT...FOR UPDATE pattern as handleCreateSession to prevent TOCTOU races.
+  const userId = request.user.sub;
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT id FROM "User" WHERE id = ${userId}::uuid FOR UPDATE`;
+      const user = await tx.user.findUnique({ where: { id: userId } });
+      if (!user) throw Object.assign(new Error(), { _code: "USER_NOT_FOUND" });
+      const activeCount = await tx.session.count({
+        where: { userId, deletedAt: null, status: { in: ["creating", "running"] } },
+      });
+      if (activeCount >= user.maxSessions) {
+        throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
+      }
+      await tx.session.update({ where: { id }, data: { status: "creating" } });
     });
+  } catch (err: unknown) {
+    const e = err as Record<string, unknown>;
+    if (e._code === "USER_NOT_FOUND") return reply.status(404).send({ error: "User not found" });
+    if (e._code === "LIMIT_EXCEEDED") return reply.status(429).send({ error: `Session limit reached (max ${e._max})` });
+    throw err;
   }
 
   console.info(`[session] Resuming session ${id} (had container: ${session.containerId ? "yes" : "no"})`);
-
-  await prisma.session.update({ where: { id }, data: { status: "creating" } });
 
   let containerInfo: ContainerInfo | undefined;
   try {
