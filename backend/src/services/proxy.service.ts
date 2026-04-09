@@ -231,6 +231,17 @@ async function updateLastActiveAt(sessionId: string) {
   }).catch(() => {});
 }
 
+/** Remove the `token` query parameter from a URL before storing it in the DB. */
+function sanitizeRequestPath(url: string): string {
+  try {
+    const u = new URL(url, "http://localhost");
+    u.searchParams.delete("token");
+    return u.pathname + (u.search || "");
+  } catch {
+    return url.replace(/([?&])token=[^&]*/g, "$1").replace(/[?&]$/, "");
+  }
+}
+
 function logSessionEvent(
   sessionId: string,
   operationType: string,
@@ -245,7 +256,7 @@ function logSessionEvent(
       sessionId,
       operationType,
       sourceIp,
-      requestPath: requestPath ? requestPath.slice(0, 512) : null,
+      requestPath: requestPath ? sanitizeRequestPath(requestPath).slice(0, 512) : null,
       statusCode: statusCode ?? null,
       metadata: metadata ?? undefined,
       source: source ?? null,
