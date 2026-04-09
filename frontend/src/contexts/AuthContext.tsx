@@ -9,8 +9,8 @@ import { authApi, User } from "../api/client.ts";
 
 interface AuthContextValue {
   user: User | null;
-  token: string | null;
   isLoading: boolean;
+  registrationEnabled: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
@@ -20,56 +20,45 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
 
-  // Restore session on mount
+  // Restore session and fetch server config on mount.
+  // Auth state is derived from the HttpOnly cookie via /me — no localStorage needed.
   useEffect(() => {
-    const storedToken = localStorage.getItem("browsermint_token");
-    if (!storedToken) {
-      setIsLoading(false);
-      return;
-    }
-    setToken(storedToken);
+    authApi.getConfig()
+      .then((res) => setRegistrationEnabled(res.data.registrationEnabled))
+      .catch(() => { /* keep default true on failure */ });
+
     authApi
       .me()
       .then((res) => setUser(res.data.user))
-      .catch((err) => {
-        if (err?.response?.status === 401) {
-          localStorage.removeItem("browsermint_token");
-          localStorage.removeItem("browsermint_user");
-        }
+      .catch(() => {
+        // Not authenticated — leave user as null
       })
       .finally(() => setIsLoading(false));
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
     const res = await authApi.login({ email, password });
-    const { user, token } = res.data;
-    localStorage.setItem("browsermint_token", token);
-    setToken(token);
-    setUser(user);
+    setUser(res.data.user);
   }, []);
 
   const register = useCallback(
     async (username: string, email: string, password: string) => {
       const res = await authApi.register({ username, email, password });
-      const { user, token } = res.data;
-      localStorage.setItem("browsermint_token", token);
-      setToken(token);
-      setUser(user);
+      setUser(res.data.user);
     },
     []
   );
 
   const logout = useCallback(() => {
-    localStorage.removeItem("browsermint_token");
-    setToken(null);
+    authApi.logout().catch(() => {});
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, registrationEnabled, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

@@ -7,6 +7,8 @@ import { RegisterBody, LoginBody } from "./auth.schema.js";
 
 const SALT_ROUNDS = 12;
 const AUTH_ERROR_MSG = "Invalid email or password";
+const AUTH_COOKIE_NAME = "steelyard_auth";
+const AUTH_COOKIE_MAX_AGE = 24 * 60 * 60; // 24 hours, matching JWT expiry
 
 function signToken(userId: string, username: string): string {
   return jwt.sign({ sub: userId, username }, config.JWT_SECRET, {
@@ -14,10 +16,33 @@ function signToken(userId: string, username: string): string {
   });
 }
 
+function setAuthCookie(reply: FastifyReply, token: string): void {
+  const parts = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "HttpOnly",
+    "Path=/api/",
+    `Max-Age=${AUTH_COOKIE_MAX_AGE}`,
+    "SameSite=Lax",
+  ];
+  if (config.NODE_ENV === "production") parts.push("Secure");
+  reply.header("Set-Cookie", parts.join("; "));
+}
+
+function clearAuthCookie(reply: FastifyReply): void {
+  reply.header(
+    "Set-Cookie",
+    `${AUTH_COOKIE_NAME}=; HttpOnly; Path=/api/; Max-Age=0; SameSite=Lax`
+  );
+}
+
 export async function handleRegister(
   request: FastifyRequest<{ Body: RegisterBody }>,
   reply: FastifyReply
 ) {
+  if (config.REGISTRATION_MODE === "disabled") {
+    return reply.status(403).send({ error: "Registration is disabled" });
+  }
+
   const { username, email, password } = request.body;
 
   const existing = await prisma.user.findFirst({
@@ -34,7 +59,8 @@ export async function handleRegister(
   });
 
   const token = signToken(user.id, user.username);
-  return reply.status(201).send({ user, token });
+  setAuthCookie(reply, token);
+  return reply.status(201).send({ user });
 }
 
 export async function handleLogin(
@@ -53,6 +79,7 @@ export async function handleLogin(
   }
 
   const token = signToken(user.id, user.username);
+  setAuthCookie(reply, token);
   return reply.send({
     user: {
       id: user.id,
@@ -61,7 +88,6 @@ export async function handleLogin(
       createdAt: user.createdAt,
       maxSessions: user.maxSessions,
     },
-    token,
   });
 }
 
@@ -77,4 +103,12 @@ export async function handleMe(
     return reply.status(404).send({ error: "User not found" });
   }
   return reply.send({ user });
+}
+
+export async function handleLogout(
+  _request: FastifyRequest,
+  reply: FastifyReply
+) {
+  clearAuthCookie(reply);
+  return reply.send({ success: true });
 }

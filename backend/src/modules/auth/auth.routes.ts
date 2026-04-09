@@ -1,9 +1,16 @@
 import { FastifyInstance } from "fastify";
-import { handleLogin, handleMe, handleRegister } from "./auth.controller.js";
+import { handleLogin, handleLogout, handleMe, handleRegister } from "./auth.controller.js";
 import { LoginBodySchema, RegisterBodySchema } from "./auth.schema.js";
 import { authMiddleware } from "../../middleware/auth.middleware.js";
+import { config } from "../../config.js";
 
 export default async function authRoutes(server: FastifyInstance) {
+  server.get("/config", {
+    handler: async (_request, reply) => {
+      return reply.send({ registrationEnabled: config.REGISTRATION_MODE === "open" });
+    },
+  });
+
   server.post("/register", {
     schema: { body: { type: "object" } },
     config: {
@@ -57,5 +64,9 @@ export default async function authRoutes(server: FastifyInstance) {
   server.get("/me", {
     preHandler: authMiddleware,
     handler: handleMe,
+  });
+
+  server.post("/logout", {
+    handler: handleLogout,
   });
 }

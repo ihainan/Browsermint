@@ -3,15 +3,7 @@ import axios from "axios";
 export const api = axios.create({
   baseURL: "/api",
   headers: { "Content-Type": "application/json", "X-Steelyard-Client": "frontend" },
-});
-
-// Attach auth token to every request
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("browsermint_token");
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
+  withCredentials: true, // send HttpOnly auth cookie automatically on every request
 });
 
 // Redirect to /login on 401, but only for auth-protected API calls.
@@ -27,8 +19,6 @@ api.interceptors.response.use(
     if (err.response?.status === 401) {
       const url: string = err.config?.url ?? "";
       if (!SESSION_PROXY_PATH.test(url)) {
-        localStorage.removeItem("browsermint_token");
-        localStorage.removeItem("browsermint_user");
         if (window.location.pathname !== "/login") {
           window.location.href = "/login";
         }
@@ -93,10 +83,12 @@ export interface BrowserTab {
 
 export const authApi = {
   register: (data: { username: string; email: string; password: string }) =>
-    api.post<{ user: User; token: string }>("/auth/register", data),
+    api.post<{ user: User }>("/auth/register", data),
   login: (data: { email: string; password: string }) =>
-    api.post<{ user: User; token: string }>("/auth/login", data),
+    api.post<{ user: User }>("/auth/login", data),
   me: () => api.get<{ user: User }>("/auth/me"),
+  logout: () => api.post<{ success: boolean }>("/auth/logout"),
+  getConfig: () => api.get<{ registrationEnabled: boolean }>("/auth/config"),
 };
 
 export interface EventsStats {

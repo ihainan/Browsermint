@@ -5,7 +5,7 @@ import { useI18n } from "../i18n/I18nContext.tsx";
 import browsermintIcon from "../assets/browsermint-icon.png";
 
 export default function LoginPage() {
-  const { login, user } = useAuth();
+  const { login, user, registrationEnabled } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
@@ -93,12 +93,14 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <p className="mt-5 text-sm text-center text-gray-400">
-            {t("login.noAccount")}{" "}
-            <Link to="/register" className="text-[#1dc99a] font-medium hover:text-[#17a87f] transition-colors">
-              {t("login.createOne")}
-            </Link>
-          </p>
+          {registrationEnabled && (
+            <p className="mt-5 text-sm text-center text-gray-400">
+              {t("login.noAccount")}{" "}
+              <Link to="/register" className="text-[#1dc99a] font-medium hover:text-[#17a87f] transition-colors">
+                {t("login.createOne")}
+              </Link>
+            </p>
+          )}
         </div>
       </div>
     </div>
