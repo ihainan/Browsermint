@@ -289,17 +289,17 @@ export default function SessionsPage() {
                   key={session.id}
                   className={clsx(
                     "group rounded-2xl border shadow-md px-5 py-4 flex items-center gap-4 hover:shadow-lg hover:border-gray-300 transition-all duration-150",
-                    session.status === "running" && "cursor-pointer",
+                    (session.status === "running" || session.status === "paused") && "cursor-pointer",
                     session.status === "stopped"
                       ? "bg-gray-50 border-gray-200 shadow-gray-200/40 hover:shadow-gray-200/50"
                       : "bg-white border-gray-200 shadow-gray-300/40 hover:shadow-gray-300/50"
                   )}
-                  onClick={() => session.status === "running" && window.open(`/sessions/${session.id}`, "_blank")}
+                  onClick={() => (session.status === "running" || session.status === "paused") && window.open(`/sessions/${session.id}`, "_blank")}
                 >
                   <div
                     className={clsx(
                       "w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-sm",
-                      session.status === "stopped" || session.status === "stopping"
+                      session.status === "stopped" || session.status === "stopping" || session.status === "paused"
                         ? "bg-gray-200"
                         : "bg-gradient-to-br " + getBrowserGradient(session.name)
                     )}
@@ -308,7 +308,7 @@ export default function SessionsPage() {
                       size={17}
                       className={clsx(
                         "drop-shadow-sm",
-                        session.status === "stopped" || session.status === "stopping" ? "text-gray-400" : "text-white"
+                        session.status === "stopped" || session.status === "stopping" || session.status === "paused" ? "text-gray-400" : "text-white"
                       )}
                     />
                   </div>
@@ -320,7 +320,7 @@ export default function SessionsPage() {
                       <p className="text-sm font-semibold text-gray-900 truncate">
                         {session.name ?? t("common.unnamedBrowser")}
                       </p>
-                      {session.status === "running" && (
+                      {(session.status === "running" || session.status === "paused") && (
                         <ExternalLink size={11} className="text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
                       )}
                     </div>
@@ -356,7 +356,7 @@ export default function SessionsPage() {
                       {session.status === "error" && (
                         <p className="text-xs text-red-500">{getSessionStatusLabel(locale, "error")}</p>
                       )}
-                      {session.status === "running" && (
+                      {(session.status === "running" || session.status === "paused") && (
                         <p className="text-xs text-gray-500 font-mono truncate">
                           {session.containerName ? session.containerName.replace("browsermint-session-", "") : "—"}
                         </p>

@@ -21,6 +21,7 @@ import {
   getOpenPageUrls,
   openSavedTabs,
 } from "../../services/cdp.service.js";
+import { clearIdleTimer } from "../../services/proxy.service.js";
 import { CreateSessionBody } from "./sessions.schema.js";
 
 // ─── Create Session ───────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ export async function handleCreateSession(
       const user = await tx.user.findUnique({ where: { id: userId } });
       if (!user) throw Object.assign(new Error(), { _code: "USER_NOT_FOUND" });
       const activeCount = await tx.session.count({
-        where: { userId, deletedAt: null, status: { in: ["creating", "running"] } },
+        where: { userId, deletedAt: null, status: { in: ["creating", "running", "paused"] } },
       });
       if (activeCount >= user.maxSessions) {
         throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
@@ -145,6 +146,8 @@ export async function handleDeleteSession(
 
   console.info(`[session] Deleting session ${id}`);
 
+  clearIdleTimer(id);
+
   await prisma.session.update({
     where: { id },
     data: { status: "stopping" },
@@ -179,13 +182,35 @@ export async function handleStopSession(
     where: { id, userId: request.user.sub, deletedAt: null },
   });
   if (!session) return reply.status(404).send({ error: "Session not found" });
-  if (session.status !== "running") {
+  if (session.status !== "running" && session.status !== "paused") {
     return reply.status(400).send({ error: "Session is not running" });
   }
 
   console.info(`[session] Stopping session ${id}`);
 
+  clearIdleTimer(id);
   await prisma.session.update({ where: { id }, data: { status: "stopping" } });
+
+  // Paused sessions: Chrome is frozen, skip CDP operations and go straight to docker stop.
+  // docker stop handles paused containers by unpausing then stopping them.
+  if (session.status === "paused") {
+    cleanupCdpSession(id);
+    if (session.containerId) {
+      try {
+        await stopContainer(session.containerId);
+      } catch (err) {
+        console.error(`[session] Failed to stop container for session ${id}:`, err);
+        await prisma.session.update({ where: { id }, data: { status: "error" } });
+        return reply.status(500).send({ error: "Failed to stop browser session" });
+      }
+    }
+    const updated = await prisma.session.update({
+      where: { id },
+      data: { status: "stopped" },
+    });
+    console.info(`[session] Session ${id} stopped`);
+    return reply.send({ session: updated });
+  }
 
   // Save open tab URLs before closing, so they can be restored on resume
   const savedUrls = await getOpenPageUrls(id);
@@ -250,7 +275,7 @@ export async function handleStartSession(
       const user = await tx.user.findUnique({ where: { id: userId } });
       if (!user) throw Object.assign(new Error(), { _code: "USER_NOT_FOUND" });
       const activeCount = await tx.session.count({
-        where: { userId, deletedAt: null, status: { in: ["creating", "running"] } },
+        where: { userId, deletedAt: null, status: { in: ["creating", "running", "paused"] } },
       });
       if (activeCount >= user.maxSessions) {
         throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
@@ -455,7 +480,7 @@ export async function handleCreateSessionToken(
     where: { id, userId: request.user.sub, deletedAt: null },
   });
   if (!session) return reply.status(404).send({ error: "Session not found" });
-  if (session.status !== "running") {
+  if (session.status !== "running" && session.status !== "paused") {
     return reply.status(400).send({ error: "Session is not running" });
   }
 
@@ -481,7 +506,7 @@ export async function handleRefreshSessionToken(
     where: { id, userId: request.user.sub, deletedAt: null },
   });
   if (!session) return reply.status(404).send({ error: "Session not found" });
-  if (session.status !== "running") {
+  if (session.status !== "running" && session.status !== "paused") {
     return reply.status(400).send({ error: "Session is not running" });
   }
 

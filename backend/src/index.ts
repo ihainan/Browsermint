@@ -13,6 +13,7 @@ import adminRoutes from "./modules/admin/admin.routes.js";
 import { handleBrowserProxy, handleDetailsProxy, handleDevtoolsProxy, handleDevtoolsTargetProxy, handleGetTargets, handleCreateTarget, handleCloseTarget, handleActivateTarget, handleNavigate, handleGoBack, handleGoForward, handleReload, handleVncViewer, handleSetClipboard } from "./services/proxy.service.js";
 import { handleWebSocketUpgrade } from "./services/proxy.service.js";
 import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
+import { scheduleIdlePauseOnStartup } from "./services/proxy.service.js";
 import { initCdpSession } from "./services/cdp.service.js";
 import { authMiddleware } from "./middleware/auth.middleware.js";
 
@@ -202,6 +203,8 @@ server.addHook("onReady", async () => {
           return prisma.session.update({ where: { id: s.id }, data: { status: "error" } });
         }
         server.log.info(`[session] Session ${s.id}: CDP re-attached after restart`);
+        // Schedule idle-pause timer — session has no WS connections after restart
+        scheduleIdlePauseOnStartup(s.id);
       }).catch((err) => {
         server.log.warn({ err }, `[session] Failed to re-attach CDP for session ${s.id}`);
       });

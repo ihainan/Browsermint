@@ -8,6 +8,7 @@ const statusLabels: Record<Locale, Record<Session["status"], string>> = {
     stopping: "stopping",
     stopped: "stopped",
     error: "error",
+    paused: "paused",
   },
   zh: {
     creating: "创建中",
@@ -15,6 +16,7 @@ const statusLabels: Record<Locale, Record<Session["status"], string>> = {
     stopping: "停止中",
     stopped: "已停止",
     error: "错误",
+    paused: "已暂停",
   },
 };
 

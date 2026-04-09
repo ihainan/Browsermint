@@ -19,6 +19,7 @@ const STATUS_STYLES: Record<Session["status"], string> = {
   stopping: "bg-orange-50 text-orange-700 ring-1 ring-orange-200",
   stopped: "bg-gray-100 text-gray-500 ring-1 ring-gray-200",
   error: "bg-red-50 text-red-600 ring-1 ring-red-200",
+  paused: "bg-blue-50 text-blue-600 ring-1 ring-blue-200",
 };
 
 const STATUS_DOT: Record<Session["status"], string> = {
@@ -27,6 +28,7 @@ const STATUS_DOT: Record<Session["status"], string> = {
   stopping: "bg-orange-400 animate-pulse",
   stopped: "bg-gray-400",
   error: "bg-red-500",
+  paused: "bg-blue-400 animate-pulse",
 };
 
 function formatDuration(ms: number): string {
@@ -999,7 +1001,7 @@ export default function SessionViewPage() {
     queryFn: () => sessionsApi.get(id!).then((r) => r.data.session),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "creating" || status === "stopping" ? 2000 : 10000;
+      return status === "creating" || status === "stopping" || status === "paused" ? 2000 : 10000;
     },
     enabled: !!id,
   });
@@ -1007,7 +1009,7 @@ export default function SessionViewPage() {
   const session = sessionData;
 
   useEffect(() => {
-    if (!id || session?.status !== "running") {
+    if (!id || (session?.status !== "running" && session?.status !== "paused")) {
       // Clear the token so polling in sidebars stops immediately; otherwise
       // the still-running intervals would hit proxy endpoints that return 401
       // for non-running sessions, triggering a global auth logout.

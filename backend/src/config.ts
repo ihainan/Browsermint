@@ -12,6 +12,8 @@ const envSchema = z.object({
   CAPSOLVER_API_KEY: z.string().optional(),
   REGISTRATION_MODE: z.enum(["open", "disabled"]).default("open"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  IDLE_PAUSE_ENABLED: z.coerce.boolean().default(true),
+  IDLE_PAUSE_TIMEOUT_MS: z.coerce.number().default(10 * 60 * 1000),
   NODE_ENV: z
     .enum(["development", "production", "test"])
     .default("development"),

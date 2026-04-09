@@ -22,6 +22,7 @@ function StatusBadge({ status }: { status: Session["status"] }) {
     creating: "ring-amber-600/20  bg-amber-600/10  text-amber-600",
     stopping: "ring-orange-600/20 bg-orange-600/10 text-orange-600",
     error:    "ring-red-600/20    bg-red-600/10    text-red-600",
+    paused:   "ring-blue-600/20   bg-blue-600/10   text-blue-600",
   };
 
   return (
@@ -240,10 +241,10 @@ export default function OverviewPage() {
                     key={session.id}
                     className={clsx(
                       "border-t border-[#edebeb] transition-colors hover:bg-[#f6f5f5]",
-                      session.status === "running" && "cursor-pointer"
+                      (session.status === "running" || session.status === "paused") && "cursor-pointer"
                     )}
                     onClick={() =>
-                      session.status === "running" &&
+                      (session.status === "running" || session.status === "paused") &&
                       window.open(`/sessions/${session.id}`, "_blank")
                     }
                   >

@@ -122,6 +122,31 @@ export async function stopContainer(containerId: string): Promise<void> {
   }
 }
 
+export async function pauseContainer(containerId: string): Promise<void> {
+  console.info(`[docker] Pausing container ${containerId.slice(0, 12)}`);
+  try {
+    await docker.getContainer(containerId).pause();
+    console.info(`[docker] Container ${containerId.slice(0, 12)} paused`);
+  } catch (err: unknown) {
+    const code = (err as { statusCode?: number }).statusCode;
+    if (code === 409 || code === 404) return; // already paused or gone — idempotent
+    throw err;
+  }
+}
+
+export async function unpauseContainer(containerId: string): Promise<void> {
+  console.info(`[docker] Unpausing container ${containerId.slice(0, 12)}`);
+  try {
+    await docker.getContainer(containerId).unpause();
+    console.info(`[docker] Container ${containerId.slice(0, 12)} unpaused`);
+  } catch (err: unknown) {
+    const code = (err as { statusCode?: number }).statusCode;
+    if (code === 409) return; // already running — idempotent
+    if (code === 404) throw new Error(`Container ${containerId.slice(0, 12)} not found during unpause`);
+    throw err;
+  }
+}
+
 // Start an existing (stopped) container and return its updated network info.
 // The container's filesystem (Chrome user data, cookies, etc.) is preserved.
 export async function startExistingContainer(
@@ -255,6 +280,10 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
     if (!container) {
       console.info(`[reconcile] Session ${session.id}: container not found — marking error`);
       await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+    } else if (container.State === "paused") {
+      // Backend crashed after docker pause but before updating DB — correct DB to "paused"
+      console.info(`[reconcile] Session ${session.id}: container paused but DB says running — correcting to "paused"`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "paused" } });
     } else if (container.State !== "running") {
       // Container exists but stopped/crashed — user can retry resume
       console.info(`[reconcile] Session ${session.id}: container state is "${container.State}" — marking error`);
@@ -279,6 +308,29 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
       await stopContainer(session.containerId).catch(() => {});
     }
     await prisma.session.update({ where: { id: session.id }, data: { status: "stopped" } });
+  }
+
+  // Handle sessions whose DB status is "paused" — verify container state matches
+  const pausedDbSessions = await prisma.session.findMany({
+    where: { status: "paused", deletedAt: null },
+  });
+
+  for (const session of pausedDbSessions) {
+    const container = session.containerId ? containerById.get(session.containerId) : undefined;
+
+    if (!container) {
+      console.info(`[reconcile] Session ${session.id}: paused but container missing — marking error`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+    } else if (container.State === "paused") {
+      // Healthy: DB paused + Docker paused — nothing to do
+    } else if (container.State === "running") {
+      // Backend crashed after unpause but before updating DB — correct DB to "running"
+      console.info(`[reconcile] Session ${session.id}: container running but DB says paused — correcting to "running"`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "running" } });
+    } else {
+      console.info(`[reconcile] Session ${session.id}: paused but container state "${container.State}" — marking error`);
+      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+    }
   }
 
   // Clean up running containers left behind by failed create/start operations.

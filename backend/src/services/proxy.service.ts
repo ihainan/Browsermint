@@ -6,8 +6,8 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand } from "./cdp.service.js";
-import { setContainerClipboard } from "./docker.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession } from "./cdp.service.js";
+import { setContainerClipboard, pauseContainer, unpauseContainer } from "./docker.service.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,12 @@ interface ResolvedDevtoolsTarget {
 // ─── Proxy Server (singleton) ─────────────────────────────────────────────────
 
 export const proxyServer = httpProxy.createProxyServer({});
+
+// ─── Idle-pause tracking ──────────────────────────────────────────────────────
+
+const wsConnectionCount = new Map<string, number>();
+const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const unpausingSession = new Set<string>();
 
 proxyServer.on("error", (err, _req, res) => {
   console.error("[proxy] Proxy error:", err.message);
@@ -76,7 +82,7 @@ async function getSessionProxyContext(
       id: sessionId,
       userId: payload.userId,
       deletedAt: null,
-      status: "running",
+      status: { in: ["running", "paused"] },
     },
     select: {
       id: true,
@@ -545,6 +551,63 @@ export async function handleDevtoolsTargetProxy(
   }
 }
 
+// ─── Idle-pause helpers ───────────────────────────────────────────────────────
+
+export function clearIdleTimer(sessionId: string): void {
+  const timer = idleTimers.get(sessionId);
+  if (timer) { clearTimeout(timer); idleTimers.delete(sessionId); }
+  wsConnectionCount.delete(sessionId);
+}
+
+export function scheduleIdlePauseOnStartup(sessionId: string): void {
+  scheduleIdlePause(sessionId);
+}
+
+function incrementWsCount(sessionId: string): void {
+  clearIdleTimer(sessionId);
+  wsConnectionCount.set(sessionId, (wsConnectionCount.get(sessionId) ?? 0) + 1);
+}
+
+function decrementWsCount(sessionId: string): void {
+  const next = Math.max(0, (wsConnectionCount.get(sessionId) ?? 1) - 1);
+  if (next === 0) {
+    wsConnectionCount.delete(sessionId);
+    scheduleIdlePause(sessionId);
+  } else {
+    wsConnectionCount.set(sessionId, next);
+  }
+}
+
+function scheduleIdlePause(sessionId: string): void {
+  if (!config.IDLE_PAUSE_ENABLED) return;
+  if (idleTimers.has(sessionId)) return;
+  const timer = setTimeout(() => {
+    idleTimers.delete(sessionId);
+    void pauseSessionIfIdle(sessionId);
+  }, config.IDLE_PAUSE_TIMEOUT_MS);
+  idleTimers.set(sessionId, timer);
+}
+
+async function pauseSessionIfIdle(sessionId: string): Promise<void> {
+  if ((wsConnectionCount.get(sessionId) ?? 0) > 0) return;
+
+  const session = await prisma.session.findFirst({
+    where: { id: sessionId, status: "running", deletedAt: null },
+    select: { containerId: true },
+  });
+  if (!session?.containerId) return;
+
+  console.info(`[idle-pause] Session ${sessionId} idle — pausing`);
+  try {
+    cleanupCdpSession(sessionId);
+    await pauseContainer(session.containerId);
+    await prisma.session.update({ where: { id: sessionId }, data: { status: "paused" } });
+    console.info(`[idle-pause] Session ${sessionId} paused`);
+  } catch (err) {
+    console.error(`[idle-pause] Failed to pause session ${sessionId}:`, err);
+  }
+}
+
 // ─── WebSocket Proxy ──────────────────────────────────────────────────────────
 // Handles the HTTP upgrade event from Fastify's underlying server.
 // Matches: /ws/sessions/:id/(cast|logs|pageId|cdp[/subpath])?token=xxx
@@ -600,11 +663,19 @@ export async function handleWebSocketUpgrade(
       id: sessionId,
       userId: payload.userId,
       deletedAt: null,
-      status: "running",
+      status: { in: ["running", "paused"] },
+    },
+    select: {
+      id: true,
+      status: true,
+      containerId: true,
+      containerName: true,
+      internalApiUrl: true,
+      tokenIssuedAt: true,
     },
   });
 
-  if (!session?.internalApiUrl) {
+  if (!session) {
     console.warn("[ws-proxy] rejecting upgrade: session unavailable", {
       sessionId,
       wsType,
@@ -617,6 +688,61 @@ export async function handleWebSocketUpgrade(
   // Reject tokens that were issued before the last token refresh.
   if (session.tokenIssuedAt && payload.iat * 1000 < session.tokenIssuedAt.getTime()) {
     console.warn("[ws-proxy] rejecting upgrade: token has been superseded", { sessionId });
+    socket.destroy();
+    return;
+  }
+
+  // ─── Auto-unpause if session is paused ───────────────────────────────────────
+  if (session.status === "paused") {
+    if (!session.containerId) {
+      console.warn("[ws-proxy] paused session has no containerId — rejecting", { sessionId });
+      socket.destroy();
+      return;
+    }
+
+    if (unpausingSession.has(sessionId)) {
+      // Another WS is already unpausing — wait for it to finish
+      const deadline = Date.now() + 8000;
+      while (unpausingSession.has(sessionId) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const refreshed = await prisma.session.findFirst({
+        where: { id: sessionId, deletedAt: null },
+        select: { status: true, internalApiUrl: true },
+      });
+      if (refreshed?.status !== "running" || !refreshed.internalApiUrl) {
+        console.warn("[ws-proxy] session not running after waiting for concurrent unpause", { sessionId });
+        socket.destroy();
+        return;
+      }
+      session.status = "running";
+      session.internalApiUrl = refreshed.internalApiUrl;
+    } else {
+      unpausingSession.add(sessionId);
+      try {
+        console.info(`[ws-proxy] Unpausing session ${sessionId} for incoming WS`);
+        await unpauseContainer(session.containerId);
+        await prisma.session.update({ where: { id: sessionId }, data: { status: "running" } });
+        await new Promise((r) => setTimeout(r, 500));
+        if (session.internalApiUrl) {
+          void initCdpSession(sessionId, session.internalApiUrl).then((ok) => {
+            if (!ok) console.warn(`[ws-proxy] CDP re-init failed after unpause for session ${sessionId}`);
+          });
+        }
+        session.status = "running";
+      } catch (err) {
+        console.error(`[ws-proxy] Failed to unpause session ${sessionId}:`, err);
+        await prisma.session.update({ where: { id: sessionId }, data: { status: "error" } }).catch(() => {});
+        socket.destroy();
+        return;
+      } finally {
+        unpausingSession.delete(sessionId);
+      }
+    }
+  }
+
+  if (!session.internalApiUrl) {
+    console.warn("[ws-proxy] rejecting upgrade: no internalApiUrl after unpause", { sessionId });
     socket.destroy();
     return;
   }
@@ -661,6 +787,10 @@ export async function handleWebSocketUpgrade(
     data: { lastActiveAt: new Date() },
   }).catch(() => {});
   logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101, undefined, getWebSocketSource(request));
+
+  incrementWsCount(sessionId);
+  socket.once("close", () => decrementWsCount(sessionId));
+  socket.once("error", () => decrementWsCount(sessionId));
 
   proxyServer.ws(request, socket, head, { target: proxyTarget });
 }

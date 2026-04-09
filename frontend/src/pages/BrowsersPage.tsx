@@ -135,7 +135,7 @@ function RowActions({
 
   return (
     <div ref={ref} className="relative flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-      {session.status === "running" && (
+      {(session.status === "running" || session.status === "paused") && (
         <button
           onClick={() => window.open(`/sessions/${session.id}`, "_blank")}
           className="p-1.5 text-[#969493] hover:text-[#514f4f] hover:bg-[#f6f5f5] rounded-lg transition-colors"
@@ -355,10 +355,10 @@ export default function BrowsersPage() {
                     key={session.id}
                     className={clsx(
                       "border-t border-[#edebeb] transition-colors",
-                      session.status === "running" && "hover:bg-[#fafafa] cursor-pointer"
+                      (session.status === "running" || session.status === "paused") && "hover:bg-[#fafafa] cursor-pointer"
                     )}
                     onClick={() =>
-                      session.status === "running" &&
+                      (session.status === "running" || session.status === "paused") &&
                       window.open(`/sessions/${session.id}`, "_blank")
                     }
                   >

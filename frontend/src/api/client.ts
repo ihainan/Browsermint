@@ -36,13 +36,38 @@ export interface User {
   email: string;
   createdAt: string;
   maxSessions: number;
+  isAdmin: boolean;
+}
+
+export interface AdminUser extends User {
+  isActive: boolean;
+  sessionCount: number;
+}
+
+export interface AdminSession {
+  id: string;
+  name: string | null;
+  status: string;
+  createdAt: string;
+  lastActiveAt: string;
+}
+
+export interface AdminSessionFull {
+  id: string;
+  name: string | null;
+  status: string;
+  createdAt: string;
+  lastActiveAt: string;
+  expiresAt: string | null;
+  eventCount: number;
+  user: { id: string; username: string; email: string };
 }
 
 export interface Session {
   id: string;
   userId: string;
   name: string | null;
-  status: "creating" | "running" | "stopping" | "stopped" | "error";
+  status: "creating" | "running" | "stopping" | "stopped" | "error" | "paused";
   containerId: string | null;
   containerName: string | null;
   internalApiUrl: string | null;
@@ -89,6 +114,21 @@ export const authApi = {
   me: () => api.get<{ user: User }>("/auth/me"),
   logout: () => api.post<{ success: boolean }>("/auth/logout"),
   getConfig: () => api.get<{ registrationEnabled: boolean }>("/auth/config"),
+};
+
+export const adminApi = {
+  listUsers: () => api.get<{ users: AdminUser[] }>("/admin/users"),
+  createUser: (data: { username: string; email: string; password: string; isAdmin: boolean }) =>
+    api.post<{ user: AdminUser }>("/admin/users", data),
+  updateUser: (id: string, data: { maxSessions?: number; isAdmin?: boolean; isActive?: boolean }) =>
+    api.patch<{ user: AdminUser }>(`/admin/users/${id}`, data),
+  resetPassword: (id: string, data: { password: string }) =>
+    api.post<{ success: boolean }>(`/admin/users/${id}/reset-password`, data),
+  deleteUser: (id: string) => api.delete(`/admin/users/${id}`),
+  getUserSessions: (id: string) =>
+    api.get<{ sessions: AdminSession[] }>(`/admin/users/${id}/sessions`),
+  listSessions: () =>
+    api.get<{ sessions: AdminSessionFull[] }>("/admin/sessions"),
 };
 
 export interface EventsStats {
