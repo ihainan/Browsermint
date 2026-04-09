@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { Monitor, LayoutDashboard, Key, LogOut, ChevronDown, Check } from "lucide-react";
+import { Monitor, LayoutDashboard, Key, LogOut, ChevronDown, Check, Users, Activity } from "lucide-react";
 import browsermintIcon from "../assets/browsermint-icon.png";
 import clsx from "clsx";
 import { useAuth } from "../contexts/AuthContext.tsx";
@@ -61,6 +61,13 @@ export default function Layout() {
     // { path: "/api-key", label: t("nav.apiKey"), icon: Key, exact: true },
   ];
 
+  const adminNavItems = user?.isAdmin
+    ? [
+        { path: "/admin/users", label: t("nav.adminUsers"), icon: Users, exact: false },
+        { path: "/admin/sessions", label: t("nav.adminSessions"), icon: Activity, exact: false },
+      ]
+    : [];
+
   function isNavActive(path: string, exact: boolean) {
     if (exact) return location.pathname === path;
     return location.pathname === path || location.pathname.startsWith(path + "/");
@@ -70,6 +77,8 @@ export default function Layout() {
     "/": t("nav.overview"),
     "/browsers": t("nav.browsers"),
     "/api-key": t("nav.apiKey"),
+    "/admin/users": t("nav.adminUsers"),
+    "/admin/sessions": t("nav.adminSessions"),
   };
   const pageTitle = pageTitleMap[location.pathname] ?? "";
 
@@ -115,6 +124,33 @@ export default function Layout() {
             </Link>
           ))}
         </nav>
+
+        {/* Admin section */}
+        {adminNavItems.length > 0 && (
+          <div className="px-2">
+            <div className={clsx("border-t mx-1 mb-2", DASHED_BORDER)} />
+            <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[#cac8c7]">
+              Admin
+            </p>
+            <div className="space-y-0.5">
+              {adminNavItems.map(({ path, label, icon: Icon, exact }) => (
+                <Link
+                  key={path}
+                  to={path}
+                  className={clsx(
+                    "flex w-full items-center gap-2 rounded-sm p-2 text-left text-sm h-8 transition-colors",
+                    isNavActive(path, exact)
+                      ? "bg-[#1dc99a18] text-[#0d7a5f] font-medium"
+                      : "text-[#514f4f] hover:bg-[#260f170f] hover:text-[#260f17]"
+                  )}
+                >
+                  <Icon size={16} strokeWidth={1.75} className="shrink-0" />
+                  {label}
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Spacer */}
         <div className="flex-1" />
