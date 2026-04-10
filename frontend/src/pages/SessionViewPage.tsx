@@ -267,8 +267,8 @@ function DetailsSidebar({
       <DetailRow label={t("sessionView.details.id")} value={session.id} mono />
       <DetailRow label={t("sessionView.details.name")} value={session.name ?? "—"} />
 
-      {/* CDP WebSocket URL */}
-      {cdpUrl && (
+      {/* CDP WebSocket URL — only shown once the full devtools URL is available */}
+      {cdpUrl && details?.websocketUrl && (
         <div className="flex flex-col gap-0.5 py-2.5 border-b border-gray-100">
           <div className="flex items-center justify-between">
             <span className="text-xs text-gray-500">{t("sessionView.details.cdpWebsocketUrl")}</span>
@@ -282,8 +282,8 @@ function DetailsSidebar({
             </button>
           </div>
           <div className="relative group mt-0.5">
-            <pre className="bg-slate-50 text-gray-700 text-xs rounded-md p-2 pr-8 whitespace-pre-wrap break-all leading-relaxed border border-slate-200 font-mono">{cdpUrl}</pre>
-            <InlineCopyButton value={cdpUrl} />
+            <pre className="bg-slate-50 text-gray-700 text-xs rounded-md p-2 pr-8 whitespace-pre-wrap break-all leading-relaxed border border-slate-200 font-mono">{normalizeWsUrl(details.websocketUrl)}</pre>
+            <InlineCopyButton value={normalizeWsUrl(details.websocketUrl)} />
           </div>
         </div>
       )}
@@ -341,7 +341,6 @@ function DetailsSidebar({
       {details?.proxyTxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyTx")} value={formatBytes(details.proxyTxBytes)} />}
       {details?.proxyRxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyRx")} value={formatBytes(details.proxyRxBytes)} />}
       {details?.creditsUsed !== undefined && <DetailRow label={t("sessionView.details.cost")} value={String(details.creditsUsed)} />}
-      {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={normalizeWsUrl(details.websocketUrl)} copyable />}
       {details?.tokenExpiresAt && <DetailRow label={t("sessionView.details.tokenExpiresAt")} value={formatDateTime(details.tokenExpiresAt)} />}
 
       {/* Refresh token confirmation dialog */}
