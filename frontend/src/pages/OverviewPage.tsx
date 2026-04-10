@@ -118,6 +118,7 @@ export default function OverviewPage() {
   const stats = [
     { label: t("overview.totalBrowsers"),   value: sessions.length },
     { label: t("overview.runningBrowsers"), value: sessions.filter((s) => s.status === "running").length },
+    { label: t("overview.idleBrowsers"),    value: sessions.filter((s) => s.status === "paused").length },
     { label: t("overview.stoppedBrowsers"), value: sessions.filter((s) => s.status === "stopped").length },
     { label: t("overview.agentEvents"),     value: formatCount(agentEvents) },
   ];
