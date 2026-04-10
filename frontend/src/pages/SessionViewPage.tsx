@@ -368,11 +368,11 @@ function usePlatforms() {
 
 // ── RichText ────────────────────────────────────────────────────────────────
 
-type RichSegment = { type: "bold" | "code" | "text"; value: string };
+type RichSegment = { type: "bold" | "code" | "link" | "text"; value: string; href?: string };
 
 function parseRichText(text: string): RichSegment[] {
   const segments: RichSegment[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
   let last = 0;
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
@@ -380,8 +380,12 @@ function parseRichText(text: string): RichSegment[] {
     const raw = match[0];
     if (raw.startsWith("**")) {
       segments.push({ type: "bold", value: raw.slice(2, -2) });
-    } else {
+    } else if (raw.startsWith("`")) {
       segments.push({ type: "code", value: raw.slice(1, -1) });
+    } else {
+      const label = raw.match(/\[([^\]]+)\]/)![1];
+      const href = raw.match(/\(([^)]+)\)/)![1];
+      segments.push({ type: "link", value: label, href });
     }
     last = match.index + raw.length;
   }
@@ -395,6 +399,7 @@ function RichText({ text }: { text: string }) {
       {parseRichText(text).map((seg, i) => {
         if (seg.type === "bold") return <strong key={i} className="font-semibold text-[#0d7a5f]">{seg.value}</strong>;
         if (seg.type === "code") return <code key={i} className="font-mono bg-slate-100 text-slate-700 px-1 rounded text-[0.82em]">{seg.value}</code>;
+        if (seg.type === "link") return <a key={i} href={seg.href} target="_blank" rel="noopener noreferrer" className="underline text-[#0d7a5f] hover:opacity-70">{seg.value}</a>;
         return <span key={i}>{seg.value}</span>;
       })}
     </>
