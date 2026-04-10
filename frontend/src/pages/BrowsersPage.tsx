@@ -329,7 +329,7 @@ export default function BrowsersPage() {
       </div>
 
       {/* Table */}
-      <div className="surface-card-strong overflow-hidden">
+      <div className="surface-card-strong">
         {isPending && sessions.length === 0 ? (
           <div className="flex justify-center py-16">
             <Loader2 size={20} className="animate-spin text-[var(--text-faint)]" />
@@ -426,7 +426,7 @@ export default function BrowsersPage() {
                         {(() => {
                           const days = daysUntilExpiry(session.expiresAt);
                           if (days === null) return <span className="text-[var(--text-faint)]">—</span>;
-                          if (days <= 0) return <span className="font-medium text-red-500">Expired</span>;
+                          if (days <= 0) return <span className="font-medium text-red-500">{t("sessions.expired")}</span>;
                           if (days <= 7) return <span className="text-red-500">{formatDateTime(session.expiresAt!)}</span>;
                           if (days <= EXPIRY_WARNING_DAYS) return <span className="text-amber-600">{formatDateTime(session.expiresAt!)}</span>;
                           return <span className="text-[var(--text-main)]">{formatDateTime(session.expiresAt!)}</span>;

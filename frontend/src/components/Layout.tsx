@@ -4,6 +4,8 @@ import {
   Activity,
   Check,
   ChevronDown,
+  ChevronRight,
+  Globe,
   LayoutDashboard,
   LogOut,
   Monitor,
@@ -29,6 +31,7 @@ export default function Layout() {
   const { locale, setLocale, t, formatDateTime } = useI18n();
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [langSubmenuOpen, setLangSubmenuOpen] = useState(false);
 
   const { data } = useQuery({
     queryKey: ["sessions"],
@@ -41,6 +44,7 @@ export default function Layout() {
     function handleOutsideClick(event: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setMenuOpen(false);
+        setLangSubmenuOpen(false);
       }
     }
     document.addEventListener("mousedown", handleOutsideClick);
@@ -129,7 +133,7 @@ export default function Layout() {
           </div>
         </div>
 
-        <nav className="flex flex-1 flex-col gap-1 px-3 pb-4">
+        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 pb-4">
           {navItems.map(({ path, label, icon: Icon, exact }) => {
             const active = isActive(path, exact);
             return (
@@ -216,31 +220,43 @@ export default function Layout() {
                 </div>
               </div>
               <div className="mx-2 h-px bg-[var(--line-soft)]" />
-              <div className="px-2 py-2">
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--text-faint)]">{t("common.language")}</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {(["en", "zh"] as const).map((nextLocale) => {
-                    const active = nextLocale === locale;
-                    return (
-                      <button
-                        key={nextLocale}
-                        onClick={() => {
-                          setLocale(nextLocale);
-                          setMenuOpen(false);
-                        }}
-                        className={clsx(
-                          "flex items-center justify-between rounded-xl px-3 py-2 text-sm transition",
-                          active
-                            ? "bg-[var(--brand-soft)] text-[var(--brand-strong)]"
-                            : "bg-[var(--bg-soft)] text-[var(--text-main)] hover:bg-[rgba(255,255,255,0.95)]"
-                        )}
-                      >
-                        <span>{nextLocale === "zh" ? t("common.chinese") : t("common.english")}</span>
-                        {active && <Check size={14} />}
-                      </button>
-                    );
-                  })}
-                </div>
+              <div
+                className="relative px-2 py-1"
+                onMouseEnter={() => setLangSubmenuOpen(true)}
+                onMouseLeave={() => setLangSubmenuOpen(false)}
+              >
+                <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-[var(--text-main)] transition hover:bg-[var(--bg-soft)] hover:text-[var(--text-strong)]">
+                  <Globe size={15} />
+                  <span className="flex-1 text-left">{t("common.language")}</span>
+                  <span className="mr-1 text-xs text-[var(--text-soft)]">{locale === "zh" ? t("common.chinese") : t("common.english")}</span>
+                  <ChevronRight size={13} className="text-[var(--text-soft)]" />
+                </button>
+                {langSubmenuOpen && (
+                  <div className="surface-card-strong absolute bottom-0 left-full z-30 ml-1 w-36 p-1">
+                    {(["en", "zh"] as const).map((nextLocale) => {
+                      const active = nextLocale === locale;
+                      return (
+                        <button
+                          key={nextLocale}
+                          onClick={() => {
+                            setLocale(nextLocale);
+                            setMenuOpen(false);
+                            setLangSubmenuOpen(false);
+                          }}
+                          className={clsx(
+                            "flex w-full items-center justify-between rounded-xl px-3 py-2 text-sm transition",
+                            active
+                              ? "bg-[var(--brand-soft)] text-[var(--brand-strong)]"
+                              : "text-[var(--text-main)] hover:bg-[var(--bg-soft)]"
+                          )}
+                        >
+                          <span>{nextLocale === "zh" ? t("common.chinese") : t("common.english")}</span>
+                          {active && <Check size={14} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <div className="mx-2 h-px bg-[var(--line-soft)]" />
               <div className="p-2">

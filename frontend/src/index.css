@@ -90,7 +90,8 @@ a {
     height: 100vh;
     position: sticky;
     top: 0;
-    overflow-y: auto;
+    z-index: 20;
+    overflow: visible;
     background: linear-gradient(180deg, rgba(248, 250, 253, 0.96), rgba(238, 242, 250, 0.97));
     border-right: 1px solid var(--line-soft);
     box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.5);

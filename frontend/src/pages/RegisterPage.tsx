@@ -29,20 +29,16 @@ function AuthShell({
                 </div>
               </div>
               <div className="mt-12 max-w-xl">
-                <div className="page-eyebrow">Browser workspace</div>
+                <div className="page-eyebrow">{t("register.subtitle")}</div>
                 <h1 className="mt-4 text-[42px] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--text-strong)]">{title}</h1>
                 <p className="mt-5 max-w-lg text-[15px] leading-7 text-[var(--text-soft)]">{subtitle}</p>
               </div>
-            </div>
-            <div className="surface-card px-5 py-5">
-              <div className="subtle-label">Browsermint</div>
-              <p className="mt-3 max-w-xl text-sm leading-7 text-[var(--text-soft)]">{t("register.heroDescription")}</p>
             </div>
           </div>
         </section>
 
         <section className="surface-panel flex items-center p-4 sm:p-6 lg:p-8">
-          <div className="w-full rounded-[22px] bg-[rgba(255,253,249,0.92)] p-6 ring-1 ring-[var(--line-soft)] sm:p-8">
+          <div className="w-full rounded-[22px] bg-[rgba(248,250,253,0.92)] p-6 ring-1 ring-[var(--line-soft)] sm:p-8">
             <div className="mb-8 lg:hidden">
               <div className="flex items-center gap-3">
                 <img src={browsermintIcon} alt="Browsermint" className="h-12 w-12 object-contain" />
@@ -100,7 +96,6 @@ export default function RegisterPage() {
 
   return (
     <AuthShell title={t("register.heroTitle")} subtitle={t("register.heroDescription")}>
-      <div className="page-eyebrow">{t("register.title")}</div>
       <h2 className="mt-3 text-[30px] font-semibold tracking-[-0.03em] text-[var(--text-strong)]">{t("register.title")}</h2>
       <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{t("register.subtitle")}</p>
 

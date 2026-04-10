@@ -140,7 +140,7 @@ export default function AdminSessionsPage() {
       </div>
 
       {/* Table */}
-      <div className="surface-card-strong overflow-hidden">
+      <div className="surface-card-strong">
         {isPending ? (
           <div className="flex justify-center py-16">
             <Loader2 size={20} className="animate-spin text-[var(--text-faint)]" />

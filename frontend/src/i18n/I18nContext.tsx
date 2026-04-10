@@ -42,8 +42,8 @@ const messages = {
       },
     },
     login: {
-      heroTitle: "A calmer workspace for managed browsers",
-      heroDescription: "Sign in to manage local browser sessions, monitor capacity, and keep agent workflows organized.",
+      heroTitle: "Cloud browser infrastructure for AI agents",
+      heroDescription: "Sign in to provision cloud browser sessions, monitor capacity, and connect your agents to the web.",
       subtitle: "Agentic cloud browser management",
       title: "Sign in to your account",
       submit: "Sign in",
@@ -53,8 +53,8 @@ const messages = {
       loginFailed: "Login failed",
     },
     register: {
-      heroTitle: "Prepare a workspace that stays operational",
-      heroDescription: "Create an account to manage browser capacity, session access, and shared operational visibility.",
+      heroTitle: "Deploy cloud browsers for every agent workflow",
+      heroDescription: "Create an account to provision cloud browser sessions, control agent access, and monitor usage across your team.",
       subtitle: "Agentic cloud browser management",
       title: "Create your account",
       submit: "Create account",
@@ -66,11 +66,11 @@ const messages = {
       registrationFailed: "Registration failed",
     },
     layout: {
-      sidebarTagline: "Local browser workspace for agents",
+      sidebarTagline: "Cloud browser workspace for agents",
       adminSection: "Administration",
       pageDescriptions: {
         overview: "Capacity, activity, and browser health at a glance",
-        browsers: "Manage active and stopped browser workspaces",
+        browsers: "Manage your cloud browser sessions",
         adminUsers: "Control access, quotas, and account status",
         adminSessions: "Inspect browser usage across all accounts",
       },
@@ -83,7 +83,7 @@ const messages = {
     },
     sidebar: {
       usage: "Usage",
-      usageBrowsers: "Browsers created",
+      usageBrowsers: "Active browsers",
     },
     overview: {
       title: "Overview",
@@ -116,7 +116,7 @@ const messages = {
       allStatuses: "All",
       browserId: "Browser ID",
       name: "Name",
-      started: "Started",
+      started: "Created",
       lastActive: "Last Active",
       expiresAt: "Expires",
       viewing: "Viewing {from}–{to} of {total} results",
@@ -191,9 +191,9 @@ const messages = {
       created: "Created",
       lastActive: "Last active",
       container: "Container",
-      disabled: "Disabled",
+      disabled: "Stopped",
       moreOptions: "More options",
-      disable: "Disable",
+      disable: "Stop",
       resume: "Resume",
       delete: "Delete",
       browserNameRequired: "Browser name is required",
@@ -205,6 +205,7 @@ const messages = {
       starting: "Starting…",
       deleteBrowserTitle: "Delete browser?",
       deleteBrowserHint: "This will permanently delete the browser and all its data. This action cannot be undone.",
+      expired: "Expired",
     },
     sessionView: {
       notFound: "Browser not found",
@@ -310,8 +311,8 @@ const messages = {
       },
     },
     login: {
-      heroTitle: "为托管浏览器打造的沉静工作区",
-      heroDescription: "登录以管理本地浏览器会话、监控容量，并保持 Agent 工作流井然有序。",
+      heroTitle: "面向 AI Agent 的云浏览器管理平台",
+      heroDescription: "登录以创建云浏览器会话、监控容量，并为 AI Agent 接入浏览能力。",
       subtitle: "Agentic 云浏览器管理",
       title: "登录账户",
       submit: "登录",
@@ -321,8 +322,8 @@ const messages = {
       loginFailed: "登录失败",
     },
     register: {
-      heroTitle: "构建持续稳定运行的工作区",
-      heroDescription: "创建账户以管理浏览器容量、会话访问权限与共享运营可见性。",
+      heroTitle: "为每个 Agent 工作流部署云浏览器",
+      heroDescription: "创建账户以创建云浏览器会话、管理 Agent 访问权限并监控团队用量。",
       subtitle: "Agentic 云浏览器管理",
       title: "创建账户",
       submit: "创建账户",
@@ -334,11 +335,11 @@ const messages = {
       registrationFailed: "注册失败",
     },
     layout: {
-      sidebarTagline: "本地 Agent 浏览器工作区",
+      sidebarTagline: "面向 Agent 的云浏览器工作区",
       adminSection: "管理",
       pageDescriptions: {
         overview: "容量、活动与浏览器健康状态一览",
-        browsers: "管理运行中与已停止的浏览器工作区",
+        browsers: "管理你的云浏览器会话",
         adminUsers: "管理访问权限、配额与账户状态",
         adminSessions: "查看所有账户的浏览器使用情况",
       },
@@ -351,7 +352,7 @@ const messages = {
     },
     sidebar: {
       usage: "用量",
-      usageBrowsers: "已创建浏览器",
+      usageBrowsers: "活跃浏览器",
     },
     overview: {
       title: "概览",
@@ -459,9 +460,9 @@ const messages = {
       created: "创建时间",
       lastActive: "最后活跃",
       container: "容器",
-      disabled: "已禁用",
+      disabled: "已停止",
       moreOptions: "更多操作",
-      disable: "禁用",
+      disable: "停止",
       resume: "恢复",
       delete: "删除",
       browserNameRequired: "浏览器名称不能为空",
@@ -473,6 +474,7 @@ const messages = {
       starting: "启动中…",
       deleteBrowserTitle: "删除浏览器？",
       deleteBrowserHint: "这会永久删除该浏览器及其所有数据，此操作无法撤销。",
+      expired: "已过期",
     },
     sessionView: {
       notFound: "未找到浏览器",
