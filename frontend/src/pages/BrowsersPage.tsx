@@ -291,7 +291,6 @@ export default function BrowsersPage() {
     if (err) { setCreateError(err); return; }
     setCreateError("");
     createMutation.mutate(trimmed);
-    setNewSessionName("");
   }
 
   const nameError = newSessionName ? getNameValidationError(newSessionName) : "";
@@ -347,27 +346,27 @@ export default function BrowsersPage() {
         ) : (
           <>
             <table
-              className="w-full border-separate border-spacing-0 table-auto text-[13px]"
+              className="w-full border-separate border-spacing-0 table-fixed text-[13px]"
               style={{ color: "var(--text-strong)" }}
             >
               <thead>
                 <tr>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[10%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[8%] text-[var(--text-faint)]">
                     {t("browsers.filterStatus")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[20%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[13%] text-[var(--text-faint)]">
                     {t("browsers.browserId")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
                     {t("browsers.name")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[19%] text-[var(--text-faint)]">
                     {t("browsers.started")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[19%] text-[var(--text-faint)]">
                     {t("browsers.lastActive")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[18%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[14%] text-[var(--text-faint)]">
                     {t("browsers.expiresAt")}
                   </th>
                   <th className="w-20" />
@@ -404,10 +403,10 @@ export default function BrowsersPage() {
                         </span>
                       </div>
                     </td>
-                    <td className="p-0">
-                      <div className="flex h-12 items-center px-3">
+                    <td className="p-0 overflow-hidden">
+                      <div className="flex h-12 items-center px-3 min-w-0">
                         {session.name
-                          ? <span>{session.name}</span>
+                          ? <span className="truncate" title={session.name}>{session.name}</span>
                           : <span className="text-[var(--text-faint)]">—</span>}
                       </div>
                     </td>

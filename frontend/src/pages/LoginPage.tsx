@@ -29,7 +29,7 @@ export default function LoginPage() {
     setIsPending(true);
     try {
       await login(email, password);
-      navigate("/", { replace: true });
+      navigate("/", { replace: true, state: { fromLogin: true } });
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??

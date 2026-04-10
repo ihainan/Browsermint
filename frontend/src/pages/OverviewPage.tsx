@@ -1,4 +1,4 @@
-import { Link, Navigate } from "react-router-dom";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, ChevronRight, Copy, Check, AlertTriangle } from "lucide-react";
 import clsx from "clsx";
@@ -95,6 +95,7 @@ function formatCount(n: number): string {
 
 export default function OverviewPage() {
   const { t, formatDateTime } = useI18n();
+  const location = useLocation();
 
   const { data, isPending } = useQuery({
     queryKey: ["sessions"],
@@ -161,9 +162,9 @@ export default function OverviewPage() {
     });
   }, [statsData]);
 
-  // Redirect to /browsers when there are no sessions yet (e.g. first login).
+  // Redirect to /browsers only when coming from login and there are no sessions yet.
   // Must be after all hooks.
-  if (data !== undefined && sessions.length === 0) {
+  if ((location.state as { fromLogin?: boolean } | null)?.fromLogin && data !== undefined && sessions.length === 0) {
     return <Navigate to="/browsers" replace />;
   }
 
