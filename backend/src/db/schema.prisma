@@ -14,7 +14,7 @@ model User {
   passwordHash String    @db.VarChar(256)
   isAdmin      Boolean   @default(false)
   isActive     Boolean   @default(true)
-  maxSessions  Int       @default(5)
+  maxSessions  Int       @default(2)
   createdAt    DateTime  @default(now())
   sessions     Session[]
 }

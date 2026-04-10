@@ -48,7 +48,7 @@ export async function handleCreateSession(
       const activeCount = await tx.session.count({
         where: { userId, deletedAt: null, status: { in: ["creating", "running", "paused"] } },
       });
-      if (activeCount >= user.maxSessions) {
+      if (user.maxSessions > 0 && activeCount >= user.maxSessions) {
         throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
       }
       return tx.session.create({
@@ -278,7 +278,7 @@ export async function handleStartSession(
       const activeCount = await tx.session.count({
         where: { userId, deletedAt: null, status: { in: ["creating", "running", "paused"] } },
       });
-      if (activeCount >= user.maxSessions) {
+      if (user.maxSessions > 0 && activeCount >= user.maxSessions) {
         throw Object.assign(new Error(), { _code: "LIMIT_EXCEEDED", _max: user.maxSessions });
       }
       await tx.session.update({ where: { id }, data: { status: "creating" } });

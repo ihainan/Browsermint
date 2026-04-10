@@ -12,6 +12,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isPending, setIsPending] = useState(false);
+  const [touched, setTouched] = useState({ email: false, password: false });
+
+  const emailError = touched.email && email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ? t("common.invalidEmail") : "";
+  const canSubmit = !isPending && email.length > 0 && password.length > 0 && !emailError;
 
   if (user) {
     navigate("/", { replace: true });
@@ -53,13 +58,26 @@ export default function LoginPage() {
       <form onSubmit={handleSubmit} className="mt-7 space-y-4">
         <div>
           <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.email")}</label>
-          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="control-input" placeholder="you@example.com" />
+          <input
+            type="email" required value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            onBlur={() => setTouched((prev) => ({ ...prev, email: true }))}
+            className={`control-input${emailError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            placeholder="you@example.com"
+          />
+          {emailError && <p className="mt-1 text-xs text-[var(--danger-main)]">{emailError}</p>}
         </div>
         <div>
           <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.password")}</label>
-          <input type="password" required value={password} onChange={(event) => setPassword(event.target.value)} className="control-input" placeholder="••••••••" />
+          <input
+            type="password" required value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            onBlur={() => setTouched((prev) => ({ ...prev, password: true }))}
+            className="control-input"
+            placeholder="••••••••"
+          />
         </div>
-        <button type="submit" disabled={isPending} className="button-primary mt-2 w-full">{isPending ? t("login.submitting") : t("login.submit")}</button>
+        <button type="submit" disabled={!canSubmit} className="button-primary mt-2 w-full">{isPending ? t("login.submitting") : t("login.submit")}</button>
       </form>
 
       {registrationEnabled && (

@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, ChevronRight, Copy, Check, AlertTriangle } from "lucide-react";
 import clsx from "clsx";
@@ -160,6 +160,12 @@ export default function OverviewPage() {
       };
     });
   }, [statsData]);
+
+  // Redirect to /browsers when there are no sessions yet (e.g. first login).
+  // Must be after all hooks.
+  if (data !== undefined && sessions.length === 0) {
+    return <Navigate to="/browsers" replace />;
+  }
 
   const hasEvents = agentEvents > 0;
 

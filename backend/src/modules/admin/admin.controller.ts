@@ -2,6 +2,7 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import { prisma } from "../../db/client.js";
+import { config } from "../../config.js";
 
 const SALT_ROUNDS = 12;
 
@@ -51,8 +52,9 @@ export async function handleCreateUser(
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  const maxSessions = isAdmin ? 0 : config.DEFAULT_USER_MAX_SESSIONS;
   const user = await prisma.user.create({
-    data: { username, email, passwordHash, isAdmin },
+    data: { username, email, passwordHash, isAdmin, maxSessions },
     select: USER_SELECT,
   });
   return reply.status(201).send({ user: flattenCount(user) });

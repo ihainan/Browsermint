@@ -13,6 +13,16 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isPending, setIsPending] = useState(false);
+  const [touched, setTouched] = useState({ username: false, email: false, password: false });
+
+  const usernameError = touched.username && username && !/^[a-zA-Z0-9_]{3,64}$/.test(username)
+    ? t("common.invalidUsername") : "";
+  const emailError = touched.email && email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ? t("common.invalidEmail") : "";
+  const passwordError = touched.password && password && password.length < 12
+    ? t("register.passwordTooShort") : "";
+  const canSubmit = !isPending && username.length >= 3 && email.length > 0 && password.length >= 12
+    && !usernameError && !emailError && !passwordError;
 
   if (user) {
     navigate("/sessions", { replace: true });
@@ -22,12 +32,8 @@ export default function RegisterPage() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setError("");
-
-    if (password.length < 12) {
-      setError(t("register.passwordTooShort"));
-      return;
-    }
-
+    setTouched({ username: true, email: true, password: true });
+    if (!canSubmit) return;
     setIsPending(true);
     try {
       await register(username, email, password);
@@ -61,17 +67,40 @@ export default function RegisterPage() {
       <form onSubmit={handleSubmit} className="mt-7 space-y-4">
         <div>
           <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.username")}</label>
-          <input type="text" required value={username} onChange={(event) => setUsername(event.target.value)} pattern="[a-zA-Z0-9_]+" minLength={3} maxLength={64} className="control-input" placeholder="your_username" />
+          <input
+            type="text" required value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            onBlur={() => setTouched((prev) => ({ ...prev, username: true }))}
+            pattern="[a-zA-Z0-9_]+" minLength={3} maxLength={64}
+            className={`control-input${usernameError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            placeholder="your_username"
+          />
+          {usernameError && <p className="mt-1 text-xs text-[var(--danger-main)]">{usernameError}</p>}
         </div>
         <div>
           <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.email")}</label>
-          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="control-input" placeholder="you@example.com" />
+          <input
+            type="email" required value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            onBlur={() => setTouched((prev) => ({ ...prev, email: true }))}
+            className={`control-input${emailError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            placeholder="you@example.com"
+          />
+          {emailError && <p className="mt-1 text-xs text-[var(--danger-main)]">{emailError}</p>}
         </div>
         <div>
           <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.password")}</label>
-          <input type="password" required value={password} onChange={(event) => setPassword(event.target.value)} minLength={12} className="control-input" placeholder={t("register.passwordHint")} />
+          <input
+            type="password" required value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            onBlur={() => setTouched((prev) => ({ ...prev, password: true }))}
+            minLength={12}
+            className={`control-input${passwordError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            placeholder={t("register.passwordHint")}
+          />
+          {passwordError && <p className="mt-1 text-xs text-[var(--danger-main)]">{passwordError}</p>}
         </div>
-        <button type="submit" disabled={isPending} className="button-primary mt-2 w-full">{isPending ? t("register.submitting") : t("register.submit")}</button>
+        <button type="submit" disabled={!canSubmit} className="button-primary mt-2 w-full">{isPending ? t("register.submitting") : t("register.submit")}</button>
       </form>
 
       <p className="mt-6 text-sm text-[var(--text-soft)]">

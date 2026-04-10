@@ -56,8 +56,9 @@ export async function handleRegister(
   const isAdmin = userCount === 0;
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  const maxSessions = isAdmin ? 0 : config.DEFAULT_USER_MAX_SESSIONS;
   const user = await prisma.user.create({
-    data: { username, email, passwordHash, isAdmin },
+    data: { username, email, passwordHash, isAdmin, maxSessions },
     select: { id: true, username: true, email: true, isAdmin: true, createdAt: true, maxSessions: true },
   });
 

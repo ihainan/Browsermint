@@ -99,8 +99,9 @@ export default function Layout() {
   const currentItem = allNavItems.find((item) => isActive(item.path, item.exact)) ?? navItems[0];
   const avatarInitial = (user?.username?.[0] ?? "?").toUpperCase();
   const avatarTone = getAvatarTone(user?.username ?? "browsermint");
-  const maxSessions = Math.max(1, user?.maxSessions ?? 1);
-  const usage = Math.min(100, Math.round((sessions.length / maxSessions) * 100));
+  const maxSessions = user?.maxSessions ?? 0;
+  const unlimited = maxSessions === 0;
+  const usage = unlimited ? 0 : Math.min(100, Math.round((sessions.length / maxSessions) * 100));
 
   return (
     <div className="app-shell">
@@ -124,7 +125,7 @@ export default function Layout() {
                 <div className="mt-1 text-xs text-[var(--text-soft)]">{t("sidebar.usageBrowsers")}</div>
               </div>
               <div className="rounded-full bg-[var(--bg-soft)] px-3 py-1 text-xs font-medium text-[var(--text-main)]">
-                {sessions.length}/{maxSessions}
+                {sessions.length}/{unlimited ? "∞" : maxSessions}
               </div>
             </div>
             <div className="mt-4 h-2 overflow-hidden rounded-full bg-[rgba(34,29,23,0.08)]">

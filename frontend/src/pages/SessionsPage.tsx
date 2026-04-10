@@ -256,13 +256,13 @@ export default function SessionsPage() {
               {t("sessions.title")}
               {sessions.length > 0 && (
                 <span className="ml-1.5 normal-case font-normal">
-                  {t("sessions.count", { current: sessions.length, max: user?.maxSessions ?? 5 })}
+                  {t("sessions.count", { current: sessions.length, max: user?.maxSessions === 0 ? "∞" : (user?.maxSessions ?? 0) })}
                 </span>
               )}
             </h2>
             <button
               onClick={() => setNewBrowserModalOpen(true)}
-              disabled={!canCreate && sessions.length >= (user?.maxSessions ?? 5)}
+              disabled={!canCreate && user?.maxSessions !== 0 && sessions.length >= (user?.maxSessions ?? 0)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-xs font-semibold rounded-xl hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
             >
               <Plus size={13} />

@@ -51,7 +51,8 @@ function MaxSessionsCell({ user, onSave, isPending }: {
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(user.maxSessions));
-  const pct = user.maxSessions > 0 ? Math.min(100, Math.round((user.sessionCount / user.maxSessions) * 100)) : 0;
+  const unlimited = user.maxSessions === 0;
+  const pct = !unlimited ? Math.min(100, Math.round((user.sessionCount / user.maxSessions) * 100)) : 0;
 
   function commit() {
     const n = parseInt(value, 10);
@@ -86,7 +87,7 @@ function MaxSessionsCell({ user, onSave, isPending }: {
         >
           {isPending
             ? <Loader2 size={13} className="animate-spin inline" />
-            : <span>{user.sessionCount} / {user.maxSessions}</span>
+            : <span>{user.sessionCount} / {unlimited ? "∞" : user.maxSessions}</span>
           }
         </button>
       )}
@@ -179,7 +180,7 @@ function UserDetailPanel({ user, onClose, onResetPassword, onUpdate, onSuspendTo
               </div>
               <div className="flex justify-between">
                 <span className="text-[var(--text-soft)]">{t("admin.sessions")}</span>
-                <span className="text-[var(--text-main)] tabular-nums">{user.sessionCount} / {user.maxSessions}</span>
+                <span className="text-[var(--text-main)] tabular-nums">{user.sessionCount} / {user.maxSessions === 0 ? "∞" : user.maxSessions}</span>
               </div>
             </div>
           </div>
@@ -268,14 +269,25 @@ function AddUserModal({ onClose, onCreate }: {
   const [form, setForm] = useState({ username: "", email: "", password: "", isAdmin: false });
   const [error, setError] = useState("");
   const [isPending, setIsPending] = useState(false);
+  const [touched, setTouched] = useState({ username: false, email: false, password: false });
+
+  const usernameError = touched.username && form.username && !/^[a-zA-Z0-9_]{3,64}$/.test(form.username)
+    ? t("common.invalidUsername") : "";
+  const emailError = touched.email && form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)
+    ? t("common.invalidEmail") : "";
+  const passwordError = touched.password && form.password && form.password.length < 12
+    ? t("register.passwordTooShort") : "";
+  const canSubmit = !isPending && form.username.length >= 3 && form.email.length > 0 && form.password.length >= 12
+    && !usernameError && !emailError && !passwordError;
+
+  function touch(field: keyof typeof touched) {
+    setTouched((prev) => ({ ...prev, [field]: true }));
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (form.password.length < 12) { setError(t("register.passwordTooShort")); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
-      setError(t("common.invalidEmail"));
-      return;
-    }
+    setTouched({ username: true, email: true, password: true });
+    if (!canSubmit) return;
     setError(""); setIsPending(true);
     try { await onCreate(form); }
     catch (err: unknown) {
@@ -297,20 +309,43 @@ function AddUserModal({ onClose, onCreate }: {
           </div>
         )}
         <form onSubmit={handleSubmit} className="space-y-3">
-          {(["username", "email", "password"] as const).map((field) => (
-            <div key={field}>
-              <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
-                {t(`common.${field}`)}
-              </label>
-              <input
-                type={field === "password" ? "password" : field === "email" ? "email" : "text"}
-                required value={form[field]}
-                onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
-                className="control-input"
-                placeholder={field === "password" ? t("register.passwordHint") : ""}
-              />
-            </div>
-          ))}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
+              {t("common.username")}
+            </label>
+            <input
+              type="text" required value={form.username}
+              onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+              onBlur={() => touch("username")}
+              className={`control-input${usernameError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            />
+            {usernameError && <p className="mt-1 text-xs text-[var(--danger-main)]">{usernameError}</p>}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
+              {t("common.email")}
+            </label>
+            <input
+              type="email" required value={form.email}
+              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+              onBlur={() => touch("email")}
+              className={`control-input${emailError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+            />
+            {emailError && <p className="mt-1 text-xs text-[var(--danger-main)]">{emailError}</p>}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
+              {t("common.password")}
+            </label>
+            <input
+              type="password" required value={form.password}
+              onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              onBlur={() => touch("password")}
+              className={`control-input${passwordError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
+              placeholder={t("register.passwordHint")}
+            />
+            {passwordError && <p className="mt-1 text-xs text-[var(--danger-main)]">{passwordError}</p>}
+          </div>
           <label className="flex items-center gap-2 text-[13px] cursor-pointer text-[var(--text-main)]">
             <input
               type="checkbox" checked={form.isAdmin}
@@ -323,7 +358,7 @@ function AddUserModal({ onClose, onCreate }: {
             <button type="button" onClick={onClose} className="button-secondary px-3.5 py-2 text-xs">
               {t("common.cancel")}
             </button>
-            <button type="submit" disabled={isPending} className="button-primary px-3.5 py-2 text-xs">
+            <button type="submit" disabled={!canSubmit} className="button-primary px-3.5 py-2 text-xs">
               {isPending
                 ? <><Loader2 size={11} className="animate-spin" />{t("admin.creatingUser")}</>
                 : <><Plus size={11} />{t("admin.createUser")}</>}
@@ -343,10 +378,15 @@ function ResetPasswordModal({ username, onClose, onReset }: {
   const [error, setError] = useState("");
   const [isPending, setIsPending] = useState(false);
   const [done, setDone] = useState(false);
+  const [touched, setTouched] = useState(false);
+
+  const passwordError = touched && password && password.length < 12 ? t("register.passwordTooShort") : "";
+  const canSubmit = !isPending && password.length >= 12;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (password.length < 12) { setError(t("register.passwordTooShort")); return; }
+    setTouched(true);
+    if (!canSubmit) return;
     setError(""); setIsPending(true);
     try { await onReset(password); setDone(true); }
     catch { setError("Failed to reset password."); }
@@ -380,16 +420,19 @@ function ResetPasswordModal({ username, onClose, onReset }: {
               </label>
               <input
                 type="password" required value={password}
-                onChange={(e) => setPassword(e.target.value)} autoFocus
+                onChange={(e) => setPassword(e.target.value)}
+                onBlur={() => setTouched(true)}
+                autoFocus
                 placeholder={t("register.passwordHint")}
-                className="control-input"
+                className={`control-input${passwordError ? " border-[var(--danger-main)] ring-[var(--danger-main)]" : ""}`}
               />
+              {passwordError && <p className="mt-1 text-xs text-[var(--danger-main)]">{passwordError}</p>}
             </div>
             <div className="flex gap-2 justify-end">
               <button type="button" onClick={onClose} className="button-secondary px-3.5 py-2 text-xs">
                 {t("common.cancel")}
               </button>
-              <button type="submit" disabled={isPending} className="button-primary px-3.5 py-2 text-xs">
+              <button type="submit" disabled={!canSubmit} className="button-primary px-3.5 py-2 text-xs">
                 {isPending
                   ? <><Loader2 size={11} className="animate-spin" />{t("admin.resettingPassword")}</>
                   : t("admin.resetPassword")}
