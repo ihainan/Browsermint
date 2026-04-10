@@ -153,6 +153,29 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
 
 type SidebarTab = "details" | "logs" | "devtools";
 
+function getCachedSessionToken(sessionId: string): string | null {
+  try {
+    const stored = localStorage.getItem(`session-token-${sessionId}`);
+    if (!stored) return null;
+    const parts = stored.split(".");
+    if (parts.length !== 3) return null;
+    const b64 = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const decoded = JSON.parse(atob(padded)) as { exp?: number };
+    if (decoded.exp && decoded.exp * 1000 < Date.now()) {
+      localStorage.removeItem(`session-token-${sessionId}`);
+      return null;
+    }
+    return stored;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedSessionToken(sessionId: string, token: string) {
+  localStorage.setItem(`session-token-${sessionId}`, token);
+}
+
 function normalizeWsUrl(url: string): string {
   if (window.location.protocol === "https:" && url.startsWith("ws://")) {
     return "wss://" + url.slice(5);
@@ -1029,7 +1052,15 @@ export default function SessionViewPage() {
       return;
     }
     setTokenError("");
-    sessionsApi.getToken(id).then((res) => setSessionToken(res.data.token)).catch(() => setTokenError(t("sessionView.tokenFailed")));
+    const cached = getCachedSessionToken(id);
+    if (cached) {
+      setSessionToken(cached);
+      return;
+    }
+    sessionsApi.getToken(id).then((res) => {
+      setSessionToken(res.data.token);
+      setCachedSessionToken(id, res.data.token);
+    }).catch(() => setTokenError(t("sessionView.tokenFailed")));
   }, [id, session?.status, t]);
 
   if (isPending) {
@@ -1132,7 +1163,10 @@ export default function SessionViewPage() {
                 <button
                   onClick={() => {
                     setTokenError("");
-                    sessionsApi.getToken(id!).then((res) => setSessionToken(res.data.token)).catch(() => setTokenError(t("sessionView.tokenFailed")));
+                    sessionsApi.getToken(id!).then((res) => {
+                      setSessionToken(res.data.token);
+                      setCachedSessionToken(id!, res.data.token);
+                    }).catch(() => setTokenError(t("sessionView.tokenFailed")));
                   }}
                   className="inline-flex items-center gap-1.5 mt-2 text-xs text-gray-500 hover:text-gray-900 transition-colors"
                 >
@@ -1211,7 +1245,7 @@ export default function SessionViewPage() {
             <DetailsSidebar
               session={session}
               sessionToken={sessionToken}
-              onTokenRefreshed={(newToken) => setSessionToken(newToken)}
+              onTokenRefreshed={(newToken) => { setSessionToken(newToken); setCachedSessionToken(session.id, newToken); }}
             />
           )}
           {activeTab === "logs" && <LogsSidebar sessionId={session.id} sessionToken={sessionToken} />}
