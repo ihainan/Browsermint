@@ -755,10 +755,36 @@ export async function handleWebSocketUpgrade(
     request.url = "/v1/sessions/pageId";
   } else if (wsType === "cdp") {
     // Forward directly to the container's CDP server (port 9223) at the given sub-path.
-    // /ws/sessions/{id}/cdp        → /
-    // /ws/sessions/{id}/cdp/devtools/page/{id} → /devtools/page/{id}
-    request.url = wsSubPath;
-    proxyTarget = getDevtoolsBaseUrl(session.internalApiUrl!).origin;
+    // /ws/sessions/{id}/cdp/devtools/page/{id} → /devtools/page/{id} (direct)
+    // /ws/sessions/{id}/cdp                    → auto-resolve browser UUID via /json/version
+    //
+    // Auto-resolution makes the base CDP URL stable across Chrome restarts: the
+    // Chrome instance UUID in /devtools/browser/{uuid} changes every time Chrome
+    // restarts, so a hardcoded full path becomes stale. Connecting to the base path
+    // instead lets the backend always resolve the current UUID transparently.
+    const cdpBase = getDevtoolsBaseUrl(session.internalApiUrl!);
+    if (wsSubPath === "/" || wsSubPath === "") {
+      try {
+        const versionRes = await fetch(new URL("/json/version", cdpBase), {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (versionRes.ok) {
+          const versionData = await versionRes.json() as { webSocketDebuggerUrl?: string };
+          if (typeof versionData.webSocketDebuggerUrl === "string") {
+            request.url = new URL(versionData.webSocketDebuggerUrl).pathname;
+          } else {
+            request.url = "/";
+          }
+        } else {
+          request.url = "/";
+        }
+      } catch {
+        request.url = "/";
+      }
+    } else {
+      request.url = wsSubPath;
+    }
+    proxyTarget = cdpBase.origin;
   } else if (wsType === "vnc") {
     // Forward to websockify (port 6080) which bridges the noVNC WebSocket client to
     // x0vncserver's plain TCP VNC port (5900). x0vncserver (TigerVNC) has no built-in

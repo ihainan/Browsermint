@@ -707,9 +707,9 @@ function ConnectAgentModal({
 
     sessionsApi.getDetails(session.id, sessionToken).then((res) => {
       if (cancelled) return;
-      if (typeof res.data.websocketUrl === "string" && res.data.websocketUrl.length > 0) {
-        setCdpUrl(normalizeWsUrl(res.data.websocketUrl));
-      }
+      // Do NOT overwrite cdpUrl with the full devtools URL (which contains a volatile
+      // Chrome instance UUID that changes on every Chrome restart). The base cdpUrl
+      // is stable — the backend now auto-resolves the current UUID transparently.
       if (typeof res.data.tokenExpiresAt === "string") {
         setTokenExpiresAt(formatDateTime(res.data.tokenExpiresAt));
       }
