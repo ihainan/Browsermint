@@ -318,23 +318,15 @@ export default function OverviewPage() {
         <div className="flex flex-col gap-4">
 
           {/* Stats row */}
-          <div className="surface-card-strong overflow-hidden">
-            <div
-              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x"
-              style={{ borderColor: "var(--line-soft)" }}
-            >
-              {stats.map(({ label, value }) => (
-                <div
-                  key={label}
-                  className="flex items-center justify-between sm:flex-col sm:items-start sm:gap-y-1.5 px-5 py-4 sm:py-5"
-                >
-                  <h3 className="text-[12px] text-[var(--text-soft)]">{label}</h3>
-                  <p className="text-[28px] font-normal leading-none text-[var(--text-strong)] sm:mt-0">
-                    {value}
-                  </p>
-                </div>
-              ))}
-            </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {stats.map(({ label, value }) => (
+              <div key={label} className="surface-card px-4 py-3">
+                <h3 className="text-[11px] uppercase tracking-wide text-[var(--text-faint)]">{label}</h3>
+                <p className="mt-1.5 text-[26px] font-normal leading-none text-[var(--text-strong)]">
+                  {value}
+                </p>
+              </div>
+            ))}
           </div>
 
           {/* Charts row */}

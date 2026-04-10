@@ -134,7 +134,7 @@ export default function Layout() {
           </div>
         </div>
 
-        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 pb-4">
+        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 pb-4 pt-1">
           {navItems.map(({ path, label, icon: Icon, exact }) => {
             const active = isActive(path, exact);
             return (

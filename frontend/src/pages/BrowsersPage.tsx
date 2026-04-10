@@ -280,6 +280,7 @@ export default function BrowsersPage() {
   function getNameValidationError(name: string): string {
     const trimmed = name.trim();
     if (!trimmed) return t("sessions.browserNameRequired");
+    if (trimmed.length > 64) return t("sessions.browserNameTooLong");
     if (sessions.some((s) => s.name?.toLowerCase() === trimmed.toLowerCase()))
       return t("sessions.browserNameDuplicate");
     return "";
@@ -515,6 +516,7 @@ export default function BrowsersPage() {
               }}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
               placeholder={t("sessions.browserNamePlaceholder")}
+              maxLength={64}
               autoFocus
               className={clsx(
                 "control-input",
