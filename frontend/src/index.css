@@ -2,14 +2,226 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg-canvas: #f3efe8;
+  --bg-canvas-alt: #ece6dd;
+  --bg-surface: rgba(255, 255, 255, 0.76);
+  --bg-panel: #fffdf9;
+  --bg-panel-strong: #ffffff;
+  --bg-soft: #f6f1ea;
+  --line-soft: rgba(110, 94, 78, 0.14);
+  --line-strong: rgba(82, 67, 52, 0.24);
+  --text-strong: #221d17;
+  --text-main: #4d463d;
+  --text-soft: #81776b;
+  --text-faint: #aaa094;
+  --brand-strong: #177b65;
+  --brand-main: #22a486;
+  --brand-soft: rgba(34, 164, 134, 0.12);
+  --brand-soft-strong: rgba(34, 164, 134, 0.2);
+  --danger-soft: rgba(194, 74, 67, 0.12);
+  --danger-main: #c24a43;
+  --warning-soft: rgba(193, 132, 26, 0.14);
+  --warning-main: #b57a1f;
+  --shadow-soft: 0 16px 42px rgba(42, 31, 17, 0.05);
+  --shadow-panel: 0 24px 60px rgba(42, 31, 17, 0.08);
+  --radius-panel: 22px;
+  --radius-card: 18px;
+  --radius-control: 14px;
+  --font-sans: "SF Pro Text", "SF Pro Display", "Segoe UI Variable", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Source Han Sans SC", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "JetBrains Mono", "Cascadia Mono", "Roboto Mono",
+    "Menlo", "Consolas", monospace;
+}
+
 * {
   box-sizing: border-box;
 }
 
+html {
+  min-height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    Oxygen, Ubuntu, Cantarell, sans-serif;
-  background-color: #f9fafb;
-  color: #111827;
+  min-height: 100vh;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(circle at top left, rgba(34, 164, 134, 0.08), transparent 26%),
+    radial-gradient(circle at bottom right, rgba(122, 101, 78, 0.08), transparent 24%),
+    linear-gradient(180deg, #f7f3ec 0%, var(--bg-canvas) 48%, #efe8de 100%);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(34, 164, 134, 0.18);
+}
+
+@layer components {
+  .app-shell {
+    @apply flex min-h-screen;
+  }
+
+  .app-sidebar {
+    width: 280px;
+    background: linear-gradient(180deg, rgba(255, 252, 246, 0.94), rgba(245, 238, 229, 0.96));
+    border-right: 1px solid var(--line-soft);
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.5);
+    @apply hidden lg:flex lg:flex-col;
+  }
+
+  .app-main {
+    @apply flex min-h-screen min-w-0 flex-1 flex-col;
+  }
+
+  .page-wrap {
+    @apply mx-auto w-full max-w-screen-2xl px-5 pb-12 pt-6 sm:px-6 lg:px-8;
+  }
+
+  .page-header {
+    @apply mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between;
+  }
+
+  .page-eyebrow {
+    color: var(--brand-strong);
+    letter-spacing: 0.12em;
+    @apply text-[11px] font-semibold uppercase;
+  }
+
+  .page-title {
+    color: var(--text-strong);
+    letter-spacing: -0.03em;
+    @apply text-[30px] font-semibold leading-none sm:text-[34px];
+  }
+
+  .page-description {
+    color: var(--text-soft);
+    max-width: 42rem;
+    @apply mt-2 text-sm leading-6;
+  }
+
+  .surface-panel {
+    background: var(--bg-surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(16px);
+  }
+
+  .surface-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-card);
+    @apply shadow-sm;
+  }
+
+  .surface-card-strong {
+    background: var(--bg-panel-strong);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-soft);
+  }
+
+  .control-input {
+    background: rgba(255, 255, 255, 0.84);
+    border: 1px solid var(--line-soft);
+    color: var(--text-strong);
+    border-radius: var(--radius-control);
+    @apply w-full px-4 py-3 text-sm outline-none transition;
+  }
+
+  .control-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .control-input:focus {
+    border-color: rgba(34, 164, 134, 0.48);
+    box-shadow: 0 0 0 4px rgba(34, 164, 134, 0.12);
+  }
+
+  .button-primary {
+    background: var(--text-strong);
+    color: #fffdf9;
+    border-radius: var(--radius-control);
+    @apply inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition;
+  }
+
+  .button-primary:hover {
+    background: #16120e;
+  }
+
+  .button-primary:disabled {
+    @apply cursor-not-allowed opacity-45;
+  }
+
+  .button-secondary {
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid var(--line-soft);
+    color: var(--text-main);
+    border-radius: var(--radius-control);
+    @apply inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition;
+  }
+
+  .button-secondary:hover {
+    background: rgba(255, 255, 255, 1);
+    border-color: var(--line-strong);
+    color: var(--text-strong);
+  }
+
+  .button-danger {
+    background: var(--danger-main);
+    color: white;
+    border-radius: var(--radius-control);
+    @apply inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition;
+  }
+
+  .button-danger:hover {
+    background: #aa3e38;
+  }
+
+  .subtle-label {
+    color: var(--text-soft);
+    @apply text-[11px] font-medium uppercase tracking-[0.14em];
+  }
+
+  .data-value {
+    color: var(--text-strong);
+    letter-spacing: -0.03em;
+    @apply text-3xl font-semibold leading-none;
+  }
+
+  .status-badge {
+    border-radius: 999px;
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium;
+  }
+
+  .topbar-panel {
+    background: rgba(255, 253, 249, 0.78);
+    border: 1px solid var(--line-soft);
+    border-radius: 18px;
+    backdrop-filter: blur(12px);
+  }
 }

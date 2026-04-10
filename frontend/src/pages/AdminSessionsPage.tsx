@@ -19,7 +19,7 @@ function SortButton({
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-0.5 text-xs text-[#969493] font-normal hover:text-[#260f17] transition-colors"
+      className="flex items-center gap-0.5 text-xs font-normal transition-colors text-[var(--text-faint)] hover:text-[var(--text-strong)]"
     >
       {children}
       <span className="text-[10px] ml-0.5">
@@ -85,24 +85,24 @@ export default function AdminSessionsPage() {
   const errorCount = sessions.filter((s) => s.status === "error").length;
 
   return (
-    <div className="mx-auto w-full max-w-screen-2xl px-4 pt-5 pb-12">
+    <div className="page-wrap">
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-3 mb-5">
-        <div className="bg-white border border-[#edebeb] rounded-lg px-4 py-3">
-          <p className="text-[11px] text-[#969493] uppercase tracking-wide mb-1">{t("admin.allSessions")}</p>
-          <p className="text-2xl font-semibold tabular-nums text-[#260f17]">{sessions.length}</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+        <div className="surface-card px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide mb-1 text-[var(--text-faint)]">{t("admin.allSessions")}</p>
+          <p className="text-2xl font-semibold tabular-nums text-[var(--text-strong)]">{sessions.length}</p>
         </div>
-        <div className="bg-white border border-[#edebeb] rounded-lg px-4 py-3">
-          <p className="text-[11px] text-[#969493] uppercase tracking-wide mb-1">{t("common.statuses.running")}</p>
-          <p className="text-2xl font-semibold tabular-nums text-[#1dc99a]">{runningCount}</p>
+        <div className="surface-card px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide mb-1 text-[var(--text-faint)]">{t("common.statuses.running")}</p>
+          <p className="text-2xl font-semibold tabular-nums text-[var(--brand-main)]">{runningCount}</p>
         </div>
-        <div className="bg-white border border-[#edebeb] rounded-lg px-4 py-3">
-          <p className="text-[11px] text-[#969493] uppercase tracking-wide mb-1">{t("common.statuses.stopped")}</p>
-          <p className="text-2xl font-semibold tabular-nums text-[#260f17]">{stoppedCount}</p>
+        <div className="surface-card px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide mb-1 text-[var(--text-faint)]">{t("common.statuses.stopped")}</p>
+          <p className="text-2xl font-semibold tabular-nums text-[var(--text-strong)]">{stoppedCount}</p>
         </div>
-        <div className="bg-white border border-[#edebeb] rounded-lg px-4 py-3">
-          <p className="text-[11px] text-[#969493] uppercase tracking-wide mb-1">{t("common.statuses.error")}</p>
+        <div className="surface-card px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wide mb-1 text-[var(--text-faint)]">{t("common.statuses.error")}</p>
           <p className="text-2xl font-semibold tabular-nums text-red-500">{errorCount}</p>
         </div>
       </div>
@@ -110,26 +110,28 @@ export default function AdminSessionsPage() {
       {/* Toolbar */}
       <div className="flex items-center gap-3 mb-4">
         <div className="relative flex-1 max-w-xs">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#cac8c7] pointer-events-none" />
+          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-faint)]" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t("admin.sessionSearchPlaceholder")}
-            className="w-full pl-8 pr-3 py-1.5 bg-white border border-[#edebeb] rounded-sm text-[13px] text-[#260f17] placeholder-[#cac8c7] focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
+            className="control-input pl-8 py-2"
           />
         </div>
-        <div className="flex rounded-sm border border-[#edebeb] overflow-hidden text-[12px]">
+        <div
+          className="flex overflow-hidden text-[12px] rounded-[var(--radius-control)]"
+          style={{ border: "1px solid var(--line-soft)" }}
+        >
           {(["all", "running", "stopped", "error"] as StatusFilter[]).map((f) => (
             <button
               key={f}
               onClick={() => setStatusFilter(f)}
-              className={clsx(
-                "px-3 py-1.5 transition-colors capitalize",
-                statusFilter === f
-                  ? "bg-[#260f17] text-white"
-                  : "bg-white text-[#514f4f] hover:bg-[#f6f5f5]",
-              )}
+              className="px-3 py-2 transition-colors capitalize"
+              style={statusFilter === f
+                ? { background: "var(--text-strong)", color: "#fffdf9" }
+                : { background: "rgba(255,255,255,0.72)", color: "var(--text-main)" }
+              }
             >
               {f === "all" ? t("admin.filterAll") : f}
             </button>
@@ -138,49 +140,52 @@ export default function AdminSessionsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-lg border border-[#edebeb]">
+      <div className="surface-card-strong overflow-hidden">
         {isPending ? (
           <div className="flex justify-center py-16">
-            <Loader2 size={20} className="animate-spin text-[#cac8c7]" />
+            <Loader2 size={20} className="animate-spin text-[var(--text-faint)]" />
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center py-16 gap-2">
-            <Monitor size={18} className="text-[#cac8c7]" />
-            <p className="text-[13px] text-[#969493]">
+            <Monitor size={18} className="text-[var(--text-faint)]" />
+            <p className="text-[13px] text-[var(--text-soft)]">
               {search || statusFilter !== "all" ? t("admin.noResults") : t("admin.noSessions")}
             </p>
           </div>
         ) : (
-          <table className="text-[#260f17] text-[13px] w-full border-separate border-spacing-0 table-auto">
+          <table
+            className="w-full border-separate border-spacing-0 table-auto text-[13px]"
+            style={{ color: "var(--text-strong)" }}
+          >
             <thead>
               <tr>
-                <th className="px-2 py-3 text-left">
+                <th className="px-3 py-3 text-left">
                   <SortButton col="status" sortKey={sortKey} sortDir={sortDir} onClick={() => handleSort("status")}>
                     {t("admin.status")}
                   </SortButton>
                 </th>
-                <th className="px-2 py-3 text-left text-[#969493] text-xs font-normal">
+                <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">
                   {t("browsers.name")} / ID
                 </th>
-                <th className="px-2 py-3 text-left">
+                <th className="px-3 py-3 text-left">
                   <SortButton col="owner" sortKey={sortKey} sortDir={sortDir} onClick={() => handleSort("owner")}>
                     {t("admin.sessionOwner")}
                   </SortButton>
                 </th>
-                <th className="px-2 py-3 text-left text-[#969493] text-xs font-normal">
+                <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">
                   {t("admin.sessionConnections")}
                 </th>
-                <th className="px-2 py-3 text-left">
+                <th className="px-3 py-3 text-left">
                   <SortButton col="lastActiveAt" sortKey={sortKey} sortDir={sortDir} onClick={() => handleSort("lastActiveAt")}>
                     {t("admin.sessionLastActive")}
                   </SortButton>
                 </th>
-                <th className="px-2 py-3 text-left">
+                <th className="px-3 py-3 text-left">
                   <SortButton col="createdAt" sortKey={sortKey} sortDir={sortDir} onClick={() => handleSort("createdAt")}>
                     {t("admin.sessionCreated")}
                   </SortButton>
                 </th>
-                <th className="px-2 py-3 text-left text-[#969493] text-xs font-normal">
+                <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">
                   {t("admin.sessionExpires")}
                 </th>
               </tr>
@@ -205,51 +210,53 @@ function SessionRow({
   formatDateTime: (d: string) => string;
 }) {
   return (
-    <tr className="border-t border-[#edebeb] hover:bg-[#fafafa] transition-colors">
-      {/* Status */}
+    <tr
+      className="border-t transition-colors hover:bg-[var(--bg-soft)]"
+      style={{ borderColor: "var(--line-soft)" }}
+    >
       <td className="p-0">
-        <div className="flex h-12 items-center px-2">
+        <div className="flex h-12 items-center px-3">
           <StatusBadge status={session.status as Session["status"]} />
         </div>
       </td>
-      {/* Name / ID */}
       <td className="p-0">
-        <div className="flex h-12 flex-col justify-center px-2 min-w-0">
-          <span className="text-[13px] text-[#260f17] truncate max-w-[180px]">
-            {session.name ?? <span className="text-[#cac8c7]">—</span>}
+        <div className="flex h-12 flex-col justify-center px-3 min-w-0">
+          <span className="text-[13px] truncate max-w-[180px] text-[var(--text-strong)]">
+            {session.name ?? <span className="text-[var(--text-faint)]">—</span>}
           </span>
-          <span className="text-[10px] text-[#cac8c7] font-mono">{session.id.slice(0, 8)}…</span>
+          <span className="text-[10px] font-mono text-[var(--text-faint)]">{session.id.slice(0, 8)}…</span>
         </div>
       </td>
-      {/* Owner */}
       <td className="p-0">
-        <div className="flex h-12 flex-col justify-center px-2 min-w-0">
-          <span className="text-[13px] text-[#260f17] truncate max-w-[140px]">{session.user.username}</span>
-          <span className="text-[10px] text-[#969493] truncate max-w-[140px]">{session.user.email}</span>
+        <div className="flex h-12 flex-col justify-center px-3 min-w-0">
+          <span className="text-[13px] truncate max-w-[140px] text-[var(--text-strong)]">
+            {session.user.username}
+          </span>
+          <span className="text-[10px] truncate max-w-[140px] text-[var(--text-soft)]">
+            {session.user.email}
+          </span>
         </div>
       </td>
-      {/* Connections (event count) */}
       <td className="p-0">
-        <div className="flex h-12 items-center px-2 tabular-nums text-[13px] text-[#514f4f]">
+        <div className="flex h-12 items-center px-3 tabular-nums text-[13px] text-[var(--text-main)]">
           {session.eventCount}
         </div>
       </td>
-      {/* Last active */}
       <td className="p-0 whitespace-nowrap">
-        <div className="flex h-12 items-center px-2 text-[12px] text-[#514f4f]">
+        <div className="flex h-12 items-center px-3 text-[12px] text-[var(--text-main)]">
           {formatDateTime(session.lastActiveAt)}
         </div>
       </td>
-      {/* Created */}
       <td className="p-0 whitespace-nowrap">
-        <div className="flex h-12 items-center px-2 text-[12px] text-[#514f4f]">
+        <div className="flex h-12 items-center px-3 text-[12px] text-[var(--text-main)]">
           {formatDateTime(session.createdAt)}
         </div>
       </td>
-      {/* Expires */}
       <td className="p-0 whitespace-nowrap">
-        <div className="flex h-12 items-center px-2 text-[12px] text-[#514f4f]">
-          {session.expiresAt ? formatDateTime(session.expiresAt) : <span className="text-[#cac8c7]">—</span>}
+        <div className="flex h-12 items-center px-3 text-[12px] text-[var(--text-main)]">
+          {session.expiresAt
+            ? formatDateTime(session.expiresAt)
+            : <span className="text-[var(--text-faint)]">—</span>}
         </div>
       </td>
     </tr>

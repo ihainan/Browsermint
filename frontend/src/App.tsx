@@ -7,12 +7,12 @@ import SessionViewPage from "./pages/SessionViewPage.tsx";
 import Layout from "./components/Layout.tsx";
 import OverviewPage from "./pages/OverviewPage.tsx";
 import BrowsersPage from "./pages/BrowsersPage.tsx";
-import ApiKeyPage from "./pages/ApiKeyPage.tsx";
 import AdminUsersPage from "./pages/AdminUsersPage.tsx";
 import AdminSessionsPage from "./pages/AdminSessionsPage.tsx";
 
 function AppRoutes() {
   const { registrationEnabled } = useAuth();
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
@@ -21,7 +21,6 @@ function AppRoutes() {
         element={registrationEnabled ? <RegisterPage /> : <Navigate to="/login" replace />}
       />
 
-      {/* Full-screen session viewer — no sidebar */}
       <Route
         path="/sessions/:id"
         element={
@@ -31,7 +30,6 @@ function AppRoutes() {
         }
       />
 
-      {/* Sidebar layout */}
       <Route
         element={
           <ProtectedRoute>
@@ -41,7 +39,6 @@ function AppRoutes() {
       >
         <Route path="/" element={<OverviewPage />} />
         <Route path="/browsers" element={<BrowsersPage />} />
-        <Route path="/api-key" element={<ApiKeyPage />} />
         <Route
           path="/admin/users"
           element={
@@ -58,7 +55,6 @@ function AppRoutes() {
             </AdminRoute>
           }
         />
-        {/* Keep old /sessions URL working */}
         <Route path="/sessions" element={<Navigate to="/browsers" replace />} />
       </Route>
     </Routes>

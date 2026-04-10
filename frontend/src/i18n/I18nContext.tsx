@@ -32,6 +32,7 @@ const messages = {
       chinese: "Chinese",
       signOut: "Sign out",
       unnamedBrowser: "Unnamed browser",
+      loadingWorkspace: "Loading workspace…",
       statuses: {
         creating: "creating",
         running: "running",
@@ -41,6 +42,8 @@ const messages = {
       },
     },
     login: {
+      heroTitle: "A calmer workspace for managed browsers",
+      heroDescription: "Sign in to manage local browser sessions, monitor capacity, and keep agent workflows organized.",
       subtitle: "Agentic cloud browser management",
       title: "Sign in to your account",
       submit: "Sign in",
@@ -50,6 +53,8 @@ const messages = {
       loginFailed: "Login failed",
     },
     register: {
+      heroTitle: "Prepare a workspace that stays operational",
+      heroDescription: "Create an account to manage browser capacity, session access, and shared operational visibility.",
       subtitle: "Agentic cloud browser management",
       title: "Create your account",
       submit: "Create account",
@@ -60,10 +65,19 @@ const messages = {
       passwordTooShort: "Password must be at least 12 characters",
       registrationFailed: "Registration failed",
     },
+    layout: {
+      sidebarTagline: "Local browser workspace for agents",
+      adminSection: "Administration",
+      pageDescriptions: {
+        overview: "Capacity, activity, and browser health at a glance",
+        browsers: "Manage active and stopped browser workspaces",
+        adminUsers: "Control access, quotas, and account status",
+        adminSessions: "Inspect browser usage across all accounts",
+      },
+    },
     nav: {
       overview: "Overview",
       browsers: "Browsers",
-      apiKey: "API Key",
       adminUsers: "Users",
       adminSessions: "Sessions",
     },
@@ -95,11 +109,6 @@ const messages = {
       capsolverFailed: "Failed",
       capsolverAvgTime: "Avg. Time",
       capsolverNoData: "No captcha solves yet",
-    },
-    apiKey: {
-      title: "API Key",
-      comingSoon: "Coming soon",
-      description: "API key management will be available here.",
     },
     browsers: {
       title: "Browsers",
@@ -291,6 +300,7 @@ const messages = {
       chinese: "中文",
       signOut: "退出登录",
       unnamedBrowser: "未命名浏览器",
+      loadingWorkspace: "工作区加载中…",
       statuses: {
         creating: "创建中",
         running: "运行中",
@@ -300,6 +310,8 @@ const messages = {
       },
     },
     login: {
+      heroTitle: "为托管浏览器打造的沉静工作区",
+      heroDescription: "登录以管理本地浏览器会话、监控容量，并保持 Agent 工作流井然有序。",
       subtitle: "Agentic 云浏览器管理",
       title: "登录账户",
       submit: "登录",
@@ -309,6 +321,8 @@ const messages = {
       loginFailed: "登录失败",
     },
     register: {
+      heroTitle: "构建持续稳定运行的工作区",
+      heroDescription: "创建账户以管理浏览器容量、会话访问权限与共享运营可见性。",
       subtitle: "Agentic 云浏览器管理",
       title: "创建账户",
       submit: "创建账户",
@@ -319,10 +333,19 @@ const messages = {
       passwordTooShort: "密码至少需要 12 个字符",
       registrationFailed: "注册失败",
     },
+    layout: {
+      sidebarTagline: "本地 Agent 浏览器工作区",
+      adminSection: "管理",
+      pageDescriptions: {
+        overview: "容量、活动与浏览器健康状态一览",
+        browsers: "管理运行中与已停止的浏览器工作区",
+        adminUsers: "管理访问权限、配额与账户状态",
+        adminSessions: "查看所有账户的浏览器使用情况",
+      },
+    },
     nav: {
       overview: "概览",
       browsers: "浏览器",
-      apiKey: "API Key",
       adminUsers: "用户管理",
       adminSessions: "会话管理",
     },
@@ -354,11 +377,6 @@ const messages = {
       capsolverFailed: "失败",
       capsolverAvgTime: "平均耗时",
       capsolverNoData: "暂无验证码求解记录",
-    },
-    apiKey: {
-      title: "API Key",
-      comingSoon: "即将推出",
-      description: "API Key 管理功能即将上线。",
     },
     browsers: {
       title: "浏览器",

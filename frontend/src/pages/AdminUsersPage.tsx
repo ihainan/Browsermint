@@ -30,9 +30,9 @@ type Filter = "all" | "active" | "suspended";
 
 function StatCard({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
   return (
-    <div className="bg-white border border-[#edebeb] rounded-lg px-4 py-3">
-      <p className="text-[11px] text-[#969493] uppercase tracking-wide mb-1">{label}</p>
-      <p className={clsx("text-2xl font-semibold tabular-nums", accent ? "text-[#1dc99a]" : "text-[#260f17]")}>
+    <div className="surface-card px-4 py-3">
+      <p className="text-[11px] uppercase tracking-wide mb-1 text-[var(--text-faint)]">{label}</p>
+      <p className={clsx("text-2xl font-semibold tabular-nums", accent ? "text-[var(--brand-main)]" : "text-[var(--text-strong)]")}>
         {value}
       </p>
     </div>
@@ -40,10 +40,10 @@ function StatCard({ label, value, accent }: { label: string; value: number; acce
 }
 
 function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: SortDir }) {
-  if (col !== sortKey) return <ChevronsUpDown size={12} className="text-[#cac8c7] ml-0.5" />;
+  if (col !== sortKey) return <ChevronsUpDown size={12} className="ml-0.5 text-[var(--text-faint)]" />;
   return sortDir === "asc"
-    ? <ChevronUp size={12} className="text-[#260f17] ml-0.5" />
-    : <ChevronDown size={12} className="text-[#260f17] ml-0.5" />;
+    ? <ChevronUp size={12} className="ml-0.5 text-[var(--text-strong)]" />
+    : <ChevronDown size={12} className="ml-0.5 text-[var(--text-strong)]" />;
 }
 
 function MaxSessionsCell({ user, onSave, isPending }: {
@@ -65,15 +65,23 @@ function MaxSessionsCell({ user, onSave, isPending }: {
         <input
           type="number" min={0} value={value} autoFocus
           onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setValue(String(user.maxSessions)); setEditing(false); } }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") { setValue(String(user.maxSessions)); setEditing(false); }
+          }}
           onBlur={commit}
-          className="w-20 px-1.5 py-0.5 text-[13px] border border-[#1dc99a] rounded focus:outline-none bg-white"
+          className="w-20 px-1.5 py-0.5 text-[13px] rounded focus:outline-none"
+          style={{
+            border: "1px solid var(--brand-main)",
+            background: "var(--bg-panel-strong)",
+            color: "var(--text-strong)",
+          }}
         />
       ) : (
         <button
           onClick={() => { setValue(String(user.maxSessions)); setEditing(true); }}
           disabled={isPending}
-          className="text-left text-[13px] text-[#260f17] hover:text-[#1dc99a] transition-colors disabled:opacity-50 tabular-nums"
+          className="text-left text-[13px] transition-colors disabled:opacity-50 tabular-nums text-[var(--text-strong)] hover:text-[var(--brand-main)]"
           title="Click to edit"
         >
           {isPending
@@ -82,9 +90,9 @@ function MaxSessionsCell({ user, onSave, isPending }: {
           }
         </button>
       )}
-      <div className="h-1 w-full bg-[#edebeb] rounded-full overflow-hidden">
+      <div className="h-1 w-full rounded-full overflow-hidden bg-[var(--line-soft)]">
         <div
-          className={clsx("h-full rounded-full transition-all", pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-[#1dc99a]")}
+          className={clsx("h-full rounded-full transition-all", pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-[var(--brand-main)]")}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -116,61 +124,72 @@ function UserDetailPanel({ user, onClose, onResetPassword, onUpdate, onSuspendTo
 
   return (
     <>
-      {/* backdrop */}
       <div className="fixed inset-0 z-30" onClick={onClose} />
-      {/* panel */}
-      <div className="fixed right-0 top-0 h-full w-80 bg-white border-l border-[#edebeb] shadow-xl z-40 flex flex-col overflow-hidden">
+      <div
+        className="fixed right-0 top-0 h-full w-80 z-40 flex flex-col overflow-hidden"
+        style={{
+          background: "var(--bg-panel-strong)",
+          borderLeft: "1px solid var(--line-soft)",
+          boxShadow: "var(--shadow-panel)",
+        }}
+      >
         {/* header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#edebeb] shrink-0">
-          <span className="text-[13px] font-semibold text-[#260f17]">{t("admin.userDetails")}</span>
-          <button onClick={onClose} className="p-1 text-[#969493] hover:text-[#260f17] rounded transition-colors">
+        <div
+          className="flex items-center justify-between px-4 py-3 shrink-0"
+          style={{ borderBottom: "1px solid var(--line-soft)" }}
+        >
+          <span className="text-[13px] font-semibold text-[var(--text-strong)]">{t("admin.userDetails")}</span>
+          <button
+            onClick={onClose}
+            className="p-1 rounded transition-colors text-[var(--text-faint)] hover:text-[var(--text-strong)]"
+          >
             <X size={15} />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto">
           {/* user info */}
-          <div className="px-4 py-4 border-b border-[#edebeb]">
+          <div className="px-4 py-4" style={{ borderBottom: "1px solid var(--line-soft)" }}>
             <div className="flex items-center gap-3 mb-4">
               <div className={clsx("w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shrink-0", avatarColor(user.username))}>
                 {user.username[0].toUpperCase()}
               </div>
               <div className="min-w-0">
-                <p className="text-[13px] font-semibold text-[#260f17] truncate">{user.username}</p>
-                <p className="text-xs text-[#969493] truncate">{user.email}</p>
+                <p className="text-[13px] font-semibold truncate text-[var(--text-strong)]">{user.username}</p>
+                <p className="text-xs truncate text-[var(--text-soft)]">{user.email}</p>
               </div>
             </div>
 
             <div className="space-y-1.5 text-[12px]">
               <div className="flex justify-between">
-                <span className="text-[#969493]">{t("admin.role")}</span>
-                <span className={clsx("font-medium", user.isAdmin ? "text-[#0d7a5f]" : "text-[#514f4f]")}>
+                <span className="text-[var(--text-soft)]">{t("admin.role")}</span>
+                <span className={clsx("font-medium", user.isAdmin ? "text-[var(--brand-strong)]" : "text-[var(--text-main)]")}>
                   {user.isAdmin ? t("admin.admin") : t("admin.member")}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#969493]">{t("admin.status")}</span>
-                <span className={clsx("font-medium", user.isActive ? "text-[#0d7a5f]" : "text-red-500")}>
+                <span className="text-[var(--text-soft)]">{t("admin.status")}</span>
+                <span className={clsx("font-medium", user.isActive ? "text-[var(--brand-strong)]" : "text-red-500")}>
                   {user.isActive ? t("admin.active") : t("admin.suspended")}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#969493]">{t("admin.joined")}</span>
-                <span className="text-[#514f4f]">{formatDateTime(user.createdAt)}</span>
+                <span className="text-[var(--text-soft)]">{t("admin.joined")}</span>
+                <span className="text-[var(--text-main)]">{formatDateTime(user.createdAt)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#969493]">{t("admin.sessions")}</span>
-                <span className="text-[#514f4f] tabular-nums">{user.sessionCount} / {user.maxSessions}</span>
+                <span className="text-[var(--text-soft)]">{t("admin.sessions")}</span>
+                <span className="text-[var(--text-main)] tabular-nums">{user.sessionCount} / {user.maxSessions}</span>
               </div>
             </div>
           </div>
 
           {/* actions */}
-          <div className="px-4 py-3 border-b border-[#edebeb] space-y-1.5">
+          <div className="px-4 py-3 space-y-1.5" style={{ borderBottom: "1px solid var(--line-soft)" }}>
             <button
               onClick={() => onUpdate({ isAdmin: !user.isAdmin })}
               disabled={updatePending || isLastAdmin}
-              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-[#514f4f] hover:bg-[#f6f5f5] rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-[var(--text-main)] hover:bg-[var(--bg-soft)]"
             >
               <ShieldCheck size={13} />
               {user.isAdmin ? t("admin.removeAdmin") : t("admin.makeAdmin")}
@@ -179,14 +198,14 @@ function UserDetailPanel({ user, onClose, onResetPassword, onUpdate, onSuspendTo
               onClick={onSuspendToggle}
               disabled={updatePending || (isSelf && user.isActive)}
               title={isSelf && user.isActive ? t("admin.cannotSuspendSelf") : undefined}
-              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-[#514f4f] hover:bg-[#f6f5f5] rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-[var(--text-main)] hover:bg-[var(--bg-soft)]"
             >
               {user.isActive ? <Ban size={13} /> : <CircleCheck size={13} />}
               {user.isActive ? t("admin.suspend") : t("admin.activate")}
             </button>
             <button
               onClick={onResetPassword}
-              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-[#514f4f] hover:bg-[#f6f5f5] rounded transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[12px] rounded transition-colors text-[var(--text-main)] hover:bg-[var(--bg-soft)]"
             >
               <KeyRound size={13} />
               {t("admin.resetPassword")}
@@ -195,23 +214,36 @@ function UserDetailPanel({ user, onClose, onResetPassword, onUpdate, onSuspendTo
 
           {/* sessions */}
           <div className="px-4 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-[#969493] mb-2">{t("admin.browserSessions")}</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide mb-2 text-[var(--text-soft)]">
+              {t("admin.browserSessions")}
+            </p>
             {isPending ? (
-              <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-[#cac8c7]" /></div>
+              <div className="flex justify-center py-4">
+                <Loader2 size={16} className="animate-spin text-[var(--text-faint)]" />
+              </div>
             ) : sessions.length === 0 ? (
-              <p className="text-[12px] text-[#cac8c7] text-center py-4">{t("admin.noSessions")}</p>
+              <p className="text-[12px] text-center py-4 text-[var(--text-faint)]">{t("admin.noSessions")}</p>
             ) : (
               <div className="space-y-1">
                 {sessions.map((s) => (
-                  <div key={s.id} className="flex items-center justify-between py-1.5 border-b border-[#f6f5f5] last:border-0">
+                  <div
+                    key={s.id}
+                    className="flex items-center justify-between py-1.5 last:border-0"
+                    style={{ borderBottom: "1px solid var(--bg-soft)" }}
+                  >
                     <div className="min-w-0">
-                      <p className="text-[12px] text-[#260f17] truncate">{s.name ?? <span className="text-[#cac8c7]">—</span>}</p>
-                      <p className="text-[10px] text-[#cac8c7] font-mono">{s.id.slice(0, 8)}…</p>
+                      <p className="text-[12px] truncate text-[var(--text-strong)]">
+                        {s.name ?? <span className="text-[var(--text-faint)]">—</span>}
+                      </p>
+                      <p className="text-[10px] font-mono text-[var(--text-faint)]">{s.id.slice(0, 8)}…</p>
                     </div>
                     <span className={clsx(
                       "text-[10px] px-1.5 py-0.5 rounded shrink-0 ml-2",
-                      s.status === "running" ? "bg-[#1dc99a18] text-[#0d7a5f]" :
-                      s.status === "error" ? "bg-red-50 text-red-500" : "bg-[#f6f5f5] text-[#969493]"
+                      s.status === "running"
+                        ? "bg-[var(--brand-soft)] text-[var(--brand-strong)]"
+                        : s.status === "error"
+                          ? "bg-[var(--danger-soft)] text-[var(--danger-main)]"
+                          : "bg-[var(--bg-soft)] text-[var(--text-soft)]"
                     )}>
                       {s.status}
                     </span>
@@ -252,39 +284,49 @@ function AddUserModal({ onClose, onCreate }: {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-96 mx-4" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-semibold text-[#260f17] mb-4">{t("admin.createUser")}</h3>
-        {error && <div className="mb-3 px-3 py-2 bg-red-50 rounded text-xs text-red-600">{error}</div>}
+    <div
+      className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+      style={{ background: "rgba(34, 29, 23, 0.35)" }}
+      onClick={onClose}
+    >
+      <div className="surface-panel p-6 w-96 mx-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-semibold mb-4 text-[var(--text-strong)]">{t("admin.createUser")}</h3>
+        {error && (
+          <div className="mb-3 px-3 py-2 rounded text-xs text-[var(--danger-main)] bg-[var(--danger-soft)]">
+            {error}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-3">
           {(["username", "email", "password"] as const).map((field) => (
             <div key={field}>
-              <label className="block text-xs font-semibold text-[#969493] uppercase tracking-wide mb-1">
+              <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
                 {t(`common.${field}`)}
               </label>
               <input
                 type={field === "password" ? "password" : field === "email" ? "email" : "text"}
                 required value={form[field]}
                 onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
-                className="w-full px-3 py-2 bg-[#fafafa] border border-[#edebeb] rounded-md text-sm text-[#260f17] placeholder-[#cac8c7] focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
+                className="control-input"
                 placeholder={field === "password" ? t("register.passwordHint") : ""}
               />
             </div>
           ))}
-          <label className="flex items-center gap-2 text-[13px] text-[#514f4f] cursor-pointer">
+          <label className="flex items-center gap-2 text-[13px] cursor-pointer text-[var(--text-main)]">
             <input
               type="checkbox" checked={form.isAdmin}
               onChange={(e) => setForm((f) => ({ ...f, isAdmin: e.target.checked }))}
-              className="rounded border-[#edebeb] text-[#1dc99a] focus:ring-[#1dc99a]/20"
+              className="rounded"
             />
             {t("admin.makeAdmin")}
           </label>
           <div className="flex gap-2 justify-end pt-1">
-            <button type="button" onClick={onClose} className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors">
+            <button type="button" onClick={onClose} className="button-secondary px-3.5 py-2 text-xs">
               {t("common.cancel")}
             </button>
-            <button type="submit" disabled={isPending} className="px-3.5 py-2 text-xs font-medium text-white bg-[#1dc99a] hover:bg-[#17a87f] rounded-md transition-colors disabled:opacity-50 flex items-center gap-1.5">
-              {isPending ? <><Loader2 size={11} className="animate-spin" />{t("admin.creatingUser")}</> : <><Plus size={11} />{t("admin.createUser")}</>}
+            <button type="submit" disabled={isPending} className="button-primary px-3.5 py-2 text-xs">
+              {isPending
+                ? <><Loader2 size={11} className="animate-spin" />{t("admin.creatingUser")}</>
+                : <><Plus size={11} />{t("admin.createUser")}</>}
             </button>
           </div>
         </form>
@@ -312,29 +354,45 @@ function ResetPasswordModal({ username, onClose, onReset }: {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-semibold text-[#260f17] mb-1">{t("admin.resetPassword")}</h3>
-        <p className="text-xs text-[#969493] mb-4">{username}</p>
+    <div
+      className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+      style={{ background: "rgba(34, 29, 23, 0.35)" }}
+      onClick={onClose}
+    >
+      <div className="surface-panel p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-semibold mb-1 text-[var(--text-strong)]">{t("admin.resetPassword")}</h3>
+        <p className="text-xs mb-4 text-[var(--text-soft)]">{username}</p>
         {done ? (
           <>
-            <p className="text-xs text-[#1dc99a] mb-4">Password reset successfully.</p>
-            <div className="flex justify-end"><button onClick={onClose} className="px-3.5 py-2 text-xs font-medium text-white bg-[#1dc99a] hover:bg-[#17a87f] rounded-md transition-colors">{t("common.cancel")}</button></div>
+            <p className="text-xs mb-4 text-[var(--brand-main)]">Password reset successfully.</p>
+            <div className="flex justify-end">
+              <button onClick={onClose} className="button-primary px-3.5 py-2 text-xs">
+                {t("common.cancel")}
+              </button>
+            </div>
           </>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-3">
-            {error && <p className="text-xs text-red-500">{error}</p>}
+            {error && <p className="text-xs text-[var(--danger-main)]">{error}</p>}
             <div>
-              <label className="block text-xs font-semibold text-[#969493] uppercase tracking-wide mb-1">{t("admin.newPassword")}</label>
-              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} autoFocus
+              <label className="block text-xs font-semibold uppercase tracking-wide mb-1 text-[var(--text-soft)]">
+                {t("admin.newPassword")}
+              </label>
+              <input
+                type="password" required value={password}
+                onChange={(e) => setPassword(e.target.value)} autoFocus
                 placeholder={t("register.passwordHint")}
-                className="w-full px-3 py-2 bg-[#fafafa] border border-[#edebeb] rounded-md text-sm text-[#260f17] focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
+                className="control-input"
               />
             </div>
             <div className="flex gap-2 justify-end">
-              <button type="button" onClick={onClose} className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors">{t("common.cancel")}</button>
-              <button type="submit" disabled={isPending} className="px-3.5 py-2 text-xs font-medium text-white bg-[#1dc99a] hover:bg-[#17a87f] rounded-md transition-colors disabled:opacity-50 flex items-center gap-1.5">
-                {isPending ? <><Loader2 size={11} className="animate-spin" />{t("admin.resettingPassword")}</> : t("admin.resetPassword")}
+              <button type="button" onClick={onClose} className="button-secondary px-3.5 py-2 text-xs">
+                {t("common.cancel")}
+              </button>
+              <button type="submit" disabled={isPending} className="button-primary px-3.5 py-2 text-xs">
+                {isPending
+                  ? <><Loader2 size={11} className="animate-spin" />{t("admin.resettingPassword")}</>
+                  : t("admin.resetPassword")}
               </button>
             </div>
           </form>
@@ -423,10 +481,10 @@ export default function AdminUsersPage() {
   }, [users, filter, search, sortKey, sortDir]);
 
   return (
-    <div className="mx-auto w-full max-w-screen-2xl px-4 pt-5 pb-12">
+    <div className="page-wrap">
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-3 mb-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         <StatCard label={t("admin.totalUsers")} value={users.length} />
         <StatCard label={t("admin.adminCount")} value={adminCount} />
         <StatCard label={t("admin.totalActiveSessions")} value={totalSessions} accent />
@@ -438,52 +496,81 @@ export default function AdminUsersPage() {
         <input
           type="text" value={search} onChange={(e) => setSearch(e.target.value)}
           placeholder={t("admin.searchPlaceholder")}
-          className="flex-1 max-w-xs px-3 py-1.5 bg-white border border-[#edebeb] rounded-sm text-[13px] text-[#260f17] placeholder-[#cac8c7] focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
+          className="control-input flex-1 max-w-xs py-2"
         />
-        <div className="flex rounded-sm border border-[#edebeb] overflow-hidden text-[12px]">
+        <div
+          className="flex overflow-hidden text-[12px] rounded-[var(--radius-control)]"
+          style={{ border: "1px solid var(--line-soft)" }}
+        >
           {(["all", "active", "suspended"] as Filter[]).map((f) => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={clsx("px-3 py-1.5 transition-colors",
-                filter === f ? "bg-[#260f17] text-white" : "bg-white text-[#514f4f] hover:bg-[#f6f5f5]"
-              )}>
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className="px-3 py-2 transition-colors"
+              style={filter === f
+                ? { background: "var(--text-strong)", color: "#fffdf9" }
+                : { background: "rgba(255,255,255,0.72)", color: "var(--text-main)" }
+              }
+            >
               {t(`admin.filter${f.charAt(0).toUpperCase() + f.slice(1)}` as `admin.filterAll`)}
             </button>
           ))}
         </div>
         <div className="flex-1" />
-        <button onClick={() => setAddUserOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1dc99a] text-white text-[13px] font-medium rounded-sm hover:bg-[#17a87f] transition-colors">
+        <button
+          onClick={() => setAddUserOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors rounded-[var(--radius-control)]"
+          style={{ background: "var(--text-strong)", color: "#fffdf9" }}
+          onMouseEnter={e => (e.currentTarget.style.background = "#16120e")}
+          onMouseLeave={e => (e.currentTarget.style.background = "var(--text-strong)")}
+        >
           <Plus size={13} />{t("admin.addUser")}
         </button>
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-lg border border-[#edebeb]">
+      <div className="surface-card-strong overflow-hidden">
         {isPending ? (
-          <div className="flex justify-center py-16"><Loader2 size={20} className="animate-spin text-[#cac8c7]" /></div>
+          <div className="flex justify-center py-16">
+            <Loader2 size={20} className="animate-spin text-[var(--text-faint)]" />
+          </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center py-16 gap-2">
-            <Users size={18} className="text-[#cac8c7]" />
-            <p className="text-[13px] text-[#969493]">{search || filter !== "all" ? t("admin.noResults") : "No users"}</p>
+            <Users size={18} className="text-[var(--text-faint)]" />
+            <p className="text-[13px] text-[var(--text-soft)]">
+              {search || filter !== "all" ? t("admin.noResults") : "No users"}
+            </p>
           </div>
         ) : (
-          <table className="text-[#260f17] text-[13px] w-full border-separate border-spacing-0 table-auto">
+          <table
+            className="w-full border-separate border-spacing-0 table-auto text-[13px]"
+            style={{ color: "var(--text-strong)" }}
+          >
             <thead>
               <tr>
-                <th className="px-2 py-3 text-left">
-                  <button onClick={() => handleSort("username")} className="flex items-center text-xs text-[#969493] font-normal hover:text-[#260f17] transition-colors">
+                <th className="px-3 py-3 text-left">
+                  <button
+                    onClick={() => handleSort("username")}
+                    className="flex items-center text-xs font-normal transition-colors text-[var(--text-faint)] hover:text-[var(--text-strong)]"
+                  >
                     {t("admin.username")}<SortIcon col="username" sortKey={sortKey} sortDir={sortDir} />
                   </button>
                 </th>
-                <th className="px-2 py-3 text-left text-[#969493] text-xs font-normal">{t("admin.email")}</th>
-                <th className="px-2 py-3 text-left text-[#969493] text-xs font-normal w-28">{t("admin.role")}</th>
-                <th className="px-2 py-3 text-left">
-                  <button onClick={() => handleSort("sessionCount")} className="flex items-center text-xs text-[#969493] font-normal hover:text-[#260f17] transition-colors">
+                <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">{t("admin.email")}</th>
+                <th className="px-3 py-3 text-left text-xs font-normal w-28 text-[var(--text-faint)]">{t("admin.role")}</th>
+                <th className="px-3 py-3 text-left">
+                  <button
+                    onClick={() => handleSort("sessionCount")}
+                    className="flex items-center text-xs font-normal transition-colors text-[var(--text-faint)] hover:text-[var(--text-strong)]"
+                  >
                     {t("admin.sessions")}<SortIcon col="sessionCount" sortKey={sortKey} sortDir={sortDir} />
                   </button>
                 </th>
-                <th className="px-2 py-3 text-left">
-                  <button onClick={() => handleSort("createdAt")} className="flex items-center text-xs text-[#969493] font-normal hover:text-[#260f17] transition-colors">
+                <th className="px-3 py-3 text-left">
+                  <button
+                    onClick={() => handleSort("createdAt")}
+                    className="flex items-center text-xs font-normal transition-colors text-[var(--text-faint)] hover:text-[var(--text-strong)]"
+                  >
                     {t("admin.joined")}<SortIcon col="createdAt" sortKey={sortKey} sortDir={sortDir} />
                   </button>
                 </th>
@@ -498,40 +585,64 @@ export default function AdminUsersPage() {
                 const isSelected = selectedUser?.id === user.id;
 
                 return (
-                  <tr key={user.id}
+                  <tr
+                    key={user.id}
                     onClick={() => setSelectedUser(isSelected ? null : user)}
-                    className={clsx("border-t border-[#edebeb] cursor-pointer transition-colors", isSelected ? "bg-[#f0fdf9]" : "hover:bg-[#fafafa]")}
+                    className="border-t cursor-pointer transition-colors"
+                    style={{
+                      borderColor: "var(--line-soft)",
+                      background: isSelected ? "var(--brand-soft)" : undefined,
+                    }}
+                    onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = "var(--bg-soft)"; }}
+                    onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = ""; }}
                   >
                     {/* User */}
                     <td className="p-0">
-                      <div className="flex h-12 items-center gap-2.5 px-2">
+                      <div className="flex h-12 items-center gap-2.5 px-3">
                         <div className={clsx("w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0", avatarColor(user.username))}>
                           {user.username[0].toUpperCase()}
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
-                            <span className="font-medium text-[#260f17]">{user.username}</span>
-                            {isSelf && <span className="text-[10px] text-[#969493] bg-[#f6f5f5] px-1 py-0.5 rounded">you</span>}
-                            {!user.isActive && <span className="text-[10px] text-red-500 bg-red-50 px-1 py-0.5 rounded">{t("admin.suspended")}</span>}
+                            <span className="font-medium text-[var(--text-strong)]">{user.username}</span>
+                            {isSelf && (
+                              <span className="text-[10px] px-1 py-0.5 rounded text-[var(--text-soft)] bg-[var(--bg-soft)]">
+                                you
+                              </span>
+                            )}
+                            {!user.isActive && (
+                              <span className="text-[10px] px-1 py-0.5 rounded text-[var(--danger-main)] bg-[var(--danger-soft)]">
+                                {t("admin.suspended")}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
                     </td>
                     {/* Email */}
-                    <td className="p-0"><div className="flex h-12 items-center px-2 text-[#514f4f] text-[12px]">{user.email}</div></td>
+                    <td className="p-0">
+                      <div className="flex h-12 items-center px-3 text-[12px] text-[var(--text-main)]">
+                        {user.email}
+                      </div>
+                    </td>
                     {/* Role */}
                     <td className="p-0">
-                      <div className="flex h-12 items-center px-2">
+                      <div className="flex h-12 items-center px-3">
                         <button
-                          onClick={(e) => { e.stopPropagation(); if (!updatePending && !isLastAdmin) updateMutation.mutate({ id: user.id, data: { isAdmin: !user.isAdmin } }); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!updatePending && !isLastAdmin)
+                              updateMutation.mutate({ id: user.id, data: { isAdmin: !user.isAdmin } });
+                          }}
                           disabled={updatePending || isLastAdmin}
                           title={isLastAdmin ? t("admin.cannotRemoveLastAdmin") : user.isAdmin ? t("admin.removeAdmin") : t("admin.makeAdmin")}
-                          className={clsx("inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors",
+                          className={clsx(
+                            "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors disabled:opacity-60",
                             user.isAdmin
-                              ? "bg-[#1dc99a18] text-[#0d7a5f] hover:bg-[#1dc99a30] disabled:cursor-default disabled:hover:bg-[#1dc99a18]"
-                              : "bg-[#f6f5f5] text-[#969493] hover:bg-[#edebeb]",
-                            "disabled:opacity-60"
-                          )}>
+                              ? "bg-[var(--brand-soft)] text-[var(--brand-strong)] hover:bg-[var(--brand-soft-strong)] disabled:hover:bg-[var(--brand-soft)]"
+                              : "bg-[var(--bg-soft)] text-[var(--text-soft)] hover:bg-[var(--line-soft)]"
+                          )}
+                        >
                           {updatePending ? <Loader2 size={10} className="animate-spin" /> : user.isAdmin && <ShieldCheck size={10} />}
                           {user.isAdmin ? t("admin.admin") : t("admin.member")}
                         </button>
@@ -539,7 +650,7 @@ export default function AdminUsersPage() {
                     </td>
                     {/* Usage */}
                     <td className="p-0">
-                      <div className="flex h-12 items-center px-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex h-12 items-center px-3" onClick={(e) => e.stopPropagation()}>
                         <MaxSessionsCell
                           user={user}
                           onSave={(v) => updateMutation.mutate({ id: user.id, data: { maxSessions: v } })}
@@ -549,7 +660,9 @@ export default function AdminUsersPage() {
                     </td>
                     {/* Joined */}
                     <td className="p-0 whitespace-nowrap">
-                      <div className="flex h-12 items-center px-2 text-[#514f4f] text-[12px]">{formatDateTime(user.createdAt)}</div>
+                      <div className="flex h-12 items-center px-3 text-[12px] text-[var(--text-main)]">
+                        {formatDateTime(user.createdAt)}
+                      </div>
                     </td>
                     {/* Actions */}
                     <td className="p-0">
@@ -558,14 +671,14 @@ export default function AdminUsersPage() {
                           onClick={() => setSuspendTarget(user)}
                           disabled={updatePending || (isSelf && user.isActive)}
                           title={isSelf && user.isActive ? t("admin.cannotSuspendSelf") : user.isActive ? t("admin.suspend") : t("admin.activate")}
-                          className="p-1.5 text-[#cac8c7] hover:text-amber-500 hover:bg-amber-50 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[#cac8c7] disabled:hover:bg-transparent"
+                          className="p-1.5 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-[var(--text-faint)] hover:text-amber-500 hover:bg-amber-50 disabled:hover:text-[var(--text-faint)] disabled:hover:bg-transparent"
                         >
                           {user.isActive ? <Ban size={13} /> : <CircleCheck size={13} />}
                         </button>
                         <button
                           onClick={() => setResetTarget(user)}
                           title={t("admin.resetPassword")}
-                          className="p-1.5 text-[#cac8c7] hover:text-[#514f4f] hover:bg-[#f6f5f5] rounded transition-colors"
+                          className="p-1.5 rounded transition-colors text-[var(--text-faint)] hover:text-[var(--text-main)] hover:bg-[var(--bg-soft)]"
                         >
                           <KeyRound size={13} />
                         </button>
@@ -573,7 +686,7 @@ export default function AdminUsersPage() {
                           onClick={() => setDeleteTarget(user)}
                           disabled={isSelf || isLastAdmin}
                           title={isSelf ? t("admin.cannotDeleteSelf") : isLastAdmin ? t("admin.cannotDeleteLastAdmin") : t("admin.deleteUser")}
-                          className="p-1.5 text-[#cac8c7] hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[#cac8c7] disabled:hover:bg-transparent"
+                          className="p-1.5 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-[var(--text-faint)] hover:text-red-500 hover:bg-[var(--danger-soft)] disabled:hover:text-[var(--text-faint)] disabled:hover:bg-transparent"
                         >
                           <Trash2 size={13} />
                         </button>
@@ -600,7 +713,6 @@ export default function AdminUsersPage() {
         />
       )}
 
-      {/* Add user modal */}
       {addUserOpen && (
         <AddUserModal
           onClose={() => setAddUserOpen(false)}
@@ -608,7 +720,6 @@ export default function AdminUsersPage() {
         />
       )}
 
-      {/* Reset password modal */}
       {resetTarget && (
         <ResetPasswordModal
           username={resetTarget.username}
@@ -617,24 +728,30 @@ export default function AdminUsersPage() {
         />
       )}
 
-      {/* Suspend / Activate confirm modal */}
+      {/* Suspend / Activate confirm */}
       {suspendTarget && (
-        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSuspendTarget(null)}>
-          <div className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-semibold text-[#260f17] mb-1">
+        <div
+          className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+          style={{ background: "rgba(34, 29, 23, 0.35)" }}
+          onClick={() => setSuspendTarget(null)}
+        >
+          <div className="surface-panel p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-1 text-[var(--text-strong)]">
               {suspendTarget.isActive ? t("admin.suspendUser") : t("admin.activateUser")}
             </h3>
-            <p className="text-xs text-[#969493] mb-5">
+            <p className="text-xs mb-5 text-[var(--text-soft)]">
               {suspendTarget.isActive ? t("admin.suspendUserHint") : t("admin.activateUserHint")}
             </p>
             <div className="flex gap-2 justify-end">
-              <button onClick={() => setSuspendTarget(null)} className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors">{t("common.cancel")}</button>
+              <button onClick={() => setSuspendTarget(null)} className="button-secondary px-3.5 py-2 text-xs">
+                {t("common.cancel")}
+              </button>
               <button
                 onClick={() => updateMutation.mutate({ id: suspendTarget.id, data: { isActive: !suspendTarget.isActive } })}
                 disabled={updateMutation.isPending}
                 className={clsx(
-                  "px-3.5 py-2 text-xs font-medium text-white rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5",
-                  suspendTarget.isActive ? "bg-amber-500 hover:bg-amber-600" : "bg-[#1dc99a] hover:bg-[#17a87f]"
+                  "inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white rounded-[var(--radius-control)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                  suspendTarget.isActive ? "bg-amber-500 hover:bg-amber-600" : "bg-[var(--brand-main)] hover:bg-[var(--brand-strong)]"
                 )}
               >
                 {updateMutation.isPending && <Loader2 size={11} className="animate-spin" />}
@@ -645,16 +762,25 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {/* Delete confirm modal */}
+      {/* Delete confirm */}
       {deleteTarget && (
-        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setDeleteTarget(null)}>
-          <div className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-semibold text-[#260f17] mb-1">{t("admin.deleteUser")}</h3>
-            <p className="text-xs text-[#969493] mb-5">{t("admin.deleteUserHint")}</p>
+        <div
+          className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+          style={{ background: "rgba(34, 29, 23, 0.35)" }}
+          onClick={() => setDeleteTarget(null)}
+        >
+          <div className="surface-panel p-6 w-80 mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-1 text-[var(--text-strong)]">{t("admin.deleteUser")}</h3>
+            <p className="text-xs mb-5 text-[var(--text-soft)]">{t("admin.deleteUserHint")}</p>
             <div className="flex gap-2 justify-end">
-              <button onClick={() => setDeleteTarget(null)} className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors">{t("common.cancel")}</button>
-              <button onClick={() => deleteMutation.mutate(deleteTarget.id)} disabled={deleteMutation.isPending}
-                className="px-3.5 py-2 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+              <button onClick={() => setDeleteTarget(null)} className="button-secondary px-3.5 py-2 text-xs">
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={() => deleteMutation.mutate(deleteTarget.id)}
+                disabled={deleteMutation.isPending}
+                className="button-danger px-3.5 py-2 text-xs"
+              >
                 {deleteMutation.isPending && <Loader2 size={11} className="animate-spin" />}
                 {t("sessions.delete")}
               </button>

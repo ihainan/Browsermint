@@ -20,7 +20,6 @@ import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
 import { StatusBadge, daysUntilExpiry } from "./OverviewPage.tsx";
 
 const EXPIRY_WARNING_DAYS = 30;
-
 const PER_PAGE = 25;
 
 type StatusFilter = Session["status"] | "all";
@@ -36,7 +35,7 @@ function CopyButton({ value }: { value: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       }}
-      className="p-0.5 text-[#969493] hover:text-[#514f4f] transition-colors rounded"
+      className="p-0.5 text-[var(--text-faint)] hover:text-[var(--text-soft)] transition-colors rounded"
       title="Copy"
     >
       {copied ? <Check size={12} /> : <Copy size={12} />}
@@ -74,14 +73,22 @@ function StatusFilterDropdown({
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-2 px-3 py-1.5 bg-white border border-[#edebeb] rounded-sm text-[13px] text-[#514f4f] hover:border-[#cac8c7] transition-colors"
+        className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-control)] text-[13px] transition-colors"
+        style={{
+          background: "rgba(255,255,255,0.72)",
+          border: "1px solid var(--line-soft)",
+          color: "var(--text-main)",
+        }}
       >
-        <span className="text-xs text-[#969493]">{t("browsers.filterStatus")}</span>
+        <span className="text-xs text-[var(--text-faint)]">{t("browsers.filterStatus")}</span>
         <span className="font-medium">{label}</span>
-        <ChevronDown size={13} className="text-[#969493]" />
+        <ChevronDown size={13} className="text-[var(--text-faint)]" />
       </button>
       {open && (
-        <div className="absolute top-full left-0 mt-1 w-36 bg-white rounded-md shadow-lg ring-[0.5px] ring-black/[0.07] py-1 z-20">
+        <div
+          className="absolute top-full left-0 mt-1 w-40 py-1 z-20 surface-card-strong"
+          style={{ boxShadow: "var(--shadow-panel)" }}
+        >
           {options.map((opt) => (
             <button
               key={opt}
@@ -89,14 +96,15 @@ function StatusFilterDropdown({
                 onChange(opt);
                 setOpen(false);
               }}
-              className="w-full flex items-center justify-between px-3 py-2 text-[13px] text-[#514f4f] hover:bg-[#fafafa] transition-colors"
+              className="w-full flex items-center justify-between px-3 py-2 text-[13px] transition-colors hover:bg-[var(--bg-soft)]"
+              style={{ color: "var(--text-main)" }}
             >
               <span>
                 {opt === "all"
                   ? t("browsers.allStatuses")
                   : getSessionStatusLabel(locale, opt as Session["status"])}
               </span>
-              {value === opt && <Check size={13} className="text-[#260f17]" />}
+              {value === opt && <Check size={13} style={{ color: "var(--brand-strong)" }} />}
             </button>
           ))}
         </div>
@@ -133,12 +141,14 @@ function RowActions({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
+  const iconBtn = "p-1.5 rounded-lg transition-colors text-[var(--text-faint)] hover:text-[var(--text-soft)] hover:bg-[var(--bg-soft)]";
+
   return (
     <div ref={ref} className="relative flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
       {(session.status === "running" || session.status === "paused") && (
         <button
           onClick={() => window.open(`/sessions/${session.id}`, "_blank")}
-          className="p-1.5 text-[#969493] hover:text-[#514f4f] hover:bg-[#f6f5f5] rounded-lg transition-colors"
+          className={iconBtn}
           title="Open"
         >
           <ExternalLink size={14} />
@@ -146,18 +156,22 @@ function RowActions({
       )}
       <button
         onClick={() => setOpen((o) => !o)}
-        className="p-1.5 text-[#969493] hover:text-[#514f4f] hover:bg-[#f6f5f5] rounded-lg transition-colors"
+        className={iconBtn}
         title={t("sessions.moreOptions")}
       >
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg ring-[0.5px] ring-black/[0.07] py-1 z-20 top-full">
+        <div
+          className="absolute right-0 top-full mt-1 w-40 py-1 z-20 surface-card-strong"
+          style={{ boxShadow: "var(--shadow-panel)" }}
+        >
           {session.status === "running" && (
             <button
               onClick={() => { setOpen(false); onStop(); }}
               disabled={stopPending}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#514f4f] hover:bg-[#fafafa] transition-colors disabled:opacity-50"
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-soft)] disabled:opacity-50"
+              style={{ color: "var(--text-main)" }}
             >
               {stopPending ? <Loader2 size={13} className="animate-spin" /> : <Pause size={13} />}
               {t("sessions.disable")}
@@ -167,7 +181,8 @@ function RowActions({
             <button
               onClick={() => { setOpen(false); onStart(); }}
               disabled={startPending}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#514f4f] hover:bg-[#fafafa] transition-colors disabled:opacity-50"
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-soft)] disabled:opacity-50"
+              style={{ color: "var(--text-main)" }}
             >
               {startPending ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
               {t("sessions.resume")}
@@ -175,7 +190,7 @@ function RowActions({
           )}
           <button
             onClick={() => { setOpen(false); onDelete(); }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors text-red-500 hover:bg-[var(--danger-soft)]"
           >
             <Trash2 size={13} />
             {t("sessions.delete")}
@@ -282,7 +297,6 @@ export default function BrowsersPage() {
   const nameError = newSessionName ? getNameValidationError(newSessionName) : "";
   const canCreate = !createMutation.isPending && !getNameValidationError(newSessionName);
 
-  // Filter + paginate
   const filtered =
     statusFilter === "all" ? sessions : sessions.filter((s) => s.status === statusFilter);
 
@@ -297,13 +311,17 @@ export default function BrowsersPage() {
   const to = Math.min(page * PER_PAGE, filtered.length);
 
   return (
-    <div className="mx-auto w-full max-w-screen-2xl px-4 pt-5 pb-12">
-      {/* Filters + actions */}
-      <div className="flex items-center justify-between mb-4 px-2">
+    <div className="page-wrap">
+
+      {/* Toolbar */}
+      <div className="flex items-center justify-between mb-5">
         <StatusFilterDropdown value={statusFilter} onChange={setStatusFilter} />
         <button
           onClick={() => setNewBrowserModalOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1dc99a] text-white text-[13px] font-medium rounded-sm hover:bg-[#17a87f] transition-colors"
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors rounded-[var(--radius-control)]"
+          style={{ background: "var(--text-strong)", color: "#fffdf9" }}
+          onMouseEnter={e => (e.currentTarget.style.background = "#16120e")}
+          onMouseLeave={e => (e.currentTarget.style.background = "var(--text-strong)")}
         >
           <Plus size={13} />
           {t("sessions.newBrowser")}
@@ -311,39 +329,45 @@ export default function BrowsersPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-lg border border-[#edebeb]">
+      <div className="surface-card-strong overflow-hidden">
         {isPending && sessions.length === 0 ? (
           <div className="flex justify-center py-16">
-            <Loader2 size={20} className="animate-spin text-[#cac8c7]" />
+            <Loader2 size={20} className="animate-spin text-[var(--text-faint)]" />
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center py-16 gap-2">
-            <div className="w-10 h-10 rounded-md bg-[#fafafa] flex items-center justify-center">
-              <Globe size={18} className="text-[#cac8c7]" />
+            <div
+              className="w-10 h-10 rounded-xl flex items-center justify-center"
+              style={{ background: "var(--bg-soft)" }}
+            >
+              <Globe size={18} className="text-[var(--text-faint)]" />
             </div>
-            <p className="text-[13px] text-[#969493]">{t("sessions.noBrowsers")}</p>
+            <p className="text-[13px] text-[var(--text-soft)]">{t("sessions.noBrowsers")}</p>
           </div>
         ) : (
           <>
-            <table className="text-[#260f17] text-[13px] w-full border-separate border-spacing-0 table-auto">
+            <table
+              className="w-full border-separate border-spacing-0 table-auto text-[13px]"
+              style={{ color: "var(--text-strong)" }}
+            >
               <thead>
                 <tr>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[10%]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[10%] text-[var(--text-faint)]">
                     {t("browsers.filterStatus")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[20%]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[20%] text-[var(--text-faint)]">
                     {t("browsers.browserId")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal">
+                  <th className="px-3 py-3 text-left text-xs font-normal text-[var(--text-faint)]">
                     {t("browsers.name")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[22%]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
                     {t("browsers.started")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[22%]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
                     {t("browsers.lastActive")}
                   </th>
-                  <th className="text-[#969493] text-xs px-2 py-3 text-left font-normal w-[18%]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[18%] text-[var(--text-faint)]">
                     {t("browsers.expiresAt")}
                   </th>
                   <th className="w-20" />
@@ -354,58 +378,63 @@ export default function BrowsersPage() {
                   <tr
                     key={session.id}
                     className={clsx(
-                      "border-t border-[#edebeb] transition-colors",
-                      (session.status === "running" || session.status === "paused") && "hover:bg-[#fafafa] cursor-pointer"
+                      "border-t transition-colors",
+                      (session.status === "running" || session.status === "paused")
+                        ? "cursor-pointer hover:bg-[var(--bg-soft)]"
+                        : "hover:bg-[var(--bg-soft)]"
                     )}
+                    style={{ borderColor: "var(--line-soft)" }}
                     onClick={() =>
                       (session.status === "running" || session.status === "paused") &&
                       window.open(`/sessions/${session.id}`, "_blank")
                     }
                   >
                     <td className="p-0">
-                      <div className="flex h-12 items-center px-2">
+                      <div className="flex h-12 items-center px-3">
                         <StatusBadge status={session.status} />
                       </div>
                     </td>
                     <td className="p-0">
-                      <div className="flex h-12 items-center px-2">
+                      <div className="flex h-12 items-center px-3">
                         <span className="inline-flex items-center gap-1.5">
-                          <span className="font-mono text-[#260f17]">{session.id.slice(0, 8)}…</span>
+                          <span className="font-mono text-[var(--text-strong)]">
+                            {session.id.slice(0, 8)}…
+                          </span>
                           <CopyButton value={session.id} />
                         </span>
                       </div>
                     </td>
                     <td className="p-0">
-                      <div className="flex h-12 items-center px-2">
+                      <div className="flex h-12 items-center px-3">
                         {session.name
                           ? <span>{session.name}</span>
-                          : <span className="text-[#cac8c7]">—</span>}
+                          : <span className="text-[var(--text-faint)]">—</span>}
                       </div>
                     </td>
                     <td className="p-0 whitespace-nowrap">
-                      <div className="flex h-12 items-center px-2 text-[#514f4f]">
+                      <div className="flex h-12 items-center px-3 text-[var(--text-main)]">
                         {formatDateTime(session.createdAt)}
                       </div>
                     </td>
                     <td className="p-0 whitespace-nowrap">
-                      <div className="flex h-12 items-center px-2 text-[#514f4f]">
+                      <div className="flex h-12 items-center px-3 text-[var(--text-main)]">
                         {formatDateTime(session.lastActiveAt)}
                       </div>
                     </td>
                     <td className="p-0 whitespace-nowrap">
-                      <div className="flex h-12 items-center px-2">
+                      <div className="flex h-12 items-center px-3">
                         {(() => {
                           const days = daysUntilExpiry(session.expiresAt);
-                          if (days === null) return <span className="text-[#cac8c7]">—</span>;
-                          if (days <= 0) return <span className="text-red-500 text-[13px] font-medium">Expired</span>;
-                          if (days <= 7) return <span className="text-red-500 text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
-                          if (days <= EXPIRY_WARNING_DAYS) return <span className="text-amber-600 text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
-                          return <span className="text-[#514f4f] text-[13px]">{formatDateTime(session.expiresAt!)}</span>;
+                          if (days === null) return <span className="text-[var(--text-faint)]">—</span>;
+                          if (days <= 0) return <span className="font-medium text-red-500">Expired</span>;
+                          if (days <= 7) return <span className="text-red-500">{formatDateTime(session.expiresAt!)}</span>;
+                          if (days <= EXPIRY_WARNING_DAYS) return <span className="text-amber-600">{formatDateTime(session.expiresAt!)}</span>;
+                          return <span className="text-[var(--text-main)]">{formatDateTime(session.expiresAt!)}</span>;
                         })()}
                       </div>
                     </td>
                     <td className="p-0">
-                      <div className="flex h-12 items-center justify-end px-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex h-12 items-center justify-end px-2">
                         <RowActions
                           session={session}
                           onStop={() => stopMutation.mutate(session.id)}
@@ -422,22 +451,35 @@ export default function BrowsersPage() {
             </table>
 
             {/* Pagination */}
-            <div className="px-4 py-3 flex items-center justify-between border-t border-[#edebeb]">
-              <span className="text-xs text-[#969493]">
+            <div
+              className="px-4 py-3 flex items-center justify-between border-t"
+              style={{ borderColor: "var(--line-soft)" }}
+            >
+              <span className="text-xs text-[var(--text-faint)]">
                 {t("browsers.viewing", { from, to, total: filtered.length })}
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                   disabled={page === 1}
-                  className="px-3 py-1.5 text-xs text-[#514f4f] border border-[#edebeb] rounded-sm hover:bg-[#fafafa] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                  style={{
+                    color: "var(--text-main)",
+                    border: "1px solid var(--line-soft)",
+                    background: "rgba(255,255,255,0.72)",
+                  }}
                 >
                   {t("browsers.previous")}
                 </button>
                 <button
                   onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="px-3 py-1.5 text-xs text-[#514f4f] border border-[#edebeb] rounded-sm hover:bg-[#fafafa] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                  style={{
+                    color: "var(--text-main)",
+                    border: "1px solid var(--line-soft)",
+                    background: "rgba(255,255,255,0.72)",
+                  }}
                 >
                   {t("browsers.next")}
                 </button>
@@ -450,7 +492,8 @@ export default function BrowsersPage() {
       {/* Create modal */}
       {newBrowserModalOpen && (
         <div
-          className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+          className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+          style={{ background: "rgba(34, 29, 23, 0.35)" }}
           onClick={() => {
             setNewBrowserModalOpen(false);
             setNewSessionName("");
@@ -458,10 +501,10 @@ export default function BrowsersPage() {
           }}
         >
           <div
-            className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-80 mx-4"
+            className="surface-panel p-6 w-80 mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-[#260f17] mb-4">
+            <h3 className="text-sm font-semibold mb-4" style={{ color: "var(--text-strong)" }}>
               {t("sessions.newBrowserModalTitle")}
             </h3>
             <input
@@ -475,18 +518,16 @@ export default function BrowsersPage() {
               placeholder={t("sessions.browserNamePlaceholder")}
               autoFocus
               className={clsx(
-                "w-full px-3.5 py-2.5 bg-[#fafafa] border rounded-md text-sm text-[#260f17] placeholder-gray-400 focus:outline-none focus:ring-2 focus:border-transparent transition-colors",
-                nameError
-                  ? "border-red-200 focus:ring-red-400/20"
-                  : "border-[#edebeb] focus:ring-gray-900/10"
+                "control-input",
+                nameError && "border-[var(--danger-main)] focus:border-[var(--danger-main)]"
               )}
               disabled={createMutation.isPending}
             />
             {(nameError || (createError && !nameError)) && (
-              <p className="mt-1.5 text-xs text-red-500">{nameError || createError}</p>
+              <p className="mt-1.5 text-xs text-[var(--danger-main)]">{nameError || createError}</p>
             )}
             {createMutation.isPending && (
-              <p className="mt-1.5 text-xs text-[#969493]">{t("sessions.startingHint")}</p>
+              <p className="mt-1.5 text-xs text-[var(--text-soft)]">{t("sessions.startingHint")}</p>
             )}
             <div className="flex gap-2 justify-end mt-4">
               <button
@@ -495,14 +536,14 @@ export default function BrowsersPage() {
                   setNewSessionName("");
                   setCreateError("");
                 }}
-                className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors"
+                className="button-secondary px-3.5 py-2 text-xs"
               >
                 {t("common.cancel")}
               </button>
               <button
                 onClick={handleCreate}
                 disabled={!canCreate}
-                className="px-3.5 py-2 text-xs font-medium text-white bg-[#1dc99a] hover:bg-[#17a87f] rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="button-primary px-3.5 py-2 text-xs"
               >
                 {createMutation.isPending ? (
                   <Loader2 size={11} className="animate-spin" />
@@ -519,28 +560,29 @@ export default function BrowsersPage() {
       {/* Delete confirm modal */}
       {deleteConfirmModalId && (
         <div
-          className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+          className="fixed inset-0 flex items-center justify-center z-50 backdrop-blur-sm"
+          style={{ background: "rgba(34, 29, 23, 0.35)" }}
           onClick={() => setDeleteConfirmModalId(null)}
         >
           <div
-            className="bg-white rounded-lg shadow-2xl border border-[#edebeb] p-6 w-80 mx-4"
+            className="surface-panel p-6 w-80 mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-sm font-semibold text-[#260f17] mb-1">
+            <h3 className="text-sm font-semibold mb-1" style={{ color: "var(--text-strong)" }}>
               {t("sessions.deleteBrowserTitle")}
             </h3>
-            <p className="text-xs text-[#969493] mb-5">{t("sessions.deleteBrowserHint")}</p>
+            <p className="text-xs mb-5 text-[var(--text-soft)]">{t("sessions.deleteBrowserHint")}</p>
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setDeleteConfirmModalId(null)}
-                className="px-3.5 py-2 text-xs font-medium text-[#514f4f] bg-[#f6f5f5] hover:bg-[#edebeb] rounded-md transition-colors"
+                className="button-secondary px-3.5 py-2 text-xs"
               >
                 {t("common.cancel")}
               </button>
               <button
                 onClick={() => deleteMutation.mutate(deleteConfirmModalId)}
                 disabled={deleteMutation.isPending}
-                className="px-3.5 py-2 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="button-danger px-3.5 py-2 text-xs"
               >
                 {deleteMutation.isPending && <Loader2 size={11} className="animate-spin" />}
                 {t("sessions.delete")}

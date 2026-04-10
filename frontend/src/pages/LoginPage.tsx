@@ -1,8 +1,64 @@
-import { useState, FormEvent } from "react";
+import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import browsermintIcon from "../assets/browsermint-icon.png";
 import { useAuth } from "../contexts/AuthContext.tsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
-import browsermintIcon from "../assets/browsermint-icon.png";
+
+function AuthShell({
+  children,
+  title,
+  subtitle,
+}: {
+  children: React.ReactNode;
+  title: string;
+  subtitle: string;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className="flex min-h-screen items-center justify-center px-4 py-10 sm:px-6">
+      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.12fr_0.88fr]">
+        <section className="surface-panel hidden overflow-hidden lg:block">
+          <div className="flex h-full flex-col justify-between p-10">
+            <div>
+              <div className="inline-flex items-center gap-3 rounded-2xl bg-[rgba(255,255,255,0.78)] px-4 py-3 ring-1 ring-[var(--line-soft)]">
+                <img src={browsermintIcon} alt="Browsermint" className="h-11 w-11 object-contain" />
+                <div>
+                  <div className="text-base font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Browsermint</div>
+                  <div className="text-sm text-[var(--text-soft)]">{t("layout.sidebarTagline")}</div>
+                </div>
+              </div>
+              <div className="mt-12 max-w-xl">
+                <div className="page-eyebrow">Browser workspace</div>
+                <h1 className="mt-4 text-[42px] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--text-strong)]">{title}</h1>
+                <p className="mt-5 max-w-lg text-[15px] leading-7 text-[var(--text-soft)]">{subtitle}</p>
+              </div>
+            </div>
+            <div className="surface-card px-5 py-5">
+              <div className="subtle-label">Browsermint</div>
+              <p className="mt-3 max-w-xl text-sm leading-7 text-[var(--text-soft)]">{t("login.heroDescription")}</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="surface-panel flex items-center p-4 sm:p-6 lg:p-8">
+          <div className="w-full rounded-[22px] bg-[rgba(255,253,249,0.92)] p-6 ring-1 ring-[var(--line-soft)] sm:p-8">
+            <div className="mb-8 lg:hidden">
+              <div className="flex items-center gap-3">
+                <img src={browsermintIcon} alt="Browsermint" className="h-12 w-12 object-contain" />
+                <div>
+                  <div className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Browsermint</div>
+                  <div className="text-sm text-[var(--text-soft)]">{t("layout.sidebarTagline")}</div>
+                </div>
+              </div>
+            </div>
+            {children}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
 
 export default function LoginPage() {
   const { login, user, registrationEnabled } = useAuth();
@@ -18,8 +74,8 @@ export default function LoginPage() {
     return null;
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
     setError("");
     setIsPending(true);
     try {
@@ -27,8 +83,8 @@ export default function LoginPage() {
       navigate("/", { replace: true });
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data
-          ?.error ?? t("login.loginFailed");
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        t("login.loginFailed");
       setError(msg);
     } finally {
       setIsPending(false);
@@ -36,73 +92,37 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-[#f0fdf9] to-[#ecfdf5] px-4">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-24 h-24 mb-0.5">
-            <img src={browsermintIcon} alt="Browsermint" className="w-24 h-24 object-contain" />
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Browsermint</h1>
-          <p className="text-sm text-gray-500 mt-1">{t("login.subtitle")}</p>
+    <AuthShell title={t("login.heroTitle")} subtitle={t("login.heroDescription")}>
+      <div className="page-eyebrow">{t("login.title")}</div>
+      <h2 className="mt-3 text-[30px] font-semibold tracking-[-0.03em] text-[var(--text-strong)]">{t("login.title")}</h2>
+      <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{t("login.subtitle")}</p>
+
+      {error && (
+        <div className="mt-6 rounded-2xl bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger-main)] ring-1 ring-[rgba(194,74,67,0.16)]">
+          {error}
         </div>
+      )}
 
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl shadow-gray-200/60 border border-gray-100 p-8">
-          <h2 className="text-lg font-semibold text-gray-800 mb-6">{t("login.title")}</h2>
-
-          {error && (
-            <div className="mb-5 px-4 py-3 bg-red-50 rounded-xl text-sm text-red-600">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                {t("common.email")}
-              </label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
-                placeholder="you@example.com"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                {t("common.password")}
-              </label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#1dc99a]/20 focus:border-[#1dc99a] transition-colors"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={isPending}
-              className="w-full py-2.5 px-4 bg-[#1dc99a] text-white text-sm font-semibold rounded-xl hover:bg-[#17a87f] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm mt-2"
-            >
-              {isPending ? t("login.submitting") : t("login.submit")}
-            </button>
-          </form>
-
-          {registrationEnabled && (
-            <p className="mt-5 text-sm text-center text-gray-400">
-              {t("login.noAccount")}{" "}
-              <Link to="/register" className="text-[#1dc99a] font-medium hover:text-[#17a87f] transition-colors">
-                {t("login.createOne")}
-              </Link>
-            </p>
-          )}
+      <form onSubmit={handleSubmit} className="mt-7 space-y-4">
+        <div>
+          <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.email")}</label>
+          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="control-input" placeholder="you@example.com" />
         </div>
-      </div>
-    </div>
+        <div>
+          <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-soft)]">{t("common.password")}</label>
+          <input type="password" required value={password} onChange={(event) => setPassword(event.target.value)} className="control-input" placeholder="••••••••" />
+        </div>
+        <button type="submit" disabled={isPending} className="button-primary mt-2 w-full">{isPending ? t("login.submitting") : t("login.submit")}</button>
+      </form>
+
+      {registrationEnabled && (
+        <p className="mt-6 text-sm text-[var(--text-soft)]">
+          {t("login.noAccount")}{" "}
+          <Link className="font-medium text-[var(--text-strong)] underline-offset-4 hover:underline" to="/register">
+            {t("login.createOne")}
+          </Link>
+        </p>
+      )}
+    </AuthShell>
   );
 }

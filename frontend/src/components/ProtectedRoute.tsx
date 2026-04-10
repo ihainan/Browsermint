@@ -1,10 +1,17 @@
 import { Navigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext.tsx";
+import { useI18n } from "../i18n/I18nContext.tsx";
 
 function LoadingSpinner() {
+  const { t } = useI18n();
+
   return (
-    <div className="flex items-center justify-center min-h-screen">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+    <div className="flex min-h-screen items-center justify-center px-4">
+      <div className="surface-panel flex items-center gap-3 px-6 py-4 text-sm text-[var(--text-soft)]">
+        <Loader2 size={18} className="animate-spin text-[var(--brand-strong)]" />
+        <span>{t("common.loadingWorkspace")}</span>
+      </div>
     </div>
   );
 }
