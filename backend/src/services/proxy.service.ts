@@ -984,9 +984,9 @@ export async function handleVncViewer(
   const context = await getSessionProxyContext(sessionId, token);
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
-  const host = getPublicRequestHost(request);
-  const { ws: wsProto } = getRequestProtocols(request);
-  const vncWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/vnc?token=${encodeURIComponent(token)}`;
+  // Build the WebSocket URL client-side so it always matches the page protocol
+  // (ws: for HTTP, wss: for HTTPS), regardless of X-Forwarded-Proto headers.
+  const vncWsPath = `/ws/sessions/${sessionId}/vnc?token=${encodeURIComponent(token)}`;
   const clipboardApiUrl = `/api/sessions/${sessionId}/clipboard?token=${encodeURIComponent(token)}`;
 
   const html = `<!DOCTYPE html>
@@ -1115,8 +1115,12 @@ export async function handleVncViewer(
       }
     });
 
+    // Build WebSocket URL client-side to match the page protocol (ws/wss).
+    const _wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const _vncWsUrl = _wsProto + '//' + window.location.host + '${vncWsPath}';
+
     // Create the VNC connection (after listeners, so our keydown handler runs first)
-    rfb = new RFB(screenEl, '${vncWsUrl}');
+    rfb = new RFB(screenEl, _vncWsUrl);
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
     rfb.viewOnly = false;

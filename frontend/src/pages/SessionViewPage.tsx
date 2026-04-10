@@ -153,6 +153,13 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
 
 type SidebarTab = "details" | "logs" | "devtools";
 
+function normalizeWsUrl(url: string): string {
+  if (window.location.protocol === "https:" && url.startsWith("ws://")) {
+    return "wss://" + url.slice(5);
+  }
+  return url;
+}
+
 function InlineCopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -311,7 +318,7 @@ function DetailsSidebar({
       {details?.proxyTxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyTx")} value={formatBytes(details.proxyTxBytes)} />}
       {details?.proxyRxBytes !== undefined && <DetailRow label={t("sessionView.details.proxyRx")} value={formatBytes(details.proxyRxBytes)} />}
       {details?.creditsUsed !== undefined && <DetailRow label={t("sessionView.details.cost")} value={String(details.creditsUsed)} />}
-      {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={details.websocketUrl} copyable />}
+      {details?.websocketUrl && <DetailRow label={t("sessionView.details.websocketUrl")} value={normalizeWsUrl(details.websocketUrl)} copyable />}
       {details?.tokenExpiresAt && <DetailRow label={t("sessionView.details.tokenExpiresAt")} value={formatDateTime(details.tokenExpiresAt)} />}
 
       {/* Refresh token confirmation dialog */}
@@ -679,7 +686,7 @@ function ConnectAgentModal({
     sessionsApi.getDetails(session.id, sessionToken).then((res) => {
       if (cancelled) return;
       if (typeof res.data.websocketUrl === "string" && res.data.websocketUrl.length > 0) {
-        setCdpUrl(res.data.websocketUrl);
+        setCdpUrl(normalizeWsUrl(res.data.websocketUrl));
       }
       if (typeof res.data.tokenExpiresAt === "string") {
         setTokenExpiresAt(formatDateTime(res.data.tokenExpiresAt));
