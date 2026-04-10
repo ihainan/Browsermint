@@ -15,7 +15,7 @@ const statusLabels: Record<Locale, Record<Session["status"], string>> = {
     running: "运行中",
     stopping: "停止中",
     stopped: "已停止",
-    error: "错误",
+    error: "异常",
     paused: "空闲",
   },
 };

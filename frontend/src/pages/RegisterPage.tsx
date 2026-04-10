@@ -1,60 +1,8 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import browsermintIcon from "../assets/browsermint-icon.png";
+import AuthShell from "../components/AuthShell.tsx";
 import { useAuth } from "../contexts/AuthContext.tsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
-
-function AuthShell({
-  children,
-  title,
-  subtitle,
-}: {
-  children: React.ReactNode;
-  title: string;
-  subtitle: string;
-}) {
-  const { t } = useI18n();
-
-  return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-10 sm:px-6">
-      <div className="grid w-full max-w-5xl gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="surface-panel hidden overflow-hidden lg:block">
-          <div className="flex h-full flex-col justify-between p-10">
-            <div>
-              <div className="inline-flex items-center gap-3 rounded-2xl bg-[rgba(255,255,255,0.78)] px-4 py-3 ring-1 ring-[var(--line-soft)]">
-                <img src={browsermintIcon} alt="Browsermint" className="h-11 w-11 object-contain" />
-                <div>
-                  <div className="text-base font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Browsermint</div>
-                  <div className="text-sm text-[var(--text-soft)]">{t("layout.sidebarTagline")}</div>
-                </div>
-              </div>
-              <div className="mt-12 max-w-xl">
-                <div className="page-eyebrow">{t("register.subtitle")}</div>
-                <h1 className="mt-4 text-[42px] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--text-strong)]">{title}</h1>
-                <p className="mt-5 max-w-lg text-[15px] leading-7 text-[var(--text-soft)]">{subtitle}</p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="surface-panel flex items-center p-4 sm:p-6 lg:p-8">
-          <div className="w-full rounded-[22px] bg-[rgba(248,250,253,0.92)] p-6 ring-1 ring-[var(--line-soft)] sm:p-8">
-            <div className="mb-8 lg:hidden">
-              <div className="flex items-center gap-3">
-                <img src={browsermintIcon} alt="Browsermint" className="h-12 w-12 object-contain" />
-                <div>
-                  <div className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Browsermint</div>
-                  <div className="text-sm text-[var(--text-soft)]">{t("layout.sidebarTagline")}</div>
-                </div>
-              </div>
-            </div>
-            {children}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
 
 export default function RegisterPage() {
   const { register, user } = useAuth();
@@ -95,7 +43,12 @@ export default function RegisterPage() {
   }
 
   return (
-    <AuthShell title={t("register.heroTitle")} subtitle={t("register.heroDescription")}>
+    <AuthShell
+      title={t("register.heroTitle")}
+      subtitle={t("register.heroDescription")}
+      eyebrow={t("register.subtitle")}
+      gridCols="lg:grid-cols-[1.1fr_0.9fr]"
+    >
       <h2 className="mt-3 text-[30px] font-semibold tracking-[-0.03em] text-[var(--text-strong)]">{t("register.title")}</h2>
       <p className="mt-2 text-sm leading-6 text-[var(--text-soft)]">{t("register.subtitle")}</p>
 

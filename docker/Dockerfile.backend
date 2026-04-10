@@ -22,7 +22,7 @@ RUN npm ci --omit=dev
 
 COPY --from=build /app/build ./build
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
-COPY backend/src/db/schema.prisma ./src/db/schema.prisma
+COPY --from=build /app/src/db ./src/db
 
 EXPOSE 4000
 

@@ -30,6 +30,7 @@ services:
       JWT_SESSION_TOKEN_SECRET: ${JWT_SESSION_TOKEN_SECRET:?JWT_SESSION_TOKEN_SECRET is required}
       DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-browsermint-internal}
       STEEL_BROWSER_IMAGE: ${STEEL_BROWSER_IMAGE:-ghcr.io/steel-dev/steel-browser-api:latest}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
       NODE_ENV: production
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

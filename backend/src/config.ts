@@ -17,6 +17,9 @@ const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "production", "test"])
     .default("development"),
+  // Set to false when serving over plain HTTP (e.g. no TLS terminator in front).
+  // Defaults to true in production so the auth cookie is Secure by default.
+  COOKIE_SECURE: z.coerce.boolean().default(true),
 });
 
 const parsed = envSchema.safeParse(process.env);

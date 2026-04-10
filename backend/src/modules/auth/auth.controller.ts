@@ -24,7 +24,7 @@ function setAuthCookie(reply: FastifyReply, token: string): void {
     `Max-Age=${AUTH_COOKIE_MAX_AGE}`,
     "SameSite=Lax",
   ];
-  if (config.NODE_ENV === "production") parts.push("Secure");
+  if (config.COOKIE_SECURE) parts.push("Secure");
   reply.header("Set-Cookie", parts.join("; "));
 }
 
