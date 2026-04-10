@@ -270,17 +270,17 @@ function logSessionEvent(
   }).catch(() => {});
 }
 
-// Returns "frontend" if the HTTP request carries the SteelYard frontend marker,
-// otherwise "agent". The frontend axios client sets X-Steelyard-Client: frontend
+// Returns "frontend" if the HTTP request carries the Browsermint frontend marker,
+// otherwise "agent". The frontend axios client sets X-Browsermint-Client: frontend
 // on every request, which agents won't do.
 function getHttpSource(request: Pick<FastifyRequest, "headers"> | IncomingMessage): string {
-  const header = request.headers["x-steelyard-client"];
+  const header = request.headers["x-browsermint-client"];
   const value = Array.isArray(header) ? header[0] : header;
   return value === "frontend" ? "frontend" : "agent";
 }
 
 // Returns "frontend" if the WebSocket upgrade originates from a browser page
-// served by SteelYard (same-origin), otherwise "agent".
+// served by Browsermint (same-origin), otherwise "agent".
 // Browsers automatically include an Origin header on WebSocket upgrades;
 // non-browser clients (scripts, SDKs) typically omit it or send a different host.
 function getWebSocketSource(request: IncomingMessage): string {
@@ -426,8 +426,8 @@ export async function handleDetailsProxy(
       // Non-fatal: keep whatever websocketUrl Steel Browser returned
     }
 
-    // Reflect SteelYard's own capsolver state rather than Steel Browser's value,
-    // since SteelYard handles captcha solving independently via CDP injection.
+    // Reflect Browsermint's own capsolver state rather than Steel Browser's value,
+    // since Browsermint handles captcha solving independently via CDP injection.
     sessionDetail.solveCaptcha = Boolean(config.CAPSOLVER_API_KEY);
 
     if (token) {
@@ -460,7 +460,7 @@ export async function handleDevtoolsProxy(
   const { id: sessionId } = request.params;
   const token =
     request.query.token ??
-    getCookieValue(request.headers.cookie, `steelyard_devtools_${sessionId}`);
+    getCookieValue(request.headers.cookie, `browsermint_devtools_${sessionId}`);
   const assetPath = request.params["*"] || "devtools_app.html";
 
   if (!token) {
@@ -512,7 +512,7 @@ export async function handleDevtoolsProxy(
     reply.header("Cache-Control", "no-store");
     reply.header(
       "Set-Cookie",
-      `steelyard_devtools_${sessionId}=${encodeURIComponent(token)}; Path=/api/sessions/${sessionId}/devtools/; HttpOnly; SameSite=Lax`
+      `browsermint_devtools_${sessionId}=${encodeURIComponent(token)}; Path=/api/sessions/${sessionId}/devtools/; HttpOnly; SameSite=Lax`
     );
 
     await updateLastActiveAt(sessionId);

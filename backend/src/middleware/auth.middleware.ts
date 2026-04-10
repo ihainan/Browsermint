@@ -22,7 +22,7 @@ function extractToken(request: FastifyRequest): string | undefined {
   // Fall back to Authorization header for programmatic API clients (curl, scripts, etc.).
   const cookieHeader = request.headers.cookie;
   if (cookieHeader) {
-    const match = cookieHeader.match(/(?:^|;\s*)steelyard_auth=([^;]*)/);
+    const match = cookieHeader.match(/(?:^|;\s*)browsermint_auth=([^;]*)/);
     if (match?.[1]) return decodeURIComponent(match[1]);
   }
   const authHeader = request.headers.authorization;

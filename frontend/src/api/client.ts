@@ -2,7 +2,7 @@ import axios from "axios";
 
 export const api = axios.create({
   baseURL: "/api",
-  headers: { "Content-Type": "application/json", "X-Steelyard-Client": "frontend" },
+  headers: { "Content-Type": "application/json", "X-Browsermint-Client": "frontend" },
   withCredentials: true, // send HttpOnly auth cookie automatically on every request
 });
 

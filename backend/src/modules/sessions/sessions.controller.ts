@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 // Session token validity: 180 days. TODO: make this configurable via config.
 const SESSION_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000;
 import { v4 as uuidv4 } from "uuid";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/client.js";
 import { config } from "../../config.js";
 import {
@@ -243,7 +244,7 @@ export async function handleStopSession(
       status: "stopped",
       // containerId / containerName / internalApiUrl intentionally kept so
       // handleStartSession can restart the same container.
-      savedTabs: savedUrls.length > 0 ? savedUrls : null,
+      savedTabs: savedUrls.length > 0 ? savedUrls : Prisma.JsonNull,
     },
   });
 
@@ -337,7 +338,7 @@ export async function handleStartSession(
         containerName: containerInfo.containerName,
         internalApiUrl: containerInfo.internalApiUrl,
         lastActiveAt: new Date(),
-        savedTabs: null, // Clear after restore
+        savedTabs: Prisma.JsonNull, // Clear after restore
         expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
       },
     });

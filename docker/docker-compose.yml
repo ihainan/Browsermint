@@ -1,20 +1,20 @@
-name: steelyard
+name: browsermint
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-steelyard}
+      POSTGRES_USER: ${POSTGRES_USER:-browsermint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-steelyard}
+      POSTGRES_DB: ${POSTGRES_DB:-browsermint}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR is required}:/var/lib/postgresql/data
     networks:
-      - steelyard-public
+      - browsermint-public
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-steelyard}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-browsermint}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -25,17 +25,17 @@ services:
       dockerfile: ${BACKEND_DOCKERFILE:-docker/Dockerfile.backend}
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-steelyard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-steelyard}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-browsermint}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-browsermint}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_SESSION_TOKEN_SECRET: ${JWT_SESSION_TOKEN_SECRET:?JWT_SESSION_TOKEN_SECRET is required}
-      DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-steelyard-internal}
+      DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-browsermint-internal}
       STEEL_BROWSER_IMAGE: ${STEEL_BROWSER_IMAGE:-ghcr.io/steel-dev/steel-browser-api:latest}
       NODE_ENV: production
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - steelyard-public
-      - steelyard-internal
+      - browsermint-public
+      - browsermint-internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,9 +45,23 @@ services:
       context: ${BUILD_CONTEXT:-..}
       dockerfile: ${FRONTEND_DOCKERFILE:-docker/Dockerfile.frontend}
     networks:
-      - steelyard-public
+      - browsermint-public
     depends_on:
       - backend
+
+  # This service only exists to build the browser image; it is never started.
+  # Run `docker compose build browser` (or `docker compose build`) before first deploy.
+  browser:
+    build:
+      context: ${BUILD_CONTEXT:-..}
+      dockerfile: docker/Dockerfile.browser
+      args:
+        STEEL_IMAGE: ihainan/steel-browser-api:0.5.1-browsermint
+    image: ihainan/browsermint-browser:0.5.1
+    entrypoint: ["true"]
+    restart: "no"
+    profiles:
+      - build
 
   nginx:
     image: nginx:alpine
@@ -57,14 +71,14 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
-      - steelyard-public
+      - browsermint-public
     depends_on:
       - backend
       - frontend
 
 networks:
-  steelyard-public:
+  browsermint-public:
     driver: bridge
-  steelyard-internal:
-    name: ${DOCKER_NETWORK_NAME:-steelyard-internal}
+  browsermint-internal:
+    name: ${DOCKER_NETWORK_NAME:-browsermint-internal}
     driver: bridge

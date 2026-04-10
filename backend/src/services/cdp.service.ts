@@ -160,24 +160,24 @@ try {
 // CAPSOLVER_API_KEY not configured).
 const RECAPTCHA_INTERCEPT_SCRIPT = `
 (function() {
-  if (window.__steelyard_captcha_patched) return;
-  window.__steelyard_captcha_patched = true;
+  if (window.__browsermint_captcha_patched) return;
+  window.__browsermint_captcha_patched = true;
 
   var pending = new Map();
 
-  window.__steelyard_resolve_captcha = function(requestId, token) {
+  window.__browsermint_resolve_captcha = function(requestId, token) {
     var p = pending.get(requestId);
     if (p) { pending.delete(requestId); p.resolve(token); }
   };
 
-  window.__steelyard_reject_captcha = function(requestId, err) {
+  window.__browsermint_reject_captcha = function(requestId, err) {
     var p = pending.get(requestId);
     if (p) { pending.delete(requestId); p.reject(new Error(err)); }
   };
 
   function patchEnterprise(enterprise) {
-    if (enterprise.__steelyard_patched) return;
-    enterprise.__steelyard_patched = true;
+    if (enterprise.__browsermint_patched) return;
+    enterprise.__browsermint_patched = true;
     var orig = enterprise.execute.bind(enterprise);
     enterprise.execute = function(siteKey, options) {
       var action = (options && options.action) || '';
@@ -185,7 +185,7 @@ const RECAPTCHA_INTERCEPT_SCRIPT = `
       return new Promise(function(resolve, reject) {
         pending.set(requestId, { resolve: resolve, reject: reject });
         try {
-          window.__steelyard_solve_captcha(JSON.stringify({
+          window.__browsermint_solve_captcha(JSON.stringify({
             requestId: requestId,
             siteKey: siteKey,
             action: action,
@@ -304,7 +304,7 @@ async function applyScriptToPage(
 
   // Register CDP binding so page JS can request captcha solving from backend
   if (config.CAPSOLVER_API_KEY) {
-    const bindingId = sendCmd(ws, "Runtime.addBinding", { name: "__steelyard_solve_captcha" }, pageSessionId);
+    const bindingId = sendCmd(ws, "Runtime.addBinding", { name: "__browsermint_solve_captcha" }, pageSessionId);
     await waitForResponse(ws, bindingId);
   }
 
@@ -343,7 +343,7 @@ export async function initCdpSession(
   // Port 9223 is nginx proxying Chrome CDP on 127.0.0.1:9222. Chrome may not
   // be ready immediately after the Steel Browser API (port 3000) becomes healthy,
   // so retry until the CDP version endpoint returns valid JSON.
-  let browserWsUrl: string;
+  let browserWsUrl = "";
   {
     const CDP_RETRY_INTERVAL_MS = 2000;
     const CDP_TIMEOUT_MS = 30_000;
@@ -401,7 +401,7 @@ export async function initCdpSession(
     if (msg.method === "Runtime.bindingCalled" && config.CAPSOLVER_API_KEY) {
       const params = msg.params as Record<string, unknown> | undefined;
       const pageSessionId = msg.sessionId as string | undefined;
-      if (params?.name === "__steelyard_solve_captcha" && pageSessionId) {
+      if (params?.name === "__browsermint_solve_captcha" && pageSessionId) {
         let payload: { requestId: string; siteKey: string; action: string; url: string };
         try {
           payload = JSON.parse(params.payload as string);
@@ -412,7 +412,7 @@ export async function initCdpSession(
         const userAgent = sessionUserAgents.get(sessionId);
         solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY, userAgent)
           .then(({ token, taskId }) => {
-            const expr = `window.__steelyard_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
+            const expr = `window.__browsermint_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
             console.log(`[cdp] CapSolver: resolved captcha for session ${sessionId}`);
             prisma.sessionEvent.create({
@@ -436,7 +436,7 @@ export async function initCdpSession(
             }).catch(() => {});
           })
           .catch((err: Error) => {
-            const expr = `window.__steelyard_reject_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(err.message)})`;
+            const expr = `window.__browsermint_reject_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(err.message)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
             console.warn(`[cdp] CapSolver failed for session ${sessionId}:`, err.message);
             prisma.sessionEvent.create({

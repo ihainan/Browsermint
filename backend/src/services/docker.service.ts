@@ -4,9 +4,9 @@ import { prisma } from "../db/client.js";
 
 const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 
-const CONTAINER_PREFIX = "steelyard-session-";
-const MANAGED_LABEL = "steelyard.managed";
-const SESSION_LABEL = "steelyard.session";
+const CONTAINER_PREFIX = "browsermint-session-";
+const MANAGED_LABEL = "browsermint.managed";
+const SESSION_LABEL = "browsermint.session";
 const HEALTH_POLL_INTERVAL_MS = 2000;
 const HEALTH_POLL_TIMEOUT_MS = 60000;
 
@@ -378,7 +378,7 @@ export async function setContainerClipboard(containerId: string, text: string): 
 }
 
 export async function pullImageIfNeeded(): Promise<void> {
-  // If the image already exists locally (e.g. a locally-built image like steelyard-browser:latest),
+  // If the image already exists locally (e.g. a locally-built image like browsermint-browser:latest),
   // skip the pull entirely — docker.pull would fail with 404 for images not on Docker Hub.
   try {
     await docker.getImage(config.STEEL_BROWSER_IMAGE).inspect();

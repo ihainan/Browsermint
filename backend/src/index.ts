@@ -232,7 +232,7 @@ server.addHook("onClose", async () => {
 
 try {
   await server.listen({ port: config.PORT, host: "0.0.0.0" });
-  server.log.info(`SteelYard backend listening on port ${config.PORT}`);
+  server.log.info(`Browsermint backend listening on port ${config.PORT}`);
 } catch (err) {
   server.log.error(err);
   process.exit(1);

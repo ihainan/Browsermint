@@ -4,7 +4,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16),
   JWT_SESSION_TOKEN_SECRET: z.string().min(16),
-  DOCKER_NETWORK_NAME: z.string().default("steelyard-internal"),
+  DOCKER_NETWORK_NAME: z.string().default("browsermint-internal"),
   STEEL_BROWSER_IMAGE: z
     .string()
     .default("ghcr.io/steel-dev/steel-browser-api:latest"),
