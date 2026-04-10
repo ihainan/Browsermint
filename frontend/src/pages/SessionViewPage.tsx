@@ -555,7 +555,7 @@ function PlatformContent({
   ) : null;
 
   if (platform === "openclaw") {
-    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "browsermint",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "browsermint": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
+    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "cloud-browser",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "cloud-browser": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.openclawIntro")} /></p>
@@ -570,8 +570,8 @@ function PlatformContent({
   }
 
   if (platform === "claude-code") {
-    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
-    const mcpCli = `claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
+    const mcpJson = `{\n  "mcpServers": {\n    "cloud-browser": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpCli = `claude mcp add cloud-browser --scope user -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.claudeIntro")} /></p>
@@ -590,7 +590,7 @@ function PlatformContent({
   }
 
   if (platform === "cursor") {
-    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpJson = `{\n  "mcpServers": {\n    "cloud-browser": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.cursorIntro")} /></p>
@@ -605,8 +605,8 @@ function PlatformContent({
   }
 
   if (platform === "codex") {
-    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
-    const mcpCli = `codex mcp add chrome-devtools -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
+    const mcpJson = `{\n  "mcpServers": {\n    "cloud-browser": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpCli = `codex mcp add cloud-browser -- npx chrome-devtools-mcp@latest --wsEndpoint="${cdpUrl}"`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.codexIntro")} /></p>
@@ -625,7 +625,7 @@ function PlatformContent({
   }
 
   if (platform === "antigravity") {
-    const mcpJson = `{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
+    const mcpJson = `{\n  "mcpServers": {\n    "cloud-browser": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "chrome-devtools-mcp@latest",\n        "--wsEndpoint=${cdpUrl}"\n      ]\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.antigravityIntro")} /></p>
