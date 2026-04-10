@@ -87,6 +87,10 @@ a {
 
   .app-sidebar {
     width: 280px;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    overflow-y: auto;
     background: linear-gradient(180deg, rgba(255, 252, 246, 0.94), rgba(245, 238, 229, 0.96));
     border-right: 1px solid var(--line-soft);
     box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.5);

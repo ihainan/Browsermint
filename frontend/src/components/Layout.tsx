@@ -191,7 +191,7 @@ export default function Layout() {
           )}
         </nav>
 
-        <div className="px-4 pb-5" ref={menuRef}>
+        <div className="relative px-4 pb-5" ref={menuRef}>
           <button
             onClick={() => setMenuOpen((open) => !open)}
             className="flex w-full items-center gap-3 rounded-2xl bg-[rgba(255,255,255,0.7)] px-3 py-3 text-left ring-1 ring-[var(--line-soft)] transition hover:bg-[rgba(255,255,255,0.9)]"
@@ -207,7 +207,7 @@ export default function Layout() {
           </button>
 
           {menuOpen && (
-            <div className="surface-card-strong absolute bottom-[88px] left-4 right-4 z-20 p-2">
+            <div className="surface-card-strong absolute bottom-full left-0 right-0 z-20 mb-2 p-2">
               <div className="rounded-2xl px-3 py-3">
                 <div className="text-sm font-medium text-[var(--text-strong)]">{user?.username}</div>
                 <div className="mt-1 text-xs text-[var(--text-soft)]">{user?.email}</div>
@@ -263,35 +263,13 @@ export default function Layout() {
       <main className="app-main">
         <div className="px-4 pt-4 sm:px-6 lg:px-8">
           <div className="topbar-panel px-4 py-4 sm:px-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex min-w-0 items-start gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[rgba(255,255,255,0.92)] shadow-sm ring-1 ring-[var(--line-soft)] lg:hidden">
-                  <img src={browsermintIcon} alt="Browsermint" className="h-8 w-8 object-contain" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--brand-strong)]">{currentItem.label}</div>
-                  <div className="mt-1 text-sm text-[var(--text-soft)]">{currentItem.description}</div>
-                </div>
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[rgba(255,255,255,0.92)] shadow-sm ring-1 ring-[var(--line-soft)] lg:hidden">
+                <img src={browsermintIcon} alt="Browsermint" className="h-8 w-8 object-contain" />
               </div>
-
-              <div className="hidden items-center gap-2 lg:flex">
-                {(["en", "zh"] as const).map((nextLocale) => {
-                  const active = locale === nextLocale;
-                  return (
-                    <button
-                      key={nextLocale}
-                      onClick={() => setLocale(nextLocale)}
-                      className={clsx(
-                        "rounded-full px-3 py-2 text-xs font-medium transition",
-                        active
-                          ? "bg-[var(--text-strong)] text-white"
-                          : "bg-[rgba(255,255,255,0.75)] text-[var(--text-main)] ring-1 ring-[var(--line-soft)] hover:text-[var(--text-strong)]"
-                      )}
-                    >
-                      {nextLocale === "zh" ? t("common.chinese") : t("common.english")}
-                    </button>
-                  );
-                })}
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--brand-strong)]">{currentItem.label}</div>
+                <div className="mt-1 text-sm text-[var(--text-soft)]">{currentItem.description}</div>
               </div>
             </div>
           </div>
