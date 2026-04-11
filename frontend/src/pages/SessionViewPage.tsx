@@ -589,13 +589,18 @@ function PlatformContent({
   ) : null;
 
   if (platform === "openclaw") {
-    const openclawJson = `{\n  "browser": {\n    "enabled": true,\n    "defaultProfile": "cloud-browser",\n    "remoteCdpTimeoutMs": 3000,\n    "remoteCdpHandshakeTimeoutMs": 5000,\n    "profiles": {\n      "cloud-browser": {\n        "cdpUrl": "${cdpUrl}",\n        "color": "#F97316"\n      }\n    }\n  }\n}`;
+    const openclawMcpCli = `openclaw mcp set cloud-browser '{"command":"npx","args":["chrome-devtools-mcp@latest","--wsEndpoint=${cdpUrl}"]}'`;
+    const openclawMcpJson = `{\n  "mcp": {\n    "servers": {\n      "cloud-browser": {\n        "command": "npx",\n        "args": [\n          "chrome-devtools-mcp@latest",\n          "--wsEndpoint=${cdpUrl}"\n        ]\n      }\n    }\n  }\n}`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.openclawIntro")} /></p>
         <div>
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.openclawConfigCli")} /></p>
+          <CodeBlock code={openclawMcpCli} />
+        </div>
+        <div>
           <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.openclawConfig")} /></p>
-          <CodeBlock code={openclawJson} />
+          <CodeBlock code={openclawMcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.openclawHint")} /></p>
         {expiryLine}
