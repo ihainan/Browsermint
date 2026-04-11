@@ -95,7 +95,10 @@ export default function SessionsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => sessionsApi.delete(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      queryClient.setQueryData<Session[]>(["sessions"], (old) =>
+        old?.filter((s) => s.id !== id)
+      );
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       setDeleteConfirmModalId(null);
     },
