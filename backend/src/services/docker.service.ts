@@ -178,12 +178,12 @@ export async function startExistingContainer(
         "sh", "-c",
         "pkill -x Xvfb 2>/dev/null || true; " +
         "rm -f /tmp/.X10-lock /tmp/.X11-unix/X10; " +
-        "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & " +
+        "nohup Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 & " +
         "sleep 1; " +
         "pkill -f x0vncserver 2>/dev/null || true; " +
-        "x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 &>/tmp/x0vnc.log & " +
+        "nohup x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 >/tmp/x0vnc.log 2>&1 & " +
         "pkill -f 'websockify 6080' 2>/dev/null || true; " +
-        "websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 &",
+        "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 &",
       ],
       AttachStdout: false,
       AttachStderr: false,
