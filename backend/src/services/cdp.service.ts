@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { config } from "../config.js";
-import { solveRecaptchaEnterprise } from "./capsolver.service.js";
+import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { prisma } from "../db/client.js";
 
 // Script injected into every page before any page JavaScript runs.
@@ -154,11 +154,14 @@ try {
 // use addEventListener on the result.
 `.trim();
 
-// Intercepts grecaptcha.enterprise.execute() calls and routes them through
-// a CDP binding so the backend can obtain a high-score token via CapSolver.
-// Falls back to the original execute() if the binding is unavailable (e.g.
-// CAPSOLVER_API_KEY not configured).
-const RECAPTCHA_INTERCEPT_SCRIPT = `
+// Intercepts JS captcha APIs and routes them through a CDP binding so the
+// backend can obtain tokens via CapSolver. Covers:
+//   - reCAPTCHA Enterprise  (grecaptcha.enterprise.execute)
+//   - reCAPTCHA v3          (grecaptcha.execute with string siteKey)
+//   - Cloudflare Turnstile  (turnstile.render / turnstile.execute)
+//   - hCaptcha              (hcaptcha.execute with string siteKey)
+// Falls back to the original API if the CDP binding is unavailable.
+const CAPTCHA_INTERCEPT_SCRIPT = `
 (function() {
   if (window.__browsermint_captcha_patched) return;
   window.__browsermint_captcha_patched = true;
@@ -175,49 +178,131 @@ const RECAPTCHA_INTERCEPT_SCRIPT = `
     if (p) { pending.delete(requestId); p.reject(new Error(err)); }
   };
 
+  function makeId() {
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+
+  // Send payload to backend; call onFallback if the CDP binding is not registered.
+  function sendRequest(payload, onToken, onFallback) {
+    var requestId = makeId();
+    payload.requestId = requestId;
+    pending.set(requestId, { resolve: onToken, reject: onFallback });
+    try {
+      window.__browsermint_solve_captcha(JSON.stringify(payload));
+    } catch(e) {
+      pending.delete(requestId);
+      onFallback(new Error('binding unavailable'));
+    }
+  }
+
+  // ── reCAPTCHA Enterprise ──────────────────────────────────────────────────
   function patchEnterprise(enterprise) {
     if (enterprise.__browsermint_patched) return;
     enterprise.__browsermint_patched = true;
     var orig = enterprise.execute.bind(enterprise);
     enterprise.execute = function(siteKey, options) {
       var action = (options && options.action) || '';
-      var requestId = Math.random().toString(36).slice(2) + Date.now().toString(36);
       return new Promise(function(resolve, reject) {
-        pending.set(requestId, { resolve: resolve, reject: reject });
-        try {
-          window.__browsermint_solve_captcha(JSON.stringify({
-            requestId: requestId,
-            siteKey: siteKey,
-            action: action,
-            url: location.href
-          }));
-        } catch(e) {
-          // Binding not available — fall back to original execute
-          pending.delete(requestId);
-          orig(siteKey, options).then(resolve, reject);
-        }
+        sendRequest(
+          { type: 'recaptcha-enterprise', siteKey: siteKey, action: action, url: location.href },
+          resolve,
+          function() { orig(siteKey, options).then(resolve, reject); }
+        );
       });
+    };
+  }
+
+  // ── reCAPTCHA v2 ─────────────────────────────────────────────────────────
+  // grecaptcha.render(container, {sitekey, callback, size, ...}) — intercept
+  // to capture siteKey and solve immediately (explicit mode) or on execute()
+  // (invisible mode). Token is injected into g-recaptcha-response and the
+  // page callback is called directly without rendering the iframe.
+  var v2Widgets = new Map(); // widgetId (int) -> { siteKey, callback, container }
+  var v2WidgetCounter = 0;
+
+  function injectV2Token(container, token) {
+    var el = (typeof container === 'string') ? document.querySelector(container) : container;
+    if (!el) return;
+    var ta = el.querySelector('textarea[name="g-recaptcha-response"]');
+    if (!ta) {
+      ta = document.createElement('textarea');
+      ta.name = 'g-recaptcha-response';
+      ta.style.display = 'none';
+      el.appendChild(ta);
+    }
+    ta.value = token;
+  }
+
+  function patchV2Render(grecaptchaObj) {
+    if (grecaptchaObj.__browsermint_v2_patched || !grecaptchaObj.render) return;
+    grecaptchaObj.__browsermint_v2_patched = true;
+    var origRender = grecaptchaObj.render.bind(grecaptchaObj);
+    grecaptchaObj.render = function(container, params) {
+      if (!params || !params.sitekey) return origRender.apply(this, arguments);
+      var siteKey = params.sitekey;
+      var userCallback = params.callback;
+      var widgetId = v2WidgetCounter++;
+      v2Widgets.set(widgetId, { siteKey: siteKey, callback: userCallback, container: container });
+      // Invisible v2: defer solving until execute(widgetId) is called
+      if (params.size === 'invisible') return widgetId;
+      // Explicit v2: solve immediately; skip rendering the iframe
+      sendRequest(
+        { type: 'recaptcha-v2', siteKey: siteKey, url: location.href },
+        function(token) {
+          injectV2Token(container, token);
+          if (userCallback) userCallback(token);
+        },
+        function() { origRender.call(grecaptchaObj, container, params); }
+      );
+      return widgetId;
+    };
+  }
+
+  // Handles both v3 (string siteKey) and v2 invisible (numeric widgetId).
+  function patchExecute(grecaptchaObj) {
+    if (grecaptchaObj.__browsermint_execute_patched || !grecaptchaObj.execute) return;
+    grecaptchaObj.__browsermint_execute_patched = true;
+    var orig = grecaptchaObj.execute.bind(grecaptchaObj);
+    grecaptchaObj.execute = function(siteKeyOrWidgetId, options) {
+      if (typeof siteKeyOrWidgetId === 'string') {
+        // reCAPTCHA v3 non-enterprise
+        var action = (options && options.action) || '';
+        return new Promise(function(resolve, reject) {
+          sendRequest(
+            { type: 'recaptcha-v3', siteKey: siteKeyOrWidgetId, action: action, url: location.href },
+            resolve,
+            function() { orig(siteKeyOrWidgetId, options).then(resolve, reject); }
+          );
+        });
+      }
+      // Numeric widgetId — invisible v2
+      var info = v2Widgets.get(siteKeyOrWidgetId);
+      if (!info) return orig.apply(this, arguments);
+      sendRequest(
+        { type: 'recaptcha-v2', siteKey: info.siteKey, url: location.href },
+        function(token) {
+          injectV2Token(info.container, token);
+          if (info.callback) info.callback(token);
+        },
+        function() { orig.call(grecaptchaObj, siteKeyOrWidgetId, options); }
+      );
     };
   }
 
   function patchGrecaptcha(val) {
     if (!val) return;
-    if (val.enterprise) {
-      if (val.enterprise.execute) { patchEnterprise(val.enterprise); return; }
-      var _ent = val.enterprise;
-      Object.defineProperty(val, 'enterprise', {
-        get: function() { return _ent; },
-        set: function(ent) { _ent = ent; if (ent && ent.execute) patchEnterprise(ent); },
-        configurable: true
-      });
-      return;
-    }
-    var _enterprise;
+    // Enterprise — patch immediately if execute exists, and watch for late assignment
+    if (val.enterprise && val.enterprise.execute) patchEnterprise(val.enterprise);
+    var _enterprise = val.enterprise;
     Object.defineProperty(val, 'enterprise', {
       get: function() { return _enterprise; },
       set: function(ent) { _enterprise = ent; if (ent && ent.execute) patchEnterprise(ent); },
       configurable: true
     });
+    // v2: intercept render()
+    patchV2Render(val);
+    // v3 non-enterprise + v2 invisible: intercept execute()
+    patchExecute(val);
   }
 
   var _grecaptcha = window.grecaptcha;
@@ -226,8 +311,81 @@ const RECAPTCHA_INTERCEPT_SCRIPT = `
     set: function(val) { _grecaptcha = val; patchGrecaptcha(val); },
     configurable: true
   });
-
   if (window.grecaptcha) patchGrecaptcha(window.grecaptcha);
+
+  // ── Cloudflare Turnstile ──────────────────────────────────────────────────
+  function patchTurnstile(t) {
+    if (t.__browsermint_patched) return;
+    t.__browsermint_patched = true;
+
+    // turnstile.render(container, {sitekey, callback, ...})
+    if (t.render) {
+      var origRender = t.render.bind(t);
+      t.render = function(container, params) {
+        if (!params || !params.sitekey) return origRender.apply(this, arguments);
+        var userCallback = params.callback;
+        var origArgs = arguments;
+        sendRequest(
+          { type: 'turnstile', siteKey: params.sitekey, url: location.href },
+          function(token) { if (userCallback) userCallback(token); },
+          function() { origRender.apply(t, origArgs); }
+        );
+        return '__browsermint_widget';
+      };
+    }
+
+    // turnstile.execute(container, params) — invisible mode
+    if (t.execute) {
+      var origExecute = t.execute.bind(t);
+      t.execute = function(container, params) {
+        var p = (typeof container === 'object' && container && container.sitekey) ? container : params;
+        if (!p || !p.sitekey) return origExecute.apply(this, arguments);
+        var userCallback = p.callback;
+        var origArgs = arguments;
+        sendRequest(
+          { type: 'turnstile', siteKey: p.sitekey, url: location.href },
+          function(token) { if (userCallback) userCallback(token); },
+          function() { origExecute.apply(t, origArgs); }
+        );
+      };
+    }
+  }
+
+  var _turnstile = window.turnstile;
+  Object.defineProperty(window, 'turnstile', {
+    get: function() { return _turnstile; },
+    set: function(val) { _turnstile = val; if (val) patchTurnstile(val); },
+    configurable: true
+  });
+  if (window.turnstile) patchTurnstile(window.turnstile);
+
+  // ── hCaptcha ──────────────────────────────────────────────────────────────
+  // hcaptcha.execute(siteKey, options) — invisible / programmatic mode.
+  // hcaptcha.execute(widgetId)         — widget-ID form (numeric); skip.
+  function patchHCaptcha(h) {
+    if (h.__browsermint_patched) return;
+    h.__browsermint_patched = true;
+    if (!h.execute) return;
+    var orig = h.execute.bind(h);
+    h.execute = function(siteKeyOrWidgetId, options) {
+      if (typeof siteKeyOrWidgetId !== 'string') return orig.apply(this, arguments);
+      return new Promise(function(resolve, reject) {
+        sendRequest(
+          { type: 'hcaptcha', siteKey: siteKeyOrWidgetId, url: location.href },
+          resolve,
+          function() { orig(siteKeyOrWidgetId, options).then(resolve, reject); }
+        );
+      });
+    };
+  }
+
+  var _hcaptcha = window.hcaptcha;
+  Object.defineProperty(window, 'hcaptcha', {
+    get: function() { return _hcaptcha; },
+    set: function(val) { _hcaptcha = val; if (val) patchHCaptcha(val); },
+    configurable: true
+  });
+  if (window.hcaptcha) patchHCaptcha(window.hcaptcha);
 })();
 `.trim();
 
@@ -308,7 +466,7 @@ async function applyScriptToPage(
     await waitForResponse(ws, bindingId);
   }
 
-  const combinedScript = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + RECAPTCHA_INTERCEPT_SCRIPT;
+  const combinedScript = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + CAPTCHA_INTERCEPT_SCRIPT;
 
   // Register for all future document loads in this page
   const scriptId = sendCmd(
@@ -402,19 +560,20 @@ export async function initCdpSession(
       const params = msg.params as Record<string, unknown> | undefined;
       const pageSessionId = msg.sessionId as string | undefined;
       if (params?.name === "__browsermint_solve_captcha" && pageSessionId) {
-        let payload: { requestId: string; siteKey: string; action: string; url: string };
+        let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string };
         try {
           payload = JSON.parse(params.payload as string);
         } catch {
           return;
         }
+        const captchaType = (payload.type ?? "recaptcha-enterprise") as CaptchaType;
         const capsolverStart = Date.now();
         const userAgent = sessionUserAgents.get(sessionId);
-        solveRecaptchaEnterprise(payload.siteKey, payload.url, payload.action, config.CAPSOLVER_API_KEY, userAgent)
+        solveCaptcha(captchaType, payload.siteKey, payload.url, payload.action ?? "", config.CAPSOLVER_API_KEY, userAgent)
           .then(({ token, taskId }) => {
             const expr = `window.__browsermint_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
-            console.log(`[cdp] CapSolver: resolved captcha for session ${sessionId}`);
+            console.log(`[cdp] CapSolver: resolved ${captchaType} for session ${sessionId}`);
             prisma.sessionEvent.create({
               data: {
                 sessionId,
@@ -423,9 +582,10 @@ export async function initCdpSession(
                 requestPath: null,
                 statusCode: 200,
                 metadata: {
+                  type: captchaType,
                   url: payload.url,
                   siteKey: payload.siteKey,
-                  action: payload.action,
+                  action: payload.action ?? null,
                   taskId,
                   tokenLength: token.length,
                   userAgent: userAgent ?? null,
@@ -438,7 +598,7 @@ export async function initCdpSession(
           .catch((err: Error) => {
             const expr = `window.__browsermint_reject_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(err.message)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);
-            console.warn(`[cdp] CapSolver failed for session ${sessionId}:`, err.message);
+            console.warn(`[cdp] CapSolver failed (${captchaType}) for session ${sessionId}:`, err.message);
             prisma.sessionEvent.create({
               data: {
                 sessionId,
@@ -447,9 +607,10 @@ export async function initCdpSession(
                 requestPath: null,
                 statusCode: 500,
                 metadata: {
+                  type: captchaType,
                   url: payload.url,
                   siteKey: payload.siteKey,
-                  action: payload.action,
+                  action: payload.action ?? null,
                   userAgent: userAgent ?? null,
                   durationMs: Date.now() - capsolverStart,
                   error: err.message,
