@@ -43,9 +43,9 @@ export async function createAndStartContainer(
     ],
     Entrypoint: ["/bin/sh", "-c"],
     Cmd: [
-      "Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 2 && " +
-      "x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 &>/tmp/x0vnc.log & " +
-      "sleep 1 && websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
+      "nohup Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 & sleep 2 && " +
+      "nohup x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 >/tmp/x0vnc.log 2>&1 & " +
+      "sleep 1 && nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
       "exec /app/api/entrypoint.sh",
     ],
     HostConfig: {
