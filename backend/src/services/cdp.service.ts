@@ -386,8 +386,29 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
     configurable: true
   });
   if (window.hcaptcha) patchHCaptcha(window.hcaptcha);
+
+  // Polling fallback: reCAPTCHA often sets window.grecaptcha = {} first and then
+  // assigns execute/render directly on the object (not via window.grecaptcha = ...),
+  // so the property setter fires before the methods exist. Poll every 100ms for up
+  // to 20 seconds to catch late-assigned methods on already-captured object references.
+  var _pollCount = 0;
+  var _pollId = setInterval(function() {
+    if (++_pollCount > 200) { clearInterval(_pollId); return; }
+    var g = window.grecaptcha;
+    if (g) {
+      if (g.execute && !g.__browsermint_execute_patched) { patchV2Render(g); patchExecute(g); }
+      if (g.enterprise && g.enterprise.execute && !g.enterprise.__browsermint_patched) patchEnterprise(g.enterprise);
+    }
+    if (window.turnstile && !window.turnstile.__browsermint_patched) patchTurnstile(window.turnstile);
+    if (window.hcaptcha && !window.hcaptcha.__browsermint_patched) patchHCaptcha(window.hcaptcha);
+  }, 100);
 })();
 `.trim();
+
+// Combined script injected into every page — extracted here so both
+// applyScriptToPage (initial injection) and the frameNavigated handler
+// (re-injection after agent-triggered navigation) can share the same source.
+const COMBINED_INJECT_SCRIPT = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + CAPTCHA_INTERCEPT_SCRIPT;
 
 // One persistent browser-level CDP WebSocket per session.
 const activeSessions = new Map<string, WebSocket>();
@@ -466,13 +487,18 @@ async function applyScriptToPage(
     await waitForResponse(ws, bindingId);
   }
 
-  const combinedScript = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + CAPTCHA_INTERCEPT_SCRIPT;
+  // Enable Page domain events so we receive Page.frameNavigated notifications.
+  // These are used to re-inject the captcha script after agent-triggered navigations
+  // (addScriptToEvaluateOnNewDocument is session-scoped and only fires for navigations
+  // originating from the same CDP session, so re-injection via frameNavigated is needed).
+  const enableId = sendCmd(ws, "Page.enable", {}, pageSessionId);
+  await waitForResponse(ws, enableId);
 
   // Register for all future document loads in this page
   const scriptId = sendCmd(
     ws,
     "Page.addScriptToEvaluateOnNewDocument",
-    { source: combinedScript },
+    { source: COMBINED_INJECT_SCRIPT },
     pageSessionId
   );
   await waitForResponse(ws, scriptId);
@@ -481,7 +507,7 @@ async function applyScriptToPage(
   const evalId = sendCmd(
     ws,
     "Runtime.evaluate",
-    { expression: combinedScript, returnByValue: false },
+    { expression: COMBINED_INJECT_SCRIPT, returnByValue: false },
     pageSessionId
   );
   await waitForResponse(ws, evalId);
@@ -636,6 +662,28 @@ export async function initCdpSession(
           console.warn(`[cdp] Failed to apply script to new page (session ${sessionId}):`, err);
         }
       }
+      return;
+    }
+
+    // Re-inject the captcha/stealth scripts after any main-frame navigation.
+    // Page.addScriptToEvaluateOnNewDocument is session-scoped in Chrome CDP:
+    // scripts registered by our backend CDP session do NOT fire when the agent's
+    // separate CDP session triggers a navigation. Listening for Page.frameNavigated
+    // (which is broadcast to all sessions with Page domain enabled) and re-evaluating
+    // the script covers agent-triggered navigations that addScriptToEvaluateOnNewDocument
+    // would otherwise miss.
+    if (msg.method === "Page.frameNavigated") {
+      const params = msg.params as Record<string, unknown> | undefined;
+      const frame = params?.frame as Record<string, unknown> | undefined;
+      const pageSessionId = msg.sessionId as string | undefined;
+      // parentId absent means this is the main frame (not a sub-frame / iframe)
+      if (!frame?.parentId && pageSessionId) {
+        if (config.CAPSOLVER_API_KEY) {
+          sendCmd(ws, "Runtime.addBinding", { name: "__browsermint_solve_captcha" }, pageSessionId);
+        }
+        sendCmd(ws, "Runtime.evaluate", { expression: COMBINED_INJECT_SCRIPT, returnByValue: false }, pageSessionId);
+      }
+      return;
     }
   });
 
