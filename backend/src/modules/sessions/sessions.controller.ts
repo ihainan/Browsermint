@@ -297,9 +297,26 @@ export async function handleStartSession(
     // If a container already exists (session was stopped, not deleted), restart it
     // so the browser's cookies and local storage are preserved.
     // Otherwise create a fresh container.
-    containerInfo = session.containerId
-      ? await startExistingContainer(session.containerId)
-      : await createAndStartContainer(id);
+    if (session.containerId) {
+      try {
+        containerInfo = await startExistingContainer(session.containerId);
+      } catch (err: unknown) {
+        const statusCode = (err as { statusCode?: number }).statusCode;
+        if (statusCode === 404) {
+          // The container's stored network ID is stale — this happens when the Docker
+          // network is recreated (e.g. after a host reboot followed by docker compose down/up).
+          // Discard the broken container and create a fresh one. Browser state
+          // (cookies, local storage) will be lost for this session.
+          console.warn(`[session] Session ${id}: container network stale (404) — discarding, creating fresh one (browser state lost)`);
+          await stopAndRemoveContainer(session.containerId).catch(() => {});
+          containerInfo = await createAndStartContainer(id);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      containerInfo = await createAndStartContainer(id);
+    }
 
     await waitForContainerReady(containerInfo.internalApiUrl);
     const cdpReady = await initCdpSession(id, containerInfo.internalApiUrl);
