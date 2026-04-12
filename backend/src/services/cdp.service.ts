@@ -351,13 +351,12 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
     }
   }
 
-  var _turnstile = window.turnstile;
-  Object.defineProperty(window, 'turnstile', {
-    get: function() { return _turnstile; },
-    set: function(val) { _turnstile = val; if (val) patchTurnstile(val); },
-    configurable: true
-  });
-  if (window.turnstile) patchTurnstile(window.turnstile);
+  // NOTE: window.turnstile is intentionally NOT pre-defined via Object.defineProperty.
+  // Cloudflare's api.js checks whether 'turnstile' is already a key on window (via
+  // "in" operator or Object.hasOwn) and bails out early if it is, printing "Turnstile
+  // already has been loaded". Pre-defining the property causes Cloudflare to skip
+  // initialisation entirely, leaving window.turnstile = undefined permanently.
+  // The polling loop below catches the assignment after Cloudflare initialises.
 
   // ── hCaptcha ──────────────────────────────────────────────────────────────
   // hcaptcha.execute(siteKey, options) — invisible / programmatic mode.
@@ -373,24 +372,19 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
         sendRequest(
           { type: 'hcaptcha', siteKey: siteKeyOrWidgetId, url: location.href },
           resolve,
-          function() { orig(siteKeyOrWidgetId, options).then(resolve, reject); }
+          function(err) { reject(err); }
         );
       });
     };
   }
 
-  var _hcaptcha = window.hcaptcha;
-  Object.defineProperty(window, 'hcaptcha', {
-    get: function() { return _hcaptcha; },
-    set: function(val) { _hcaptcha = val; if (val) patchHCaptcha(val); },
-    configurable: true
-  });
-  if (window.hcaptcha) patchHCaptcha(window.hcaptcha);
+  // NOTE: window.hcaptcha is also NOT pre-defined, for the same reason as turnstile.
 
   // Polling fallback: reCAPTCHA often sets window.grecaptcha = {} first and then
-  // assigns execute/render directly on the object (not via window.grecaptcha = ...),
-  // so the property setter fires before the methods exist. Poll every 100ms for up
-  // to 20 seconds to catch late-assigned methods on already-captured object references.
+  // assigns execute/render directly on the object, so the property setter fires
+  // before the methods exist. Also catches Turnstile / hCaptcha whose scripts skip
+  // initialisation if they find the window property already defined.
+  // Poll every 100ms for up to 20 seconds.
   var _pollCount = 0;
   var _pollId = setInterval(function() {
     if (++_pollCount > 200) { clearInterval(_pollId); return; }
@@ -398,6 +392,30 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
     if (g) {
       if (g.execute && !g.__browsermint_execute_patched) { patchV2Render(g); patchExecute(g); }
       if (g.enterprise && g.enterprise.execute && !g.enterprise.__browsermint_patched) patchEnterprise(g.enterprise);
+      // Retroactive v2: solve .g-recaptcha elements that were rendered before our patch
+      // arrived (render() was called by the page before patchV2Render ran).
+      if (g.__browsermint_v2_patched) {
+        var els = document.querySelectorAll('.g-recaptcha:not([data-bm-solving])');
+        for (var i = 0; i < els.length; i++) {
+          var el = els[i];
+          var ta = el.querySelector('textarea[name="g-recaptcha-response"]');
+          if (ta && ta.value) continue; // already solved
+          var sk = el.getAttribute('data-sitekey');
+          if (!sk) continue;
+          el.setAttribute('data-bm-solving', '1');
+          (function(container, siteKey) {
+            sendRequest(
+              { type: 'recaptcha-v2', siteKey: siteKey, url: location.href },
+              function(token) {
+                injectV2Token(container, token);
+                var cbName = container.getAttribute('data-callback');
+                if (cbName && window[cbName]) window[cbName](token);
+              },
+              function() { container.removeAttribute('data-bm-solving'); }
+            );
+          })(el, sk);
+        }
+      }
     }
     if (window.turnstile && !window.turnstile.__browsermint_patched) patchTurnstile(window.turnstile);
     if (window.hcaptcha && !window.hcaptcha.__browsermint_patched) patchHCaptcha(window.hcaptcha);
