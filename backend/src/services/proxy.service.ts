@@ -2,11 +2,13 @@ import { IncomingMessage, ServerResponse } from "http";
 import { Duplex } from "stream";
 import net from "net";
 import httpProxy from "http-proxy";
+import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { setContainerClipboard, pauseContainer, unpauseContainer } from "./docker.service.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -551,6 +553,196 @@ export async function handleDevtoolsTargetProxy(
   }
 }
 
+// ─── CDP Proxy Bridge ────────────────────────────────────────────────────────
+//
+// Replaces the raw http-proxy WebSocket pass-through for CDP connections.
+// Unlike the raw proxy, the bridge inspects CDP messages so it can:
+//
+//   1. Detect when the agent creates a page session (Target.attachToTarget
+//      response or Target.attachedToTarget event) and immediately register
+//      Page.addScriptToEvaluateOnNewDocument in THAT session.
+//      Because addScriptToEvaluateOnNewDocument is session-scoped in Chrome CDP,
+//      scripts registered by the backend's own session do NOT fire when the
+//      agent's separate session navigates. Registering in the agent's session
+//      guarantees our stealth/captcha scripts run before any page JS on every
+//      agent-triggered navigation.
+//
+//   2. Handle Runtime.bindingCalled for __browsermint_solve_captcha coming from
+//      agent page sessions, so CapSolver works for agent-driven pages too.
+//
+//   3. Re-inject scripts on Page.frameNavigated as a timing backup (same logic
+//      as the backend's own CDP session handler).
+//
+//   4. Filter responses to our internally-injected commands so the agent never
+//      receives CDP response IDs it did not send.
+
+// High offset for our injected command IDs so they never collide with the
+// agent's own sequential IDs (agents typically start from 1).
+const BRIDGE_CMD_OFFSET = 0x70000000;
+let bridgeCmdCounter = 0;
+
+function createCdpBridge(
+  bsSessionId: string,
+  socket: Duplex,
+  head: Buffer,
+  request: IncomingMessage,
+  chromeWsUrl: string,
+  onClose: () => void
+): void {
+  const wss = new WebSocketServer({ noServer: true });
+  wss.handleUpgrade(request, socket, head, (agentWs) => {
+    const chromeWs = new WebSocket(chromeWsUrl);
+
+    // IDs of commands we injected — filter their responses from the agent.
+    const ourCmdIds = new Set<number>();
+    // Page sessions where we've already registered addScriptToEvaluateOnNewDocument.
+    const injectedSessions = new Set<string>();
+    // Agent's pending commands: id → method (to understand Chrome's responses).
+    const pendingAgentCmds = new Map<number, string>();
+
+    function nextId(): number {
+      const id = BRIDGE_CMD_OFFSET + bridgeCmdCounter++;
+      ourCmdIds.add(id);
+      return id;
+    }
+
+    function sendToChrome(msg: Record<string, unknown>): void {
+      if (chromeWs.readyState === WebSocket.OPEN) {
+        chromeWs.send(JSON.stringify(msg));
+      }
+    }
+
+    function injectIntoSession(pgSessionId: string): void {
+      if (injectedSessions.has(pgSessionId)) return;
+      injectedSessions.add(pgSessionId);
+
+      // Register our script to run before any page JS on every future navigation
+      // in this session. This is the key fix: addScriptToEvaluateOnNewDocument
+      // is session-scoped, so we must register it in the agent's own session.
+      sendToChrome({
+        id: nextId(), method: "Page.addScriptToEvaluateOnNewDocument",
+        params: { source: COMBINED_INJECT_SCRIPT }, sessionId: pgSessionId,
+      });
+
+      if (config.CAPSOLVER_API_KEY) {
+        // Register CDP binding so page JS can request captcha solving.
+        sendToChrome({
+          id: nextId(), method: "Runtime.addBinding",
+          params: { name: "__browsermint_solve_captcha" }, sessionId: pgSessionId,
+        });
+        // Enable Page domain so we receive Page.frameNavigated for re-injection.
+        sendToChrome({
+          id: nextId(), method: "Page.enable",
+          params: {}, sessionId: pgSessionId,
+        });
+      }
+
+      // Also inject immediately into the already-loaded document.
+      sendToChrome({
+        id: nextId(), method: "Runtime.evaluate",
+        params: { expression: COMBINED_INJECT_SCRIPT, returnByValue: false },
+        sessionId: pgSessionId,
+      });
+    }
+
+    agentWs.on("message", (data: WebSocket.RawData) => {
+      const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      // Track agent's outgoing commands so we can interpret Chrome's responses.
+      try {
+        const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (typeof msg.id === "number" && typeof msg.method === "string") {
+          pendingAgentCmds.set(msg.id, msg.method);
+        }
+      } catch { /* non-JSON is fine to forward as-is */ }
+      if (chromeWs.readyState === WebSocket.OPEN) chromeWs.send(raw);
+    });
+
+    chromeWs.on("message", (data: WebSocket.RawData) => {
+      const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      let forward = true;
+
+      try {
+        const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+
+        // Filter responses to our own injected commands — the agent never
+        // sent those IDs, so seeing the responses would confuse it.
+        if (typeof msg.id === "number" && ourCmdIds.has(msg.id)) {
+          ourCmdIds.delete(msg.id);
+          forward = false;
+        }
+
+        // Detect page session created by the agent via Target.attachToTarget.
+        if (typeof msg.id === "number" && pendingAgentCmds.has(msg.id) && !msg.error) {
+          const method = pendingAgentCmds.get(msg.id)!;
+          pendingAgentCmds.delete(msg.id);
+          if (method === "Target.attachToTarget") {
+            const pgSessionId = (msg.result as Record<string, unknown> | undefined)?.sessionId as string | undefined;
+            if (pgSessionId) injectIntoSession(pgSessionId);
+          }
+        }
+
+        // Detect page sessions from auto-attach (if agent called Target.setAutoAttach).
+        if (msg.method === "Target.attachedToTarget") {
+          const pgSessionId = (msg.params as Record<string, unknown> | undefined)?.sessionId as string | undefined;
+          if (pgSessionId) injectIntoSession(pgSessionId);
+        }
+
+        // Handle captcha solve requests from our injected script running in the
+        // agent's page session. The backend's own CDP handler covers its sessions;
+        // this covers sessions that belong to the proxy WebSocket connection.
+        if (msg.method === "Runtime.bindingCalled" && config.CAPSOLVER_API_KEY) {
+          const params = msg.params as Record<string, unknown> | undefined;
+          const pgSessionId = msg.sessionId as string | undefined;
+          if (
+            params?.name === "__browsermint_solve_captcha" &&
+            pgSessionId &&
+            injectedSessions.has(pgSessionId)
+          ) {
+            let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string } | undefined;
+            try { payload = JSON.parse(params.payload as string); } catch { /* skip malformed */ }
+            if (payload) {
+              const captchaType = (payload.type ?? "recaptcha-enterprise") as CaptchaType;
+              const { requestId, siteKey, url: captchaUrl, action } = payload;
+              solveCaptcha(captchaType, siteKey, captchaUrl, action ?? "", config.CAPSOLVER_API_KEY)
+                .then(({ token }) => {
+                  const expr = `window.__browsermint_resolve_captcha(${JSON.stringify(requestId)},${JSON.stringify(token)})`;
+                  sendToChrome({ id: nextId(), method: "Runtime.evaluate", params: { expression: expr }, sessionId: pgSessionId });
+                  console.log(`[cdp-proxy] CapSolver: resolved ${captchaType} for session ${bsSessionId}`);
+                })
+                .catch((err: Error) => {
+                  const expr = `window.__browsermint_reject_captcha(${JSON.stringify(requestId)},${JSON.stringify(err.message)})`;
+                  sendToChrome({ id: nextId(), method: "Runtime.evaluate", params: { expression: expr }, sessionId: pgSessionId });
+                  console.warn(`[cdp-proxy] CapSolver failed (${captchaType}) for session ${bsSessionId}:`, err.message);
+                });
+            }
+          }
+        }
+
+        // Re-inject scripts after main-frame navigation as a timing backup.
+        // addScriptToEvaluateOnNewDocument covers future navigations reliably, but
+        // this catches the edge case where the page loads faster than the inject.
+        if (msg.method === "Page.frameNavigated") {
+          const frame = (msg.params as Record<string, unknown> | undefined)?.frame as Record<string, unknown> | undefined;
+          const pgSessionId = msg.sessionId as string | undefined;
+          if (!frame?.parentId && pgSessionId && injectedSessions.has(pgSessionId)) {
+            if (config.CAPSOLVER_API_KEY) {
+              sendToChrome({ id: nextId(), method: "Runtime.addBinding", params: { name: "__browsermint_solve_captcha" }, sessionId: pgSessionId });
+            }
+            sendToChrome({ id: nextId(), method: "Runtime.evaluate", params: { expression: COMBINED_INJECT_SCRIPT, returnByValue: false }, sessionId: pgSessionId });
+          }
+        }
+      } catch { /* non-JSON or parse errors are forwarded as-is */ }
+
+      if (forward && agentWs.readyState === WebSocket.OPEN) agentWs.send(raw);
+    });
+
+    agentWs.on("close", () => { onClose(); if (chromeWs.readyState !== WebSocket.CLOSED) chromeWs.close(); });
+    agentWs.on("error", () => { onClose(); if (chromeWs.readyState !== WebSocket.CLOSED) chromeWs.close(); });
+    chromeWs.on("close", () => { if (agentWs.readyState !== WebSocket.CLOSED) agentWs.close(); });
+    chromeWs.on("error", () => { if (agentWs.readyState !== WebSocket.CLOSED) agentWs.close(); });
+  });
+}
+
 // ─── Idle-pause helpers ───────────────────────────────────────────────────────
 
 export function clearIdleTimer(sessionId: string): void {
@@ -754,15 +946,16 @@ export async function handleWebSocketUpgrade(
   } else if (wsType === "pageId") {
     request.url = "/v1/sessions/pageId";
   } else if (wsType === "cdp") {
-    // Forward directly to the container's CDP server (port 9223) at the given sub-path.
-    // /ws/sessions/{id}/cdp/devtools/page/{id} → /devtools/page/{id} (direct)
-    // /ws/sessions/{id}/cdp                    → auto-resolve browser UUID via /json/version
+    // CDP connections use the inspecting bridge (createCdpBridge) instead of
+    // the raw proxy. The bridge detects page sessions created by the agent and
+    // injects addScriptToEvaluateOnNewDocument into those sessions so our
+    // stealth/captcha scripts fire before page JS on every navigation.
     //
-    // Auto-resolution makes the base CDP URL stable across Chrome restarts: the
-    // Chrome instance UUID in /devtools/browser/{uuid} changes every time Chrome
-    // restarts, so a hardcoded full path becomes stale. Connecting to the base path
-    // instead lets the backend always resolve the current UUID transparently.
+    // Path resolution is the same as before:
+    //   /ws/sessions/{id}/cdp              → auto-resolve browser UUID via /json/version
+    //   /ws/sessions/{id}/cdp/devtools/... → direct sub-path
     const cdpBase = getDevtoolsBaseUrl(session.internalApiUrl!);
+    let cdpPath: string;
     if (wsSubPath === "/" || wsSubPath === "") {
       try {
         const versionRes = await fetch(new URL("/json/version", cdpBase), {
@@ -770,21 +963,31 @@ export async function handleWebSocketUpgrade(
         });
         if (versionRes.ok) {
           const versionData = await versionRes.json() as { webSocketDebuggerUrl?: string };
-          if (typeof versionData.webSocketDebuggerUrl === "string") {
-            request.url = new URL(versionData.webSocketDebuggerUrl).pathname;
-          } else {
-            request.url = "/";
-          }
+          cdpPath = typeof versionData.webSocketDebuggerUrl === "string"
+            ? new URL(versionData.webSocketDebuggerUrl).pathname
+            : "/";
         } else {
-          request.url = "/";
+          cdpPath = "/";
         }
       } catch {
-        request.url = "/";
+        cdpPath = "/";
       }
     } else {
-      request.url = wsSubPath;
+      cdpPath = wsSubPath;
     }
-    proxyTarget = cdpBase.origin;
+
+    // Update last active timestamp and log event (fire-and-forget)
+    prisma.session.update({
+      where: { id: sessionId },
+      data: { lastActiveAt: new Date() },
+    }).catch(() => {});
+    logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101, undefined, getWebSocketSource(request));
+
+    incrementWsCount(sessionId);
+    // decrementWsCount is called inside the bridge on agent WebSocket close.
+    const chromeWsUrl = `ws://${cdpBase.host}${cdpPath}`;
+    createCdpBridge(sessionId, socket, head, request, chromeWsUrl, () => decrementWsCount(sessionId));
+    return;
   } else if (wsType === "vnc") {
     // Forward to websockify (port 6080) which bridges the noVNC WebSocket client to
     // x0vncserver's plain TCP VNC port (5900). x0vncserver (TigerVNC) has no built-in

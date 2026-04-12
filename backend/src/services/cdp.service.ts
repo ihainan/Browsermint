@@ -426,7 +426,9 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
 // Combined script injected into every page — extracted here so both
 // applyScriptToPage (initial injection) and the frameNavigated handler
 // (re-injection after agent-triggered navigation) can share the same source.
-const COMBINED_INJECT_SCRIPT = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + CAPTCHA_INTERCEPT_SCRIPT;
+// Exported so the CDP proxy bridge can inject the same script into
+// agent-created page sessions (which have a separate CDP session scope).
+export const COMBINED_INJECT_SCRIPT = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE_SCRIPT + "\n\n" + CAPTCHA_INTERCEPT_SCRIPT;
 
 // One persistent browser-level CDP WebSocket per session.
 const activeSessions = new Map<string, WebSocket>();
