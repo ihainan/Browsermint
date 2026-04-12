@@ -46,6 +46,7 @@ services:
     build:
       context: ${BUILD_CONTEXT:-..}
       dockerfile: ${FRONTEND_DOCKERFILE:-docker/Dockerfile.frontend}
+    restart: unless-stopped
     networks:
       - browsermint-public
     depends_on:
