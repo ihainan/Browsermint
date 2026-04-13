@@ -93,6 +93,33 @@ function formatCount(n: number): string {
   return String(n);
 }
 
+function formatOnlineTimeBrief(ms: number): string {
+  const m = Math.floor(ms / 60000);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m`;
+  return "0m";
+}
+
+function formatOnlineTimeFull(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function effectiveOnlineMs(session: Session): number {
+  const base = session.onlineMs ?? 0;
+  if (session.status === "running" && session.runningStartedAt) {
+    return base + Math.max(0, Date.now() - new Date(session.runningStartedAt).getTime());
+  }
+  return base;
+}
+
 export default function OverviewPage() {
   const { t, formatDateTime } = useI18n();
   const location = useLocation();
@@ -112,9 +139,11 @@ export default function OverviewPage() {
 
   const recentSessions = [...sessions]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 5);
+    .slice(0, 3);
 
   const agentEvents = statsData?.agentEventCount ?? 0;
+
+  const totalOnlineMs = sessions.reduce((sum, s) => sum + effectiveOnlineMs(s), 0);
 
   const stats = [
     { label: t("overview.totalBrowsers"),   value: sessions.length },
@@ -122,6 +151,7 @@ export default function OverviewPage() {
     { label: t("overview.idleBrowsers"),    value: sessions.filter((s) => s.status === "paused").length },
     { label: t("overview.stoppedBrowsers"), value: sessions.filter((s) => s.status === "stopped").length },
     { label: t("overview.agentEvents"),     value: formatCount(agentEvents) },
+    { label: t("overview.totalOnlineTime"), value: formatOnlineTimeBrief(totalOnlineMs) },
   ];
 
   const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -138,6 +168,18 @@ export default function OverviewPage() {
       return { date: key, label, agentCount, otherCount: total - agentCount };
     });
   }, [statsData]);
+
+  const topSessionsData = useMemo(() => {
+    return [...sessions]
+      .map((s) => ({
+        name: (s.name ?? s.id.slice(0, 8)).slice(0, 18),
+        ms: effectiveOnlineMs(s),
+      }))
+      .filter((s) => s.ms > 0)
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 8)
+      .map((s) => ({ name: s.name, hours: parseFloat((s.ms / 3_600_000).toFixed(2)), ms: s.ms }));
+  }, [sessions]);
 
   const hourlyData = useMemo(() => {
     const tzOffsetHours = -new Date().getTimezoneOffset() / 60;
@@ -181,6 +223,7 @@ export default function OverviewPage() {
     t("browsers.name"),
     t("browsers.started"),
     t("browsers.lastActive"),
+    t("browsers.onlineTime"),
     t("browsers.expiresAt"),
   ];
 
@@ -288,6 +331,11 @@ export default function OverviewPage() {
                         </div>
                       </td>
                       <td className="p-0 whitespace-nowrap">
+                        <div className="flex h-12 items-center px-3 font-mono text-[var(--text-main)]">
+                          {formatOnlineTimeBrief(effectiveOnlineMs(session))}
+                        </div>
+                      </td>
+                      <td className="p-0 whitespace-nowrap">
                         <div className="flex h-12 items-center px-3">
                           {(() => {
                             const days = daysUntilExpiry(session.expiresAt);
@@ -318,7 +366,7 @@ export default function OverviewPage() {
         <div className="flex flex-col gap-4">
 
           {/* Stats row */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             {stats.map(({ label, value }) => (
               <div key={label} className="surface-card px-4 py-3">
                 <h3 className="text-[11px] uppercase tracking-wide text-[var(--text-faint)]">{label}</h3>
@@ -407,6 +455,67 @@ export default function OverviewPage() {
                 </ResponsiveContainer>
               )}
             </div>
+          </div>
+
+          {/* Top sessions by online time */}
+          <div className="surface-card px-5 pt-4 pb-3">
+            <div className="flex items-baseline justify-between mb-3">
+              <h3 className="text-[13px] font-medium text-[var(--text-strong)]">
+                {t("overview.topSessions")}
+              </h3>
+              <span className="text-[11px] text-[var(--text-faint)]">
+                {t("overview.topSessionsSubtitle")}
+              </span>
+            </div>
+            {topSessionsData.length === 0 ? (
+              <div className="flex items-center justify-center h-[160px]">
+                <p className="text-[13px] text-[var(--text-soft)]">{t("overview.noOnlineData")}</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={Math.max(120, topSessionsData.length * 28)}>
+                <BarChart
+                  layout="vertical"
+                  data={topSessionsData}
+                  margin={{ top: 2, right: 48, left: 4, bottom: 2 }}
+                  barCategoryGap="25%"
+                >
+                  <CartesianGrid horizontal={false} stroke="var(--line-soft)" strokeDasharray="0" />
+                  <XAxis
+                    type="number"
+                    tick={{ fontSize: 10, fill: "var(--text-faint)" }}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(v: number) => v >= 1 ? `${v}h` : `${Math.round(v * 60)}m`}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={96}
+                    tick={{ fontSize: 11, fill: "var(--text-main)" }}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Tooltip
+                    cursor={{ fill: "var(--bg-soft)" }}
+                    content={(props) => {
+                      const { active, payload } = props as unknown as { active?: boolean; payload?: { payload: { name: string; ms: number } }[] };
+                      if (!active || !payload?.length) return null;
+                      const entry = payload[0].payload;
+                      return (
+                        <div className="surface-card-strong px-3 py-2 text-[12px]">
+                          <p className="mb-1 text-[var(--text-soft)]">{entry.name}</p>
+                          <div className="flex items-center gap-1.5 leading-5">
+                            <span className="inline-block w-2 h-2 rounded-sm bg-[var(--brand-main)] shrink-0" />
+                            <span className="font-medium text-[var(--text-strong)]">{formatOnlineTimeFull(entry.ms)}</span>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="hours" fill="var(--brand-main)" radius={[0, 2, 2, 0]} maxBarSize={18} label={{ position: "right", fontSize: 10, fill: "var(--text-faint)", formatter: (v: unknown) => { const h = v as number; return h >= 1 ? `${h}h` : `${Math.round(h * 60)}m`; } }} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
 
           {/* Capsolver stats */}

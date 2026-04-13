@@ -236,6 +236,20 @@ function DetailsSidebar({
   const queryClient = useQueryClient();
   const [details, setDetails] = useState<SteelSessionDetails | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Tick every second while session is running so online time stays live.
+  useEffect(() => {
+    if (session.status !== "running") return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [session.status]);
+
+  const onlineMs =
+    (session.onlineMs ?? 0) +
+    (session.status === "running" && session.runningStartedAt
+      ? Math.max(0, nowMs - new Date(session.runningStartedAt).getTime())
+      : 0);
 
   useEffect(() => {
     if (!sessionToken) return;
@@ -335,6 +349,7 @@ function DetailsSidebar({
       <DetailRow label={t("sessionView.details.lastActive")} value={formatDateTime(session.lastActiveAt)} />
       {session.containerName && <DetailRow label={t("sessionView.details.container")} value={session.containerName} mono />}
       {details?.duration !== undefined && <DetailRow label={t("sessionView.details.duration")} value={formatDuration(details.duration)} />}
+      <DetailRow label={t("sessionView.details.onlineTime")} value={formatDuration(onlineMs)} />
       {details?.userAgent && <DetailRow label={t("sessionView.details.userAgent")} value={details.userAgent} />}
       {details?.isSelenium !== undefined && <DetailRow label={t("sessionView.details.isSelenium")} value={String(details.isSelenium)} />}
       {details?.solveCaptcha !== undefined && <DetailRow label={t("sessionView.details.autoCaptcha")} value={String(details.solveCaptcha)} />}

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, Session } from "../api/client.ts";
 import {
@@ -21,6 +21,26 @@ import { StatusBadge, daysUntilExpiry } from "./OverviewPage.tsx";
 
 const EXPIRY_WARNING_DAYS = 30;
 const PER_PAGE = 25;
+
+function formatOnlineTime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m`;
+  if (s > 0) return `${s}s`;
+  return "—";
+}
+
+function effectiveOnlineMs(session: Session): number {
+  const base = session.onlineMs ?? 0;
+  if (session.status === "running" && session.runningStartedAt) {
+    return base + Math.max(0, Date.now() - new Date(session.runningStartedAt).getTime());
+  }
+  return base;
+}
 
 type StatusFilter = Session["status"] | "all";
 
@@ -358,16 +378,19 @@ export default function BrowsersPage() {
                   <th className="px-3 py-3 text-left text-xs font-normal w-[13%] text-[var(--text-faint)]">
                     {t("browsers.browserId")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[22%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[18%] text-[var(--text-faint)]">
                     {t("browsers.name")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[19%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[15%] text-[var(--text-faint)]">
                     {t("browsers.started")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[19%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[15%] text-[var(--text-faint)]">
                     {t("browsers.lastActive")}
                   </th>
-                  <th className="px-3 py-3 text-left text-xs font-normal w-[14%] text-[var(--text-faint)]">
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[11%] text-[var(--text-faint)]">
+                    {t("browsers.onlineTime")}
+                  </th>
+                  <th className="px-3 py-3 text-left text-xs font-normal w-[12%] text-[var(--text-faint)]">
                     {t("browsers.expiresAt")}
                   </th>
                   <th className="w-20" />
@@ -419,6 +442,11 @@ export default function BrowsersPage() {
                     <td className="p-0 whitespace-nowrap">
                       <div className="flex h-12 items-center px-3 text-[var(--text-main)]">
                         {formatDateTime(session.lastActiveAt)}
+                      </div>
+                    </td>
+                    <td className="p-0 whitespace-nowrap">
+                      <div className="flex h-12 items-center px-3 font-mono text-[var(--text-main)]">
+                        {formatOnlineTime(effectiveOnlineMs(session))}
                       </div>
                     </td>
                     <td className="p-0 whitespace-nowrap">

@@ -23,6 +23,12 @@ import {
   openSavedTabs,
 } from "../../services/cdp.service.js";
 import { clearIdleTimer } from "../../services/proxy.service.js";
+
+/** Returns ms elapsed since a running period started; 0 if null. */
+function calcOnlineMsDelta(runningStartedAt: Date | null | undefined): number {
+  if (!runningStartedAt) return 0;
+  return Math.max(0, Date.now() - runningStartedAt.getTime());
+}
 import { CreateSessionBody } from "./sessions.schema.js";
 
 // ─── Create Session ───────────────────────────────────────────────────────────
@@ -86,6 +92,7 @@ export async function handleCreateSession(
         internalApiUrl: containerInfo.internalApiUrl,
         lastActiveAt: new Date(),
         expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
+        runningStartedAt: new Date(),
       },
     });
 
@@ -156,7 +163,12 @@ export async function handleDeleteSession(
   // a new session with the same name.
   await prisma.session.update({
     where: { id },
-    data: { status: "stopping", deletedAt: new Date() },
+    data: {
+      status: "stopping",
+      deletedAt: new Date(),
+      onlineMs: { increment: calcOnlineMsDelta(session.runningStartedAt) },
+      runningStartedAt: null,
+    },
   });
 
   // Close Chrome gracefully so it flushes data before container removal
@@ -212,7 +224,7 @@ export async function handleStopSession(
     }
     const updated = await prisma.session.update({
       where: { id },
-      data: { status: "stopped" },
+      data: { status: "stopped", runningStartedAt: null },
     });
     console.info(`[session] Session ${id} stopped`);
     return reply.send({ session: updated });
@@ -250,6 +262,8 @@ export async function handleStopSession(
       // containerId / containerName / internalApiUrl intentionally kept so
       // handleStartSession can restart the same container.
       savedTabs: savedUrls.length > 0 ? savedUrls : Prisma.JsonNull,
+      onlineMs: { increment: calcOnlineMsDelta(session.runningStartedAt) },
+      runningStartedAt: null,
     },
   });
 
@@ -362,6 +376,7 @@ export async function handleStartSession(
         lastActiveAt: new Date(),
         savedTabs: Prisma.JsonNull, // Clear after restore
         expiresAt: new Date(Date.now() + SESSION_EXPIRY_MS),
+        runningStartedAt: new Date(),
       },
     });
 

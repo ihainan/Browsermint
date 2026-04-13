@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { adminApi, AdminSessionFull, Session } from "../api/client.ts";
 import { Loader2, Monitor, Search } from "lucide-react";
@@ -29,6 +29,8 @@ function SortButton({
   );
 }
 
+const SESSIONS_PER_PAGE = 25;
+
 export default function AdminSessionsPage() {
   const { t, formatDateTime } = useI18n();
 
@@ -36,6 +38,7 @@ export default function AdminSessionsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("lastActiveAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [currentPage, setCurrentPage] = useState(1);
 
   const { data, isPending } = useQuery({
     queryKey: ["admin", "sessions"],
@@ -79,6 +82,14 @@ export default function AdminSessionsPage() {
       return sortDir === "asc" ? cmp : -cmp;
     });
   }, [sessions, statusFilter, search, sortKey, sortDir]);
+
+  useEffect(() => { setCurrentPage(1); }, [search, statusFilter, sortKey]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / SESSIONS_PER_PAGE));
+  const page = Math.min(currentPage, totalPages);
+  const paginated = filtered.slice((page - 1) * SESSIONS_PER_PAGE, page * SESSIONS_PER_PAGE);
+  const from = filtered.length === 0 ? 0 : (page - 1) * SESSIONS_PER_PAGE + 1;
+  const to = Math.min(page * SESSIONS_PER_PAGE, filtered.length);
 
   const runningCount = sessions.filter((s) => s.status === "running").length;
   const stoppedCount = sessions.filter((s) => s.status === "stopped" || s.status === "stopping").length;
@@ -191,11 +202,39 @@ export default function AdminSessionsPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((session) => (
+              {paginated.map((session) => (
                 <SessionRow key={session.id} session={session} formatDateTime={formatDateTime} />
               ))}
             </tbody>
           </table>
+        )}
+        {filtered.length > SESSIONS_PER_PAGE && (
+          <div
+            className="px-4 py-3 flex items-center justify-between border-t"
+            style={{ borderColor: "var(--line-soft)" }}
+          >
+            <span className="text-xs text-[var(--text-faint)]">
+              {t("browsers.viewing", { from, to, total: filtered.length })}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                style={{ color: "var(--text-main)", border: "1px solid var(--line-soft)", background: "rgba(255,255,255,0.72)" }}
+              >
+                {t("browsers.previous")}
+              </button>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                style={{ color: "var(--text-main)", border: "1px solid var(--line-soft)", background: "rgba(255,255,255,0.72)" }}
+              >
+                {t("browsers.next")}
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

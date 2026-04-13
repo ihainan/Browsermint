@@ -283,15 +283,30 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
 
     if (!container) {
       console.info(`[reconcile] Session ${session.id}: container not found — marking error`);
-      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+      const delta = session.runningStartedAt
+        ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "error", onlineMs: { increment: delta }, runningStartedAt: null },
+      });
     } else if (container.State === "paused") {
       // Backend crashed after docker pause but before updating DB — correct DB to "paused"
       console.info(`[reconcile] Session ${session.id}: container paused but DB says running — correcting to "paused"`);
-      await prisma.session.update({ where: { id: session.id }, data: { status: "paused" } });
+      const delta = session.runningStartedAt
+        ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "paused", onlineMs: { increment: delta }, runningStartedAt: null },
+      });
     } else if (container.State !== "running") {
       // Container exists but stopped/crashed — user can retry resume
       console.info(`[reconcile] Session ${session.id}: container state is "${container.State}" — marking error`);
-      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+      const delta = session.runningStartedAt
+        ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "error", onlineMs: { increment: delta }, runningStartedAt: null },
+      });
     } else if (session.status === "creating" && startup) {
       // Container is running but session is stuck in "creating" (backend crashed mid-init).
       // Only fix this on startup — during normal operation handleStartSession may still be
@@ -311,7 +326,12 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
     if (session.containerId) {
       await stopContainer(session.containerId).catch(() => {});
     }
-    await prisma.session.update({ where: { id: session.id }, data: { status: "stopped" } });
+    const delta = session.runningStartedAt
+      ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { status: "stopped", onlineMs: { increment: delta }, runningStartedAt: null },
+    });
   }
 
   // Handle sessions whose DB status is "paused" — verify container state matches

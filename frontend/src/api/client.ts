@@ -75,6 +75,8 @@ export interface Session {
   lastActiveAt: string;
   expiresAt: string | null;
   deletedAt: string | null;
+  onlineMs: number;
+  runningStartedAt: string | null;
 }
 
 export interface SteelSessionDetails {

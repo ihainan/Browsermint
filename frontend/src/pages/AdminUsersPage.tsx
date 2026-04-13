@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminApi, AdminUser, AdminSession } from "../api/client.ts";
 import {
@@ -445,6 +445,8 @@ function ResetPasswordModal({ username, onClose, onReset }: {
   );
 }
 
+const USERS_PER_PAGE = 25;
+
 // ─── main page ────────────────────────────────────────────────────────────────
 
 export default function AdminUsersPage() {
@@ -456,6 +458,7 @@ export default function AdminUsersPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<AdminUser | null>(null);
@@ -522,6 +525,14 @@ export default function AdminUsersPage() {
       return sortDir === "asc" ? cmp : -cmp;
     });
   }, [users, filter, search, sortKey, sortDir]);
+
+  useEffect(() => { setCurrentPage(1); }, [search, filter, sortKey]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / USERS_PER_PAGE));
+  const page = Math.min(currentPage, totalPages);
+  const paginated = filtered.slice((page - 1) * USERS_PER_PAGE, page * USERS_PER_PAGE);
+  const from = filtered.length === 0 ? 0 : (page - 1) * USERS_PER_PAGE + 1;
+  const to = Math.min(page * USERS_PER_PAGE, filtered.length);
 
   return (
     <div className="page-wrap">
@@ -621,7 +632,7 @@ export default function AdminUsersPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((user) => {
+              {paginated.map((user) => {
                 const isSelf = user.id === currentUser?.id;
                 const isLastAdmin = user.isAdmin && adminCount <= 1;
                 const updatePending = updateMutation.isPending && updateMutation.variables?.id === user.id;
@@ -740,6 +751,34 @@ export default function AdminUsersPage() {
               })}
             </tbody>
           </table>
+        )}
+        {filtered.length > USERS_PER_PAGE && (
+          <div
+            className="px-4 py-3 flex items-center justify-between border-t"
+            style={{ borderColor: "var(--line-soft)" }}
+          >
+            <span className="text-xs text-[var(--text-faint)]">
+              {t("browsers.viewing", { from, to, total: filtered.length })}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                style={{ color: "var(--text-main)", border: "1px solid var(--line-soft)", background: "rgba(255,255,255,0.72)" }}
+              >
+                {t("browsers.previous")}
+              </button>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="px-3 py-1.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed rounded-[var(--radius-control)]"
+                style={{ color: "var(--text-main)", border: "1px solid var(--line-soft)", background: "rgba(255,255,255,0.72)" }}
+              >
+                {t("browsers.next")}
+              </button>
+            </div>
+          </div>
         )}
       </div>
 

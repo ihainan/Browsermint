@@ -28,9 +28,11 @@ model Session {
   containerId    String?        @db.VarChar(128)
   containerName  String?        @db.VarChar(128)
   internalApiUrl String?        @db.VarChar(256)
-  savedTabs      Json?          // Array of URLs saved before stop, restored on resume
-  createdAt      DateTime       @default(now())
-  lastActiveAt   DateTime       @default(now())
+  savedTabs        Json?          // Array of URLs saved before stop, restored on resume
+  onlineMs         Int       @default(0)      // Accumulated milliseconds in "running" state
+  runningStartedAt DateTime?                  // When the current "running" period began
+  createdAt        DateTime  @default(now())
+  lastActiveAt     DateTime  @default(now())
   expiresAt      DateTime?
   tokenIssuedAt  DateTime?
   deletedAt      DateTime?

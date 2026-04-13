@@ -801,7 +801,7 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
 
   const session = await prisma.session.findFirst({
     where: { id: sessionId, status: "running", deletedAt: null },
-    select: { containerId: true },
+    select: { containerId: true, runningStartedAt: true },
   });
   if (!session?.containerId) return;
 
@@ -809,7 +809,13 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
   try {
     cleanupCdpSession(sessionId);
     await pauseContainer(session.containerId);
-    await prisma.session.update({ where: { id: sessionId }, data: { status: "paused" } });
+    const delta = session.runningStartedAt
+      ? Math.max(0, Date.now() - session.runningStartedAt.getTime())
+      : 0;
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { status: "paused", onlineMs: { increment: delta }, runningStartedAt: null },
+    });
     console.info(`[idle-pause] Session ${sessionId} paused`);
   } catch (err) {
     console.error(`[idle-pause] Failed to pause session ${sessionId}:`, err);
@@ -930,7 +936,7 @@ export async function handleWebSocketUpgrade(
       try {
         console.info(`[ws-proxy] Unpausing session ${sessionId} for incoming WS`);
         await unpauseContainer(session.containerId);
-        await prisma.session.update({ where: { id: sessionId }, data: { status: "running" } });
+        await prisma.session.update({ where: { id: sessionId }, data: { status: "running", runningStartedAt: new Date() } });
         await new Promise((r) => setTimeout(r, 500));
         if (session.internalApiUrl) {
           void initCdpSession(sessionId, session.internalApiUrl).then((ok) => {
