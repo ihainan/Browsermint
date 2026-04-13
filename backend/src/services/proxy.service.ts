@@ -599,6 +599,9 @@ function createCdpBridge(
     const injectedSessions = new Set<string>();
     // Agent's pending commands: id → method (to understand Chrome's responses).
     const pendingAgentCmds = new Map<number, string>();
+    // Messages received from the agent before Chrome WS was open — drained on open.
+    // Stored as { data, isBinary } to preserve the original WebSocket frame type.
+    const pendingAgentMessages: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
 
     function nextId(): number {
       const id = BRIDGE_CMD_OFFSET + bridgeCmdCounter++;
@@ -645,7 +648,15 @@ function createCdpBridge(
       });
     }
 
-    agentWs.on("message", (data: WebSocket.RawData) => {
+    chromeWs.on("open", () => {
+      // Drain any messages the agent sent before Chrome WS was ready.
+      for (const { data, isBinary } of pendingAgentMessages) {
+        chromeWs.send(data, { binary: isBinary });
+      }
+      pendingAgentMessages.length = 0;
+    });
+
+    agentWs.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
       const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       // Track agent's outgoing commands so we can interpret Chrome's responses.
       try {
@@ -654,10 +665,15 @@ function createCdpBridge(
           pendingAgentCmds.set(msg.id, msg.method);
         }
       } catch { /* non-JSON is fine to forward as-is */ }
-      if (chromeWs.readyState === WebSocket.OPEN) chromeWs.send(raw);
+      if (chromeWs.readyState === WebSocket.OPEN) {
+        chromeWs.send(data, { binary: isBinary });
+      } else {
+        // Chrome WS not yet open — buffer and replay once it opens.
+        pendingAgentMessages.push({ data, isBinary });
+      }
     });
 
-    chromeWs.on("message", (data: WebSocket.RawData) => {
+    chromeWs.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
       const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       let forward = true;
 
@@ -733,7 +749,7 @@ function createCdpBridge(
         }
       } catch { /* non-JSON or parse errors are forwarded as-is */ }
 
-      if (forward && agentWs.readyState === WebSocket.OPEN) agentWs.send(raw);
+      if (forward && agentWs.readyState === WebSocket.OPEN) agentWs.send(data, { binary: isBinary });
     });
 
     agentWs.on("close", () => { onClose(); if (chromeWs.readyState !== WebSocket.CLOSED) chromeWs.close(); });
