@@ -12,6 +12,7 @@ import claudeCodeIcon from "../assets/agents/claude-code.png";
 import codexIcon from "../assets/agents/codex.png";
 import cursorIcon from "../assets/agents/cursor.png";
 import antigravityIcon from "../assets/agents/antigravity.png";
+import hermesIcon from "../assets/agents/hermes.png";
 
 const STATUS_STYLES: Record<Session["status"], string> = {
   creating: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
@@ -383,7 +384,7 @@ function DetailsSidebar({
   );
 }
 
-type AgentPlatform = "openclaw" | "claude-code" | "codex" | "cursor" | "antigravity";
+type AgentPlatform = "openclaw" | "claude-code" | "codex" | "cursor" | "antigravity" | "hermes";
 
 function usePlatforms() {
   return [
@@ -392,6 +393,7 @@ function usePlatforms() {
     { id: "codex" as const, label: "Codex", icon: codexIcon },
     { id: "cursor" as const, label: "Cursor", icon: cursorIcon },
     { id: "antigravity" as const, label: "Antigravity", icon: antigravityIcon },
+    { id: "hermes" as const, label: "Hermes", icon: hermesIcon },
   ];
 }
 
@@ -673,6 +675,21 @@ function PlatformContent({
           <CodeBlock code={mcpJson} />
         </div>
         <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.antigravityHint")} /></p>
+        {expiryLine}
+      </div>
+    );
+  }
+
+  if (platform === "hermes") {
+    const hermesYaml = `mcp_servers:\n  cloud-browser:\n    command: "npx"\n    args: ["-y", "chrome-devtools-mcp@latest", "--wsEndpoint=${cdpUrl}"]`;
+    return (
+      <div className="space-y-4 text-sm text-gray-700">
+        <p><RichText text={t("sessionView.connect.hermesIntro")} /></p>
+        <div>
+          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.hermesConfig")} /></p>
+          <CodeBlock code={hermesYaml} />
+        </div>
+        <p className="text-xs text-gray-500"><RichText text={t("sessionView.connect.hermesHint")} /></p>
         {expiryLine}
       </div>
     );
