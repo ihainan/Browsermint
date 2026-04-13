@@ -20,7 +20,7 @@ export interface SolveResult {
   taskId: string;
 }
 
-export type CaptchaType = "recaptcha-enterprise" | "recaptcha-v2" | "recaptcha-v3" | "turnstile" | "hcaptcha";
+export type CaptchaType = "recaptcha-enterprise" | "recaptcha-v2" | "recaptcha-v2-enterprise" | "recaptcha-v3" | "turnstile" | "hcaptcha";
 
 function stripChallengeParams(pageURL: string): string {
   try {
@@ -71,7 +71,8 @@ export async function solveCaptcha(
   pageURL: string,
   action: string,
   apiKey: string,
-  userAgent?: string
+  userAgent?: string,
+  enterprisePayload?: Record<string, string>
 ): Promise<SolveResult> {
   const cleanURL = stripChallengeParams(pageURL);
 
@@ -84,6 +85,17 @@ export async function solveCaptcha(
         type: "ReCaptchaV2TaskProxyless",
         websiteURL: cleanURL,
         websiteKey: siteKey,
+        ...(userAgent ? { userAgent } : {}),
+      };
+      extractToken = (s) => s.gRecaptchaResponse as string;
+      break;
+
+    case "recaptcha-v2-enterprise":
+      task = {
+        type: "ReCaptchaV2EnterpriseTaskProxyless",
+        websiteURL: cleanURL,
+        websiteKey: siteKey,
+        ...(enterprisePayload && Object.keys(enterprisePayload).length > 0 ? { enterprisePayload } : {}),
         ...(userAgent ? { userAgent } : {}),
       };
       extractToken = (s) => s.gRecaptchaResponse as string;

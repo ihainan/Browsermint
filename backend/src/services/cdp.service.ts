@@ -221,14 +221,20 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
   var v2WidgetCounter = 0;
 
   function injectV2Token(container, token) {
-    var el = (typeof container === 'string') ? document.querySelector(container) : container;
-    if (!el) return;
-    var ta = el.querySelector('textarea[name="g-recaptcha-response"]');
+    // reCAPTCHA Enterprise creates the response textarea at the document level,
+    // outside the .g-recaptcha container. Prefer that over creating a new one
+    // inside the container, which the form serializer would not find correctly.
+    var ta = document.querySelector('textarea[name="g-recaptcha-response"]');
     if (!ta) {
+      var el = (typeof container === 'string') ? document.querySelector(container) : container;
+      if (el) ta = el.querySelector('textarea[name="g-recaptcha-response"]');
+    }
+    if (!ta) {
+      var el = (typeof container === 'string') ? document.querySelector(container) : container;
       ta = document.createElement('textarea');
       ta.name = 'g-recaptcha-response';
       ta.style.display = 'none';
-      el.appendChild(ta);
+      (el || document.body).appendChild(ta);
     }
     ta.value = token;
   }
@@ -251,6 +257,10 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
         function(token) {
           injectV2Token(container, token);
           if (userCallback) userCallback(token);
+          // form.submit() may not trigger navigation in headless; click the submit button too
+          var el2 = (typeof container === 'string') ? document.querySelector(container) : container;
+          var form2 = el2 ? el2.closest('form') : document.querySelector('form');
+          if (form2) { var btn2 = form2.querySelector('input[type=submit],button[type=submit],button'); if (btn2) btn2.click(); }
         },
         function() { origRender.call(grecaptchaObj, container, params); }
       );
@@ -291,12 +301,21 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
 
   function patchGrecaptcha(val) {
     if (!val) return;
-    // Enterprise — patch immediately if execute exists, and watch for late assignment
-    if (val.enterprise && val.enterprise.execute) patchEnterprise(val.enterprise);
+    // Enterprise — patch execute and render immediately if available, and watch for late assignment
+    if (val.enterprise) {
+      if (val.enterprise.execute) patchEnterprise(val.enterprise);
+      patchV2Render(val.enterprise);
+    }
     var _enterprise = val.enterprise;
     Object.defineProperty(val, 'enterprise', {
       get: function() { return _enterprise; },
-      set: function(ent) { _enterprise = ent; if (ent && ent.execute) patchEnterprise(ent); },
+      set: function(ent) {
+        _enterprise = ent;
+        if (ent) {
+          if (ent.execute) patchEnterprise(ent);
+          patchV2Render(ent);
+        }
+      },
       configurable: true
     });
     // v2: intercept render()
@@ -391,29 +410,48 @@ const CAPTCHA_INTERCEPT_SCRIPT = `
     var g = window.grecaptcha;
     if (g) {
       if (g.execute && !g.__browsermint_execute_patched) { patchV2Render(g); patchExecute(g); }
-      if (g.enterprise && g.enterprise.execute && !g.enterprise.__browsermint_patched) patchEnterprise(g.enterprise);
+      if (g.render && !g.__browsermint_v2_patched) patchV2Render(g);
+      if (g.enterprise) {
+        if (g.enterprise.execute && !g.enterprise.__browsermint_patched) patchEnterprise(g.enterprise);
+        if (g.enterprise.render && !g.enterprise.__browsermint_v2_patched) patchV2Render(g.enterprise);
+      }
       // Retroactive v2: solve .g-recaptcha elements that were rendered before our patch
       // arrived (render() was called by the page before patchV2Render ran).
-      if (g.__browsermint_v2_patched) {
+      if (g.__browsermint_v2_patched || (g.enterprise && g.enterprise.__browsermint_v2_patched)) {
         var els = document.querySelectorAll('.g-recaptcha:not([data-bm-solving])');
         for (var i = 0; i < els.length; i++) {
           var el = els[i];
-          var ta = el.querySelector('textarea[name="g-recaptcha-response"]');
+          // Check doc-level textarea first (where enterprise.js puts it), then container
+          var ta = document.querySelector('textarea[name="g-recaptcha-response"]')
+                || el.querySelector('textarea[name="g-recaptcha-response"]');
           if (ta && ta.value) continue; // already solved
           var sk = el.getAttribute('data-sitekey');
           if (!sk) continue;
           el.setAttribute('data-bm-solving', '1');
-          (function(container, siteKey) {
+          // Use enterprise type when the page loaded enterprise.js (g.enterprise patched)
+          var retroType = (g.enterprise && g.enterprise.__browsermint_v2_patched) ? 'recaptcha-v2-enterprise' : 'recaptcha-v2';
+          // Extract the 's' one-time token from the already-rendered anchor iframe
+          var anchorS = '';
+          try {
+            var anchorIf = document.querySelector('iframe[src*="recaptcha/enterprise/anchor"]');
+            if (anchorIf) anchorS = new URL(anchorIf.src).searchParams.get('s') || '';
+          } catch(e2) {}
+          (function(container, siteKey, captchaType, enterpriseS) {
+            var reqPayload = { type: captchaType, siteKey: siteKey, url: location.href };
+            if (enterpriseS) reqPayload.enterprisePayload = { s: enterpriseS };
             sendRequest(
-              { type: 'recaptcha-v2', siteKey: siteKey, url: location.href },
+              reqPayload,
               function(token) {
                 injectV2Token(container, token);
                 var cbName = container.getAttribute('data-callback');
                 if (cbName && window[cbName]) window[cbName](token);
+                // form.submit() may not trigger navigation in headless; click the submit button too
+                var form3 = container.closest('form') || document.querySelector('form');
+                if (form3) { var btn3 = form3.querySelector('input[type=submit],button[type=submit],button'); if (btn3) btn3.click(); }
               },
               function() { container.removeAttribute('data-bm-solving'); }
             );
-          })(el, sk);
+          })(el, sk, retroType, anchorS);
         }
       }
     }
@@ -606,7 +644,7 @@ export async function initCdpSession(
       const params = msg.params as Record<string, unknown> | undefined;
       const pageSessionId = msg.sessionId as string | undefined;
       if (params?.name === "__browsermint_solve_captcha" && pageSessionId) {
-        let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string };
+        let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string; enterprisePayload?: Record<string, string> };
         try {
           payload = JSON.parse(params.payload as string);
         } catch {
@@ -615,7 +653,7 @@ export async function initCdpSession(
         const captchaType = (payload.type ?? "recaptcha-enterprise") as CaptchaType;
         const capsolverStart = Date.now();
         const userAgent = sessionUserAgents.get(sessionId);
-        solveCaptcha(captchaType, payload.siteKey, payload.url, payload.action ?? "", config.CAPSOLVER_API_KEY, userAgent)
+        solveCaptcha(captchaType, payload.siteKey, payload.url, payload.action ?? "", config.CAPSOLVER_API_KEY, userAgent, payload.enterprisePayload)
           .then(({ token, taskId }) => {
             const expr = `window.__browsermint_resolve_captcha(${JSON.stringify(payload.requestId)},${JSON.stringify(token)})`;
             sendCmd(ws, "Runtime.evaluate", { expression: expr }, pageSessionId);

@@ -714,12 +714,12 @@ function createCdpBridge(
             pgSessionId &&
             injectedSessions.has(pgSessionId)
           ) {
-            let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string } | undefined;
+            let payload: { requestId: string; type?: string; siteKey: string; action?: string; url: string; enterprisePayload?: Record<string, string> } | undefined;
             try { payload = JSON.parse(params.payload as string); } catch { /* skip malformed */ }
             if (payload) {
               const captchaType = (payload.type ?? "recaptcha-enterprise") as CaptchaType;
-              const { requestId, siteKey, url: captchaUrl, action } = payload;
-              solveCaptcha(captchaType, siteKey, captchaUrl, action ?? "", config.CAPSOLVER_API_KEY)
+              const { requestId, siteKey, url: captchaUrl, action, enterprisePayload } = payload;
+              solveCaptcha(captchaType, siteKey, captchaUrl, action ?? "", config.CAPSOLVER_API_KEY, undefined, enterprisePayload)
                 .then(({ token }) => {
                   const expr = `window.__browsermint_resolve_captcha(${JSON.stringify(requestId)},${JSON.stringify(token)})`;
                   sendToChrome({ id: nextId(), method: "Runtime.evaluate", params: { expression: expr }, sessionId: pgSessionId });
