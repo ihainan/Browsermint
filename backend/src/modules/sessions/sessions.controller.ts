@@ -149,9 +149,14 @@ export async function handleDeleteSession(
 
   clearIdleTimer(id);
 
+  // Mark as logically deleted immediately so the session disappears from list
+  // queries (which filter by deletedAt: null) before the container finishes
+  // stopping. Without this, the session stays visible during the "stopping"
+  // window and the frontend's duplicate-name check incorrectly blocks creating
+  // a new session with the same name.
   await prisma.session.update({
     where: { id },
-    data: { status: "stopping" },
+    data: { status: "stopping", deletedAt: new Date() },
   });
 
   // Close Chrome gracefully so it flushes data before container removal
@@ -165,7 +170,7 @@ export async function handleDeleteSession(
 
   await prisma.session.update({
     where: { id },
-    data: { status: "stopped", deletedAt: new Date() },
+    data: { status: "stopped" },
   });
 
   console.info(`[session] Session ${id} deleted`);

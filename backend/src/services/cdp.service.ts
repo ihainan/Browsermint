@@ -44,14 +44,12 @@ if (navigator.credentials) {
 // bot-detection libraries (Arkose Labs, DataDome, etc.) see a
 // normal desktop Chrome rather than a WebDriver-controlled browser.
 const STEALTH_SCRIPT = `
-// 1. navigator.webdriver — primary automation signal
-try {
-  Object.defineProperty(navigator, 'webdriver', {
-    get: () => false,
-    enumerable: true,
-    configurable: true,
-  });
-} catch(e) {}
+// 1. navigator.webdriver — DO NOT patch this property on the navigator instance.
+// --disable-blink-features=AutomationControlled already makes navigator.webdriver
+// return undefined at the C++ level, which matches a real non-automated browser.
+// Adding an Object.defineProperty override here would create a detectable own
+// property on the navigator instance (hasOwnProperty, getOwnPropertyDescriptor)
+// and return false instead of undefined — both are fingerprinted by X and others.
 
 // 2. window.chrome — headless Chrome lacks this object or has it empty
 try {
@@ -152,6 +150,71 @@ try {
 // Returning a plain object instead of a real PermissionStatus instance
 // breaks third-party scripts (e.g. reCAPTCHA) that check instanceof or
 // use addEventListener on the result.
+
+// hardwareConcurrency, deviceMemory, WebGL vendor/renderer — NOT patched here.
+// Steel Browser's FingerprintGenerator already injects consistent, realistic
+// random values for all three via loadFingerprintScript/injectFingerprintSafely.
+// Adding our own fixed overrides on top would create fingerprint inconsistencies
+// (e.g. fixed concurrency=8 mismatching a generated screen resolution that implies
+// different hardware) and would stomp Steel's carefully correlated values.
+
+// 5. Canvas 2D fingerprint noise
+// --use-angle=swiftshader produces deterministic pixel output for any given set of
+// drawing operations — the resulting canvas hash is constant across all sessions and
+// is listed in Castle.io / fingerprinting databases as an automation signal.
+//
+// Root cause of naive patch failing: canvas internals use premultiplied alpha.
+// Writing a pixel with alpha=0 via putImageData causes the browser to store
+// RGB=(0,0,0) regardless of the values set, so toDataURL sees no change.
+//
+// Fix:
+// • toDataURL — copy canvas to an offscreen element, draw a 1×1 near-black opaque
+//   noise pixel at (0,0) on the copy (full alpha guarantees it survives premultiply),
+//   then serialise the copy. The original canvas is never touched.
+// • getImageData — skip transparent pixels; XOR the red channel of the first
+//   opaque pixel in the returned copy only (canvas itself unchanged).
+try {
+  const _cs = (Math.random() * 0xFE | 0) + 1; // 1–255 per-session seed
+  const _origGID = CanvasRenderingContext2D.prototype.getImageData;
+  const _origTDU = HTMLCanvasElement.prototype.toDataURL;
+  let _noiseBusy = false;
+
+  // getImageData: modify the returned copy, not the canvas.
+  CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+    const img = _origGID.call(this, x, y, w, h);
+    if (!_noiseBusy && img.data.length >= 4) {
+      const limit = Math.min(img.data.length, 1024); // search up to 256 pixels
+      for (let i = 0; i < limit; i += 4) {
+        if (img.data[i + 3] > 0) { img.data[i] = img.data[i] ^ _cs; break; }
+      }
+    }
+    return img;
+  };
+
+  // toDataURL: draw canvas onto an offscreen copy, stamp a 1×1 noise pixel at
+  // (0,0) with full alpha, serialise the copy. Original canvas is untouched.
+  // Max colour is rgb(32,8,0) — visually imperceptible at the canvas corner.
+  HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+    if (_noiseBusy || this.width === 0 || this.height === 0) {
+      return _origTDU.call(this, type, quality);
+    }
+    _noiseBusy = true;
+    try {
+      const oc = document.createElement('canvas');
+      oc.width = this.width; oc.height = this.height;
+      const octx = oc.getContext('2d');
+      if (!octx) return _origTDU.call(this, type, quality);
+      octx.drawImage(this, 0, 0);
+      octx.fillStyle = 'rgb(' + ((_cs & 0x1F) + 1) + ',' + (((_cs >> 5) & 0x07) + 1) + ',0)';
+      octx.globalAlpha = 1;
+      octx.globalCompositeOperation = 'source-over';
+      octx.fillRect(0, 0, 1, 1);
+      return _origTDU.call(oc, type, quality);
+    } finally {
+      _noiseBusy = false;
+    }
+  };
+} catch(e) {}
 `.trim();
 
 // Intercepts JS captcha APIs and routes them through a CDP binding so the
@@ -163,20 +226,32 @@ try {
 // Falls back to the original API if the CDP binding is unavailable.
 const CAPTCHA_INTERCEPT_SCRIPT = `
 (function() {
-  if (window.__browsermint_captcha_patched) return;
-  window.__browsermint_captcha_patched = true;
+  // Guard stored as a non-enumerable property so it does not appear in
+  // window property scans (Object.keys, for-in, getOwnPropertyNames).
+  if (Object.getOwnPropertyDescriptor(window, '__browsermint_captcha_patched')) return;
+  Object.defineProperty(window, '__browsermint_captcha_patched', {
+    value: true, enumerable: false, configurable: false, writable: false,
+  });
 
   var pending = new Map();
 
-  window.__browsermint_resolve_captcha = function(requestId, token) {
-    var p = pending.get(requestId);
-    if (p) { pending.delete(requestId); p.resolve(token); }
-  };
+  // Non-enumerable so property scans (used by bot-detection scripts) don't
+  // find our callback names on window.
+  Object.defineProperty(window, '__browsermint_resolve_captcha', {
+    value: function(requestId, token) {
+      var p = pending.get(requestId);
+      if (p) { pending.delete(requestId); p.resolve(token); }
+    },
+    enumerable: false, configurable: true, writable: false,
+  });
 
-  window.__browsermint_reject_captcha = function(requestId, err) {
-    var p = pending.get(requestId);
-    if (p) { pending.delete(requestId); p.reject(new Error(err)); }
-  };
+  Object.defineProperty(window, '__browsermint_reject_captcha', {
+    value: function(requestId, err) {
+      var p = pending.get(requestId);
+      if (p) { pending.delete(requestId); p.reject(new Error(err)); }
+    },
+    enumerable: false, configurable: true, writable: false,
+  });
 
   function makeId() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -539,10 +614,16 @@ async function applyScriptToPage(
     pageSessionId = result.sessionId as string;
   }
 
-  // Register CDP binding so page JS can request captcha solving from backend
+  // Register CDP binding so page JS can request captcha solving from backend.
+  // Immediately after registering, make it non-enumerable so property scans
+  // (used by bot-detection scripts) do not surface it on window.
   if (config.CAPSOLVER_API_KEY) {
     const bindingId = sendCmd(ws, "Runtime.addBinding", { name: "__browsermint_solve_captcha" }, pageSessionId);
     await waitForResponse(ws, bindingId);
+    sendCmd(ws, "Runtime.evaluate", {
+      expression: `Object.defineProperty(window, '__browsermint_solve_captcha', { enumerable: false });`,
+      returnByValue: false,
+    }, pageSessionId);
   }
 
   // Enable Page domain events so we receive Page.frameNavigated notifications.
@@ -738,6 +819,10 @@ export async function initCdpSession(
       if (!frame?.parentId && pageSessionId) {
         if (config.CAPSOLVER_API_KEY) {
           sendCmd(ws, "Runtime.addBinding", { name: "__browsermint_solve_captcha" }, pageSessionId);
+          sendCmd(ws, "Runtime.evaluate", {
+            expression: `Object.defineProperty(window, '__browsermint_solve_captcha', { enumerable: false });`,
+            returnByValue: false,
+          }, pageSessionId);
         }
         sendCmd(ws, "Runtime.evaluate", { expression: COMBINED_INJECT_SCRIPT, returnByValue: false }, pageSessionId);
       }

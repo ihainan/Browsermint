@@ -681,15 +681,10 @@ function PlatformContent({
   }
 
   if (platform === "hermes") {
-    const hermesCli = `hermes mcp add cloud-browser --command npx --args "-y,chrome-devtools-mcp@latest,--wsEndpoint=${cdpUrl}"`;
     const hermesYaml = `mcp_servers:\n  cloud-browser:\n    command: "npx"\n    args: ["-y", "chrome-devtools-mcp@latest", "--wsEndpoint=${cdpUrl}"]`;
     return (
       <div className="space-y-4 text-sm text-gray-700">
         <p><RichText text={t("sessionView.connect.hermesIntro")} /></p>
-        <div>
-          <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.hermesConfigCli")} /></p>
-          <CodeBlock code={hermesCli} />
-        </div>
         <div>
           <p className="text-xs text-gray-500 mb-1"><RichText text={t("sessionView.connect.hermesConfig")} /></p>
           <CodeBlock code={hermesYaml} />

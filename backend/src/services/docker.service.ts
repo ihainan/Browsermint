@@ -39,7 +39,11 @@ export async function createAndStartContainer(
       // after the container starts (see cdp.service.ts). The --load-extension flag
       // is intentionally omitted: the Steel Browser image includes --disable-extensions
       // which silently prevents any user-loaded extension from running.
-      "CHROME_ARGS=--disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain --use-gl=angle --use-angle=swiftshader",
+      // --disable-blink-features=AutomationControlled removes the Blink-level
+      // AutomationControlled feature flag that Chrome sets when launched via CDP.
+      // Without this, navigator.webdriver is true at the C++ layer even if the
+      // JS getter is patched, and some fingerprint scripts probe deeper than JS.
+      "CHROME_ARGS=--disable-blink-features=AutomationControlled --disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain --use-gl=angle --use-angle=swiftshader",
     ],
     Entrypoint: ["/bin/sh", "-c"],
     Cmd: [
