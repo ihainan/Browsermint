@@ -152,7 +152,7 @@ function normalizeIncomingLogs(data: string): LogEntry[] {
     }));
 }
 
-type SidebarTab = "details" | "logs" | "devtools";
+type SidebarTab = "details" | "devtools";
 
 function getCachedSessionToken(sessionId: string): string | null {
   try {
@@ -1130,7 +1130,6 @@ export default function SessionViewPage() {
   const browserSrc = sessionToken ? `/api/sessions/${id}/vnc-viewer?token=${sessionToken}` : null;
   const tabs: { id: SidebarTab; label: string }[] = [
     { id: "details", label: t("sessionView.tabDetails") },
-    { id: "logs", label: t("sessionView.tabLogs") },
     { id: "devtools", label: t("sessionView.tabDevtools") },
   ];
 
@@ -1314,7 +1313,6 @@ export default function SessionViewPage() {
               onTokenRefreshed={(newToken) => { setSessionToken(newToken); setCachedSessionToken(session.id, newToken); }}
             />
           )}
-          {activeTab === "logs" && <LogsSidebar sessionId={session.id} sessionToken={sessionToken} />}
           {activeTab === "devtools" && <DevToolsSidebar sessionId={session.id} sessionToken={sessionToken} onPageIdChange={setActivePageId} />}
         </aside>
       </div>
