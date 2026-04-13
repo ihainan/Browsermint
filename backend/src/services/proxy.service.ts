@@ -1164,7 +1164,13 @@ export async function handleGoBack(
 
   const { targetId } = request.body as { targetId: string };
   try {
-    await executeCdpCommand(sessionId, "Page.goBack", {}, targetId);
+    // Page.goBack doesn't exist in CDP; use getNavigationHistory + navigateToHistoryEntry
+    const history = await executeCdpCommand(sessionId, "Page.getNavigationHistory", {}, targetId);
+    const currentIndex = history.currentIndex as number;
+    const entries = history.entries as Array<{ id: number }>;
+    if (currentIndex <= 0) return reply.status(400).send({ error: "No previous page in history" });
+    const entryId = entries[currentIndex - 1].id;
+    await executeCdpCommand(sessionId, "Page.navigateToHistoryEntry", { entryId }, targetId);
     logSessionEvent(sessionId, "go_back", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
@@ -1184,7 +1190,13 @@ export async function handleGoForward(
 
   const { targetId } = request.body as { targetId: string };
   try {
-    await executeCdpCommand(sessionId, "Page.goForward", {}, targetId);
+    // Page.goForward doesn't exist in CDP; use getNavigationHistory + navigateToHistoryEntry
+    const history = await executeCdpCommand(sessionId, "Page.getNavigationHistory", {}, targetId);
+    const currentIndex = history.currentIndex as number;
+    const entries = history.entries as Array<{ id: number }>;
+    if (currentIndex >= entries.length - 1) return reply.status(400).send({ error: "No next page in history" });
+    const entryId = entries[currentIndex + 1].id;
+    await executeCdpCommand(sessionId, "Page.navigateToHistoryEntry", { entryId }, targetId);
     logSessionEvent(sessionId, "go_forward", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
