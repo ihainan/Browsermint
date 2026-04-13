@@ -1370,21 +1370,37 @@ export async function handleVncViewer(
       if (e.data?.type === 'triggerPaste') {
         await pasteText(e.data.text || '');
       }
+      if (e.data?.type === 'setViewOnly') {
+        if (rfb) {
+          rfb.viewOnly = Boolean(e.data.value);
+          applyViewOnlyCursor(Boolean(e.data.value));
+        }
+      }
     });
 
     // Build WebSocket URL client-side to match the page protocol (ws/wss).
     const _wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const _vncWsUrl = _wsProto + '//' + window.location.host + '${vncWsPath}';
 
+    // In view-only mode, noVNC still sets cursor:none on its canvas to render the
+    // remote cursor itself. Override all descendant canvases so the system pointer
+    // is visible when the user is just watching.
+    function applyViewOnlyCursor(isViewOnly) {
+      const canvas = screenEl.querySelector('canvas');
+      if (canvas) canvas.style.cursor = isViewOnly ? 'default' : '';
+    }
+
     // Create the VNC connection (after listeners, so our keydown handler runs first)
     rfb = new RFB(screenEl, _vncWsUrl);
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
-    rfb.viewOnly = false;
+    rfb.viewOnly = true;
 
     rfb.addEventListener('connect', () => {
       statusEl.style.display = 'none';
       screenEl.focus();
+      // noVNC sets cursor:none on the canvas after connect — re-apply our override.
+      applyViewOnlyCursor(rfb.viewOnly);
     });
     rfb.addEventListener('disconnect', (e) => {
       statusEl.style.display = '';

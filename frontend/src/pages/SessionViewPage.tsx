@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionsApi, Session, SteelSessionDetails } from "../api/client.ts";
-import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Plug, ExternalLink, ChevronRight, AlertTriangle } from "lucide-react";
+import { Loader2, AlertCircle, Monitor, RefreshCw, Maximize2, X, Copy, Check, Plug, ExternalLink, ChevronRight, AlertTriangle, Lock, LockOpen } from "lucide-react";
 import { daysUntilExpiry } from "./OverviewPage.tsx";
 import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
@@ -981,6 +981,7 @@ export default function SessionViewPage() {
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
+  const [viewOnly, setViewOnly] = useState(true);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const browserContainerRef = useRef<HTMLDivElement>(null);
@@ -1017,6 +1018,14 @@ export default function SessionViewPage() {
         break;
       }
     }
+  }, []);
+
+  const toggleViewOnly = useCallback(() => {
+    setViewOnly((prev) => {
+      const next = !prev;
+      iframeRef.current?.contentWindow?.postMessage({ type: "setViewOnly", value: next }, "*");
+      return next;
+    });
   }, []);
 
   const handleContextMenuCopy = useCallback(() => {
@@ -1147,6 +1156,27 @@ export default function SessionViewPage() {
 
       <div className="flex flex-1 min-h-0">
         <div ref={browserContainerRef} className="flex-1 flex flex-col bg-white relative shadow-inner" tabIndex={-1} style={{ outline: "none" }}>
+          {browserSrc && (
+            <div
+              className={clsx(
+                "flex items-center justify-between px-3 py-2 shrink-0 text-xs font-semibold transition-colors",
+                viewOnly
+                  ? "bg-amber-500 text-white"
+                  : "bg-emerald-600 text-white"
+              )}
+            >
+              <span className="flex items-center gap-1.5">
+                {viewOnly ? <Lock size={12} /> : <LockOpen size={12} />}
+                {viewOnly ? t("sessionView.viewOnlyMode") : t("sessionView.interactiveMode")}
+              </span>
+              <button
+                onClick={toggleViewOnly}
+                className="px-2.5 py-0.5 rounded-full bg-white/20 hover:bg-white/35 text-white text-xs font-semibold transition-colors shrink-0"
+              >
+                {viewOnly ? t("sessionView.enableInteraction") : t("sessionView.disableInteraction")}
+              </button>
+            </div>
+          )}
           <div className="flex-1 relative">
           {session.status === "creating" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
@@ -1218,7 +1248,7 @@ export default function SessionViewPage() {
           {browserSrc && (
             <div className="absolute bottom-3 right-3 flex items-center gap-1.5">
               <button
-                onClick={() => setIframeKey((k) => k + 1)}
+                onClick={() => { setIframeKey((k) => k + 1); setViewOnly(true); }}
                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/90 hover:bg-white text-gray-500 hover:text-gray-900 border border-slate-200 backdrop-blur-sm transition-colors shadow-sm"
                 title={t("sessionView.reloadBrowser")}
               >
