@@ -314,7 +314,7 @@ export default function BrowsersPage() {
     createMutation.mutate(trimmed);
   }
 
-  const nameError = newSessionName ? getNameValidationError(newSessionName) : "";
+  const nameError = newSessionName && !createMutation.isPending ? getNameValidationError(newSessionName) : "";
   const canCreate = !createMutation.isPending && !getNameValidationError(newSessionName);
 
   const filtered =

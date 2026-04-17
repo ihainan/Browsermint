@@ -160,7 +160,7 @@ export default function SessionsPage() {
     setNewSessionName("");
   }
 
-  const nameError = newSessionName ? getNameValidationError(newSessionName) : "";
+  const nameError = newSessionName && !createMutation.isPending ? getNameValidationError(newSessionName) : "";
   const canCreate = !createMutation.isPending && !getNameValidationError(newSessionName);
 
   const avatarColor = getAvatarColor(user?.username ?? "");
