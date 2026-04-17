@@ -30,6 +30,8 @@ const envSchema = z.object({
   // Set to false when serving over plain HTTP (e.g. no TLS terminator in front).
   // Defaults to true in production so the auth cookie is Secure by default.
   COOKIE_SECURE: boolEnv(true),
+  // Expiry for session WebSocket JWT tokens (e.g. "180d", "365d", "30d").
+  SESSION_TOKEN_EXPIRY: z.string().default("180d"),
 });
 
 const parsed = envSchema.safeParse(process.env);
