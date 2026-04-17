@@ -525,7 +525,7 @@ export async function handleCreateSessionToken(
   const token = jwt.sign(
     { sub: request.user.sub, sessionId: id, type: "session" },
     config.JWT_SESSION_TOKEN_SECRET,
-    { expiresIn: config.SESSION_TOKEN_EXPIRY }
+    { expiresIn: config.SESSION_TOKEN_EXPIRY as import("ms").StringValue }
   );
 
   return reply.send({ token });
@@ -551,7 +551,7 @@ export async function handleRefreshSessionToken(
   const token = jwt.sign(
     { sub: request.user.sub, sessionId: id, type: "session" },
     config.JWT_SESSION_TOKEN_SECRET,
-    { expiresIn: config.SESSION_TOKEN_EXPIRY }
+    { expiresIn: config.SESSION_TOKEN_EXPIRY as import("ms").StringValue }
   );
 
   // Decode to get the exact iat so we can reject tokens issued before this one.
