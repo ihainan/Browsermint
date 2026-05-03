@@ -344,3 +344,89 @@ test("VNC viewer and clipboard routes validate tokens and target the session con
     await closeApp(app);
   }
 });
+
+test("DevTools proxy resolves page targets, rewrites ws parameter, and stores token cookie", async () => {
+  const originalFetch = globalThis.fetch;
+  const token = sessionToken();
+  const requestedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url.includes("/json/list")) {
+      return Response.json([
+        { id: "page-1", type: "page", webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/page/page-1" },
+        { id: "page-2", type: "page", webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/page/page-2" },
+        { id: "worker-1", type: "worker", webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/worker/worker-1" },
+      ]);
+    }
+    return new Response("<html>devtools</html>", {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  };
+
+  const { app, prisma } = await makeApp();
+  try {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-running/devtools/devtools_app.html?token=${encodeURIComponent(token)}&pageId=page-2`,
+      headers: { host: "browsermint.example" },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body, "<html>devtools</html>");
+    assert.equal(res.headers["cache-control"], "no-store");
+    assert.match(String(res.headers["content-type"]), /text\/html/);
+    assert.match(String(res.headers["set-cookie"]), /browsermint_devtools_session-running=/);
+    assert.match(String(res.headers["set-cookie"]), /HttpOnly/);
+
+    assert.equal(requestedUrls.length, 2);
+    assert.match(requestedUrls[0], /\/json\/list$/);
+    const upstream = new URL(requestedUrls[1]);
+    assert.equal(upstream.pathname, "/devtools/devtools_app.html");
+    assert.match(
+      upstream.searchParams.get("ws") ?? "",
+      /^\/\/browsermint\.example\/ws\/sessions\/session-running\/cdp\/devtools\/page\/page-2\?token=/
+    );
+    assert.deepEqual(prisma.__events.at(-1), {
+      sessionId: "session-running",
+      operationType: "devtools",
+      sourceIp: "127.0.0.1",
+      requestPath: "/api/sessions/session-running/devtools/devtools_app.html?pageId=page-2",
+      statusCode: 200,
+      metadata: undefined,
+      source: "frontend",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    await closeApp(app);
+  }
+});
+
+test("DevTools target route returns the first available page target path", async () => {
+  const originalFetch = globalThis.fetch;
+  const token = sessionToken();
+  globalThis.fetch = async () => Response.json([
+    { id: "worker-1", type: "worker", webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/worker/worker-1" },
+    { id: "page-1", type: "page", webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/page/page-1" },
+  ]);
+
+  const { app } = await makeApp();
+  try {
+    const missingToken = await app.inject({
+      method: "GET",
+      url: "/api/sessions/session-running/devtools-target",
+    });
+    assert.equal(missingToken.statusCode, 401);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-running/devtools-target?token=${encodeURIComponent(token)}`,
+    });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), { pageId: "page-1", wsPath: "/devtools/page/page-1" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    await closeApp(app);
+  }
+});
