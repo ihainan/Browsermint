@@ -77,7 +77,9 @@ function makePrismaMock(options: {
     user: {
       findUnique: async (args: { where: { id?: string }; select?: Record<string, unknown> }) => {
         if (args.where.id !== owner.id) return null;
-        if (args.select?.isActive) return { isActive: owner.isActive };
+        if (args.select) {
+          return Object.fromEntries(Object.keys(args.select).map((key) => [key, owner[key as keyof typeof owner]]));
+        }
         return { ...owner };
       },
     },

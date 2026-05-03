@@ -42,10 +42,10 @@ export async function authMiddleware(
     const payload = jwt.verify(token, config.JWT_SECRET) as JwtPayload;
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { isActive: true },
+      select: { isActive: true, isAdmin: true },
     });
     if (!user?.isActive) return reply.status(401).send({ error: "Unauthorized" });
-    request.user = payload;
+    request.user = { ...payload, isAdmin: user.isAdmin };
   } catch {
     return reply.status(401).send({ error: "Unauthorized" });
   }

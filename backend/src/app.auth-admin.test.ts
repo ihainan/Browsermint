@@ -277,6 +277,54 @@ test("admin routes reject non-admin users and protect self/last-admin updates", 
   }
 });
 
+test("admin middleware rejects stale admin cookies after demotion", async () => {
+  const { app } = await makeApp();
+  try {
+    const owner = await register(app, "owner", "owner@example.com");
+    const ownerCookie = authCookie(owner);
+
+    const createdAdmin = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: { cookie: ownerCookie },
+      payload: {
+        username: "admin2",
+        email: "admin2@example.com",
+        password: "AdminPass123!",
+        isAdmin: true,
+      },
+    });
+    assert.equal(createdAdmin.statusCode, 201);
+    const adminId = createdAdmin.json().user.id as string;
+
+    const adminLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "admin2@example.com", password: "AdminPass123!" },
+    });
+    assert.equal(adminLogin.statusCode, 200);
+    const staleAdminCookie = authCookie(adminLogin);
+
+    const demote = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${adminId}`,
+      headers: { cookie: ownerCookie },
+      payload: { isAdmin: false },
+    });
+    assert.equal(demote.statusCode, 200);
+    assert.equal(demote.json().user.isAdmin, false);
+
+    const staleAdminRequest = await app.inject({
+      method: "GET",
+      url: "/api/admin/users",
+      headers: { cookie: staleAdminCookie },
+    });
+    assert.equal(staleAdminRequest.statusCode, 403);
+  } finally {
+    await app.close();
+  }
+});
+
 test("admin user creation validates payload and applies default session limits", async () => {
   const { app } = await makeApp();
   try {
@@ -316,6 +364,113 @@ test("admin user creation validates payload and applies default session limits",
     const passwordHash = storedUser.__users.find((item) => item.email === "member@example.com")?.passwordHash;
     assert.ok(passwordHash);
     assert.equal(await bcrypt.compare("MemberPass123!", passwordHash), true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("admin password reset validates payload and updates login credentials", async () => {
+  const { app, prisma } = await makeApp();
+  try {
+    const owner = await register(app, "owner", "owner@example.com");
+    const ownerCookie = authCookie(owner);
+
+    const user = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: { cookie: ownerCookie },
+      payload: {
+        username: "member",
+        email: "member@example.com",
+        password: "MemberPass123!",
+        isAdmin: false,
+      },
+    });
+    assert.equal(user.statusCode, 201);
+    const userId = user.json().user.id as string;
+
+    const weak = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${userId}/reset-password`,
+      headers: { cookie: ownerCookie },
+      payload: { password: "short" },
+    });
+    assert.equal(weak.statusCode, 400);
+
+    const reset = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${userId}/reset-password`,
+      headers: { cookie: ownerCookie },
+      payload: { password: "NewPass123!" },
+    });
+    assert.equal(reset.statusCode, 200);
+    assert.deepEqual(reset.json(), { success: true });
+
+    const storedHash = prisma.__users.find((item) => item.id === userId)?.passwordHash;
+    assert.ok(storedHash);
+    assert.equal(await bcrypt.compare("NewPass123!", storedHash), true);
+
+    const oldLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "member@example.com", password: "MemberPass123!" },
+    });
+    assert.equal(oldLogin.statusCode, 401);
+
+    const newLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "member@example.com", password: "NewPass123!" },
+    });
+    assert.equal(newLogin.statusCode, 200);
+  } finally {
+    await app.close();
+  }
+});
+
+test("admin user deletion protects self and removes other users", async () => {
+  const { app, prisma } = await makeApp();
+  try {
+    const owner = await register(app, "owner", "owner@example.com");
+    const ownerCookie = authCookie(owner);
+    const ownerId = owner.json().user.id as string;
+
+    const selfDelete = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/users/${ownerId}`,
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(selfDelete.statusCode, 400);
+    assert.equal(selfDelete.json().error, "Cannot delete your own account");
+
+    const user = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: { cookie: ownerCookie },
+      payload: {
+        username: "member",
+        email: "member@example.com",
+        password: "MemberPass123!",
+        isAdmin: false,
+      },
+    });
+    assert.equal(user.statusCode, 201);
+    const userId = user.json().user.id as string;
+
+    const missing = await app.inject({
+      method: "DELETE",
+      url: "/api/admin/users/missing-user",
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(missing.statusCode, 404);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/users/${userId}`,
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(deleted.statusCode, 204);
+    assert.equal(prisma.__users.some((item) => item.id === userId), false);
   } finally {
     await app.close();
   }
