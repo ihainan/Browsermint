@@ -39,13 +39,15 @@ function sessionToken(sessionId = "session-running") {
   );
 }
 
-function makePrismaMock() {
+function makePrismaMock(options: { userActive?: boolean } = {}) {
   const events: unknown[] = [];
+  const userActive = options.userActive ?? true;
   const prisma = {
     session: {
-      findFirst: async (args: { where: { id?: string; userId?: string; deletedAt?: null; status?: { in: string[] } }; select?: Record<string, unknown> }) => {
+      findFirst: async (args: { where: { id?: string; userId?: string; user?: { isActive?: boolean }; deletedAt?: null; status?: { in: string[] } }; select?: Record<string, unknown> }) => {
         if (args.where.id !== "session-running") return null;
         if (args.where.userId !== owner.id) return null;
+        if (args.where.user?.isActive === true && !userActive) return null;
         const session = {
           id: "session-running",
           containerName: "browsermint-session-running",
@@ -75,8 +77,8 @@ function makePrismaMock() {
   return prisma as unknown as AppPrismaClient & { __events: unknown[] };
 }
 
-async function makeApp() {
-  const prisma = makePrismaMock();
+async function makeApp(options: { userActive?: boolean } = {}) {
+  const prisma = makePrismaMock(options);
   const calls: Array<{ sessionId: string; method: string; params: Record<string, unknown>; targetId?: string }> = [];
   const dockerCalls: Array<{ containerId: string; text: string }> = [];
   setPrismaForTests(prisma);
@@ -162,6 +164,23 @@ test("session target routes validate tokens, call CDP, and sanitize logged token
       params: { url: "https://example.org" },
       targetId: undefined,
     });
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("session proxy routes reject tokens for suspended users", async () => {
+  const { app, calls } = await makeApp({ userActive: false });
+  const token = sessionToken();
+  try {
+    const targets = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-running/targets?token=${encodeURIComponent(token)}`,
+    });
+
+    assert.equal(targets.statusCode, 401);
+    assert.equal(targets.json().error, "Invalid token");
+    assert.equal(calls.length, 0);
   } finally {
     await closeApp(app);
   }

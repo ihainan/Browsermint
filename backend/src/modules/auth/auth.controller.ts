@@ -78,7 +78,7 @@ export async function handleLogin(
   const hash = user?.passwordHash ?? "$2b$12$invalidhashfortimingattackprevention";
   const valid = await bcrypt.compare(password, hash);
 
-  if (!user || !valid) {
+  if (!user || !user.isActive || !valid) {
     return reply.status(401).send({ error: AUTH_ERROR_MSG });
   }
 

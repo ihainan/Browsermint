@@ -19,6 +19,7 @@ const {
   getIncomingMessageIp,
   getWebSocketSource,
   parseSessionWebSocketPath,
+  proxyServer,
   rewriteUpstreamWebSocketUrl,
   sanitizeRequestPath,
 } = await import("./proxy.service.js");
@@ -68,29 +69,50 @@ function setProxyPrismaMock(session: {
   containerName?: string | null;
   internalApiUrl?: string | null;
   tokenIssuedAt?: Date | null;
+  userActive?: boolean;
 } | null) {
+  const events: Array<Record<string, unknown>> = [];
+  const updates: Array<Record<string, unknown>> = [];
   const prisma = {
     session: {
-      findFirst: async () => session ? {
-        id: session.id ?? "session-running",
-        status: session.status ?? "running",
-        containerId: "containerId" in session ? session.containerId : "container-running",
-        containerName: "containerName" in session ? session.containerName : "browsermint-session-running",
-        internalApiUrl: "internalApiUrl" in session ? session.internalApiUrl : "http://127.0.0.1:3000",
-        tokenIssuedAt: "tokenIssuedAt" in session ? session.tokenIssuedAt : null,
-      } : null,
-      update: async () => ({}),
+      findFirst: async (args?: { where?: { user?: { isActive?: boolean } } }) => {
+        if (!session) return null;
+        if (args?.where?.user?.isActive === true && session.userActive === false) return null;
+        return {
+          id: session.id ?? "session-running",
+          status: session.status ?? "running",
+          containerId: "containerId" in session ? session.containerId : "container-running",
+          containerName: "containerName" in session ? session.containerName : "browsermint-session-running",
+          internalApiUrl: "internalApiUrl" in session ? session.internalApiUrl : "http://127.0.0.1:3000",
+          tokenIssuedAt: "tokenIssuedAt" in session ? session.tokenIssuedAt : null,
+        };
+      },
+      update: async (args: Record<string, unknown>) => {
+        updates.push(args);
+        return {};
+      },
+    },
+    sessionEvent: {
+      create: async (args: { data: Record<string, unknown> }) => {
+        events.push(args.data);
+        return {};
+      },
     },
     $on: () => {},
     $disconnect: async () => {},
   };
   setPrismaForTests(prisma as unknown as AppPrismaClient);
+  return { events, updates };
 }
 
 test("sanitizeRequestPath removes token without dropping other query params", () => {
   assert.equal(sanitizeRequestPath("/api/sessions/s1/details?token=secret&page=1"), "/api/sessions/s1/details?page=1");
   assert.equal(sanitizeRequestPath("/api/sessions/s1/details?page=1&token=secret"), "/api/sessions/s1/details?page=1");
   assert.equal(sanitizeRequestPath("/api/sessions/s1/details?token=secret"), "/api/sessions/s1/details");
+  assert.equal(
+    sanitizeRequestPath("/ws/sessions/s1/cast?token=secret?pageId=p1&pageIndex=2"),
+    "/ws/sessions/s1/cast?pageId=p1&pageIndex=2"
+  );
 });
 
 test("getRequestProtocols trusts forwarded proto before origin or referer", () => {
@@ -211,4 +233,80 @@ test("handleWebSocketUpgrade rejects unavailable and malformed paused sessions b
     Buffer.alloc(0)
   );
   assert.equal(pausedWithoutContainerSocket.destroyCalled, true);
+});
+
+test("handleWebSocketUpgrade rejects tokens for suspended users", async () => {
+  setProxyPrismaMock({ status: "running", userActive: false });
+  const socket = new TestSocket();
+
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cast?token=${encodeURIComponent(makeSessionToken())}`),
+    socket,
+    Buffer.alloc(0)
+  );
+
+  assert.equal(socket.destroyCalled, true);
+});
+
+test("handleWebSocketUpgrade proxies non-CDP websocket routes with rewritten upstream paths", async () => {
+  const { events, updates } = setProxyPrismaMock({
+    status: "running",
+    internalApiUrl: "http://10.0.0.5:3000",
+  });
+  const calls: Array<{ url: string | undefined; target: unknown }> = [];
+  const originalWs = proxyServer.ws;
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = false;
+  proxyServer.ws = ((request: IncomingMessage, socket: Duplex, _head: Buffer, options: { target?: unknown }) => {
+    calls.push({ url: request.url, target: options.target });
+    socket.emit("close");
+  }) as typeof proxyServer.ws;
+
+  try {
+    const token = encodeURIComponent(makeSessionToken());
+    const cases = [
+      {
+        path: `/ws/sessions/session-running/cast?token=${token}?pageId=page-1&pageIndex=2&tabInfo=true`,
+        expectedUrl: "/v1/sessions/cast?pageId=page-1&pageIndex=2&tabInfo=true",
+        expectedTarget: "http://10.0.0.5:3000",
+      },
+      {
+        path: `/ws/sessions/session-running/logs?token=${token}`,
+        expectedUrl: "/v1/sessions/logs",
+        expectedTarget: "http://10.0.0.5:3000",
+      },
+      {
+        path: `/ws/sessions/session-running/pageId?token=${token}`,
+        expectedUrl: "/v1/sessions/pageId",
+        expectedTarget: "http://10.0.0.5:3000",
+      },
+      {
+        path: `/ws/sessions/session-running/vnc?token=${token}`,
+        expectedUrl: "/",
+        expectedTarget: "http://10.0.0.5:6080",
+      },
+    ];
+
+    for (const item of cases) {
+      const socket = new TestSocket();
+      await handleWebSocketUpgrade(makeWsRequest(item.path), socket, Buffer.alloc(0));
+      assert.equal(socket.destroyCalled, false);
+    }
+
+    assert.deepEqual(calls, cases.map((item) => ({
+      url: item.expectedUrl,
+      target: item.expectedTarget,
+    })));
+    assert.equal(updates.length, cases.length);
+    assert.deepEqual(events.map((event) => event.operationType), [
+      "ws_cast",
+      "ws_logs",
+      "ws_pageId",
+      "ws_vnc",
+    ]);
+    assert.equal(events[0].requestPath, "/ws/sessions/session-running/cast?pageId=page-1&pageIndex=2&tabInfo=true");
+  } finally {
+    proxyServer.ws = originalWs;
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+  }
 });

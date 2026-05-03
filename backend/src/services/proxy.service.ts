@@ -83,6 +83,7 @@ async function getSessionProxyContext(
     where: {
       id: sessionId,
       userId: payload.userId,
+      user: { isActive: true },
       deletedAt: null,
       status: { in: ["running", "paused"] },
     },
@@ -241,12 +242,16 @@ async function updateLastActiveAt(sessionId: string) {
 
 /** Remove the `token` query parameter from a URL before storing it in the DB. */
 export function sanitizeRequestPath(url: string): string {
+  const firstQueryIndex = url.indexOf("?");
+  const normalizedUrl = firstQueryIndex === -1
+    ? url
+    : url.slice(0, firstQueryIndex + 1) + url.slice(firstQueryIndex + 1).replace(/\?/g, "&");
   try {
-    const u = new URL(url, "http://localhost");
+    const u = new URL(normalizedUrl, "http://localhost");
     u.searchParams.delete("token");
     return u.pathname + (u.search || "");
   } catch {
-    return url.replace(/([?&])token=[^&]*/g, "$1").replace(/[?&]$/, "");
+    return normalizedUrl.replace(/([?&])token=[^&]*/g, "$1").replace(/[?&]$/, "");
   }
 }
 
@@ -893,6 +898,7 @@ export async function handleWebSocketUpgrade(
     where: {
       id: sessionId,
       userId: payload.userId,
+      user: { isActive: true },
       deletedAt: null,
       status: { in: ["running", "paused"] },
     },

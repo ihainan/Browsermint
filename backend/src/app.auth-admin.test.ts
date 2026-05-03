@@ -372,6 +372,48 @@ test("admin middleware rejects stale admin cookies after demotion", async () => 
   }
 });
 
+test("login rejects suspended users without issuing a fresh auth cookie", async () => {
+  const { app } = await makeApp();
+  try {
+    const owner = await register(app, "owner", "owner@example.com");
+    const ownerCookie = authCookie(owner);
+
+    const createdUser = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: { cookie: ownerCookie },
+      payload: {
+        username: "member",
+        email: "member@example.com",
+        password: "MemberPass123!",
+        isAdmin: false,
+      },
+    });
+    assert.equal(createdUser.statusCode, 201);
+    const userId = createdUser.json().user.id as string;
+
+    const suspended = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${userId}`,
+      headers: { cookie: ownerCookie },
+      payload: { isActive: false },
+    });
+    assert.equal(suspended.statusCode, 200);
+    assert.equal(suspended.json().user.isActive, false);
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "member@example.com", password: "MemberPass123!" },
+    });
+    assert.equal(login.statusCode, 401);
+    assert.equal(login.json().error, "Invalid email or password");
+    assert.equal(login.headers["set-cookie"], undefined);
+  } finally {
+    await app.close();
+  }
+});
+
 test("admin user creation validates payload and applies default session limits", async () => {
   const { app } = await makeApp();
   try {
