@@ -275,7 +275,7 @@ function logSessionEvent(
 // Returns "frontend" if the HTTP request carries the Browsermint frontend marker,
 // otherwise "agent". The frontend axios client sets X-Browsermint-Client: frontend
 // on every request, which agents won't do.
-function getHttpSource(request: Pick<FastifyRequest, "headers"> | IncomingMessage): string {
+export function getHttpSource(request: Pick<FastifyRequest, "headers"> | IncomingMessage): string {
   const header = request.headers["x-browsermint-client"];
   const value = Array.isArray(header) ? header[0] : header;
   return value === "frontend" ? "frontend" : "agent";
@@ -285,7 +285,7 @@ function getHttpSource(request: Pick<FastifyRequest, "headers"> | IncomingMessag
 // served by Browsermint (same-origin), otherwise "agent".
 // Browsers automatically include an Origin header on WebSocket upgrades;
 // non-browser clients (scripts, SDKs) typically omit it or send a different host.
-function getWebSocketSource(request: IncomingMessage): string {
+export function getWebSocketSource(request: Pick<IncomingMessage, "headers">): string {
   const origin = request.headers["origin"];
   const host = request.headers["host"];
   if (!origin || !host) return "agent";
@@ -296,7 +296,7 @@ function getWebSocketSource(request: IncomingMessage): string {
   }
 }
 
-function getIncomingMessageIp(request: IncomingMessage): string | null {
+export function getIncomingMessageIp(request: Pick<IncomingMessage, "headers" | "socket">): string | null {
   const forwarded = request.headers["x-forwarded-for"];
   if (forwarded) {
     const first = Array.isArray(forwarded) ? forwarded[0] : forwarded.split(",")[0];

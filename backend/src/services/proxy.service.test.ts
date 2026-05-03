@@ -10,6 +10,9 @@ Object.assign(process.env, {
 
 const {
   getRequestProtocols,
+  getHttpSource,
+  getIncomingMessageIp,
+  getWebSocketSource,
   parseSessionWebSocketPath,
   rewriteUpstreamWebSocketUrl,
   sanitizeRequestPath,
@@ -54,4 +57,31 @@ test("rewriteUpstreamWebSocketUrl keeps CDP subpath while routing through Browse
   );
 
   assert.equal(rewritten, "wss://browsermint.example/ws/sessions/session-1/cdp/devtools/page/abc?token=session-token");
+});
+
+test("source helpers classify frontend and agent traffic", () => {
+  assert.equal(getHttpSource({ headers: { "x-browsermint-client": "frontend" } }), "frontend");
+  assert.equal(getHttpSource({ headers: {} }), "agent");
+
+  assert.equal(getWebSocketSource({ headers: { origin: "https://browsermint.example", host: "browsermint.example" } }), "frontend");
+  assert.equal(getWebSocketSource({ headers: { origin: "https://agent.example", host: "browsermint.example" } }), "agent");
+  assert.equal(getWebSocketSource({ headers: { host: "browsermint.example" } }), "agent");
+});
+
+test("getIncomingMessageIp prefers x-forwarded-for before socket address", () => {
+  assert.equal(
+    getIncomingMessageIp({
+      headers: { "x-forwarded-for": "203.0.113.10, 10.0.0.1" },
+      socket: { remoteAddress: "10.0.0.2" },
+    } as never),
+    "203.0.113.10"
+  );
+
+  assert.equal(
+    getIncomingMessageIp({
+      headers: {},
+      socket: { remoteAddress: "10.0.0.2" },
+    } as never),
+    "10.0.0.2"
+  );
 });
