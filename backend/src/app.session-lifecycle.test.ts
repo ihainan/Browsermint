@@ -334,6 +334,38 @@ test("POST /api/sessions fails and cleans up when initial CDP initialization ret
   }
 });
 
+test("POST /api/sessions cleans up CDP and container when deleted during creation", async () => {
+  const { app, prisma, calls } = await makeApp();
+  setCdpServiceOverridesForTests({
+    initCdpSession: async (sessionId, internalApiUrl) => {
+      calls.push(`cdp:init:delete:${sessionId}:${internalApiUrl}`);
+      prisma.__sessions[0].deletedAt = new Date();
+      return true;
+    },
+    cleanupCdpSession: (sessionId) => {
+      calls.push(`cdp:cleanup:${sessionId}`);
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { cookie: authCookie() },
+      payload: {},
+    });
+
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().error, "Session was deleted during creation");
+    assert.equal(prisma.__sessions[0].deletedAt instanceof Date, true);
+    assert.ok(calls.some((call) => call.startsWith("cdp:init:delete:")));
+    assert.ok(calls.some((call) => call.startsWith("cdp:cleanup:")));
+    assert.ok(calls.some((call) => call.startsWith("docker:remove:")));
+  } finally {
+    await closeApp(app);
+  }
+});
+
 test("POST /api/sessions enforces maxSessions before starting Docker work", async () => {
   const { app, calls } = await makeApp([
     makeSession({ id: "session-running", status: "running" }),
@@ -537,6 +569,47 @@ test("POST /api/sessions/:id/start falls back to a fresh container on stale Dock
     assert.ok(calls.includes("docker:start:404:container-stale"));
     assert.ok(calls.includes("docker:remove:container-stale"));
     assert.ok(calls.includes("docker:create:fallback:session-stale"));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/start removes container and cleans up CDP when deleted during startup", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({
+      id: "session-deleted-start",
+      status: "stopped",
+      containerId: null,
+      containerName: null,
+      internalApiUrl: null,
+      runningStartedAt: null,
+    }),
+  ]);
+  setCdpServiceOverridesForTests({
+    initCdpSession: async (sessionId, internalApiUrl) => {
+      calls.push(`cdp:init:delete:${sessionId}:${internalApiUrl}`);
+      prisma.__sessions[0].deletedAt = new Date();
+      return true;
+    },
+    cleanupCdpSession: (sessionId) => {
+      calls.push(`cdp:cleanup:${sessionId}`);
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-deleted-start/start",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().error, "Session was deleted during startup");
+    assert.equal(prisma.__sessions[0].deletedAt instanceof Date, true);
+    assert.ok(calls.includes("docker:create:session-deleted-start"));
+    assert.ok(calls.includes("docker:remove:container-session-deleted-start"));
+    assert.ok(calls.includes("cdp:cleanup:session-deleted-start"));
+    assert.equal(calls.some((call) => call === "docker:stop:container-session-deleted-start"), false);
   } finally {
     await closeApp(app);
   }

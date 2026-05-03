@@ -82,6 +82,7 @@ export async function handleCreateSession(
     // Session may have been deleted by the user while container was starting
     const current = await prisma.session.findUnique({ where: { id: sessionId } });
     if (!current || current.deletedAt) {
+      cleanupCdpSession(sessionId);
       await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during creation" });
     }
@@ -359,7 +360,8 @@ export async function handleStartSession(
 
     const current = await prisma.session.findUnique({ where: { id } });
     if (!current || current.deletedAt) {
-      await stopContainer(containerInfo.containerId).catch(() => {});
+      cleanupCdpSession(id);
+      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during startup" });
     }
 
