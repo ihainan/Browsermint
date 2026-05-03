@@ -18,6 +18,10 @@ const {
   resetCdpServiceOverridesForTests,
   setCdpServiceOverridesForTests,
 } = await import("./services/cdp.service.js");
+const {
+  resetDockerServiceOverridesForTests,
+  setDockerServiceOverridesForTests,
+} = await import("./services/docker.service.js");
 
 const owner = {
   id: "user-owner",
@@ -51,6 +55,10 @@ function makePrismaMock() {
         if (!args.select) return session;
         return Object.fromEntries(Object.keys(args.select).map((key) => [key, session[key as keyof typeof session]]));
       },
+      findUnique: async (args: { where: { id: string } }) => {
+        if (args.where.id !== "session-running") return null;
+        return { id: "session-running", containerId: "container-running" };
+      },
       update: async () => ({}),
     },
     sessionEvent: {
@@ -70,6 +78,7 @@ function makePrismaMock() {
 async function makeApp() {
   const prisma = makePrismaMock();
   const calls: Array<{ sessionId: string; method: string; params: Record<string, unknown>; targetId?: string }> = [];
+  const dockerCalls: Array<{ containerId: string; text: string }> = [];
   setPrismaForTests(prisma);
   setCdpServiceOverridesForTests({
     executeCdpCommand: async (sessionId, method, params = {}, targetId) => {
@@ -90,13 +99,19 @@ async function makeApp() {
       return {};
     },
   });
+  setDockerServiceOverridesForTests({
+    setContainerClipboard: async (containerId, text) => {
+      dockerCalls.push({ containerId, text });
+    },
+  });
   const app = await createApp({ logger: false, serveStatic: false });
-  return { app, prisma, calls };
+  return { app, prisma, calls, dockerCalls };
 }
 
 async function closeApp(app: Awaited<ReturnType<typeof createApp>>) {
   await app.close();
   resetCdpServiceOverridesForTests();
+  resetDockerServiceOverridesForTests();
 }
 
 test("session target routes validate tokens, call CDP, and sanitize logged token paths", async () => {
@@ -287,6 +302,45 @@ test("details proxy rewrites CDP websocket/debugger URLs and reflects token expi
     assert.match(res.json().tokenExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
   } finally {
     globalThis.fetch = originalFetch;
+    await closeApp(app);
+  }
+});
+
+test("VNC viewer and clipboard routes validate tokens and target the session container", async () => {
+  const token = sessionToken();
+  const { app, dockerCalls } = await makeApp();
+  try {
+    const missingToken = await app.inject({
+      method: "GET",
+      url: "/api/sessions/session-running/vnc-viewer",
+    });
+    assert.equal(missingToken.statusCode, 401);
+
+    const viewer = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-running/vnc-viewer?token=${encodeURIComponent(token)}`,
+    });
+    assert.equal(viewer.statusCode, 200);
+    assert.match(viewer.body, /\/ws\/sessions\/session-running\/vnc\?token=/);
+    assert.match(viewer.body, /\/api\/sessions\/session-running\/clipboard\?token=/);
+    assert.equal(viewer.headers["x-frame-options"], "SAMEORIGIN");
+
+    const missingText = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/clipboard?token=${encodeURIComponent(token)}`,
+      payload: { text: "" },
+    });
+    assert.equal(missingText.statusCode, 400);
+
+    const clipboard = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/clipboard?token=${encodeURIComponent(token)}`,
+      payload: { text: "copy me" },
+    });
+    assert.equal(clipboard.statusCode, 200);
+    assert.deepEqual(clipboard.json(), { ok: true });
+    assert.deepEqual(dockerCalls, [{ containerId: "container-running", text: "copy me" }]);
+  } finally {
     await closeApp(app);
   }
 });

@@ -23,6 +23,7 @@ type DockerServiceOverrides = Partial<{
   startExistingContainer: (containerId: string) => Promise<ContainerInfo>;
   stopAndRemoveContainer: (containerId: string) => Promise<void>;
   listContainers: () => Promise<Docker.ContainerInfo[]>;
+  setContainerClipboard: (containerId: string, text: string) => Promise<void>;
 }>;
 
 let dockerServiceOverrides: DockerServiceOverrides = {};
@@ -427,6 +428,9 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
 // This is the reliable way to paste text into Chrome running in the container —
 // ClientCutText (VNC clipboard) only sets PRIMARY, which Chrome's Ctrl+V ignores.
 export async function setContainerClipboard(containerId: string, text: string): Promise<void> {
+  if (dockerServiceOverrides.setContainerClipboard) {
+    return dockerServiceOverrides.setContainerClipboard(containerId, text);
+  }
   const container = docker.getContainer(containerId);
   const exec = await container.exec({
     Cmd: ["sh", "-c", "cat | DISPLAY=:10 xclip -selection clipboard -i"],
