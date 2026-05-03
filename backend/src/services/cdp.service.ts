@@ -547,6 +547,30 @@ export const COMBINED_INJECT_SCRIPT = STEALTH_SCRIPT + "\n\n" + PASSKEY_OVERRIDE
 const activeSessions = new Map<string, WebSocket>();
 const sessionUserAgents = new Map<string, string>();
 
+type CdpServiceOverrides = Partial<{
+  initCdpSession: (sessionId: string, internalApiUrl: string) => Promise<boolean>;
+  closeBrowserGracefully: (sessionId: string, timeoutMs?: number) => Promise<boolean>;
+  getOpenPageUrls: (sessionId: string) => Promise<string[]>;
+  openSavedTabs: (sessionId: string, urls: string[]) => Promise<void>;
+  cleanupCdpSession: (sessionId: string) => void;
+}>;
+
+let cdpServiceOverrides: CdpServiceOverrides = {};
+
+export function setCdpServiceOverridesForTests(overrides: CdpServiceOverrides): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setCdpServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  cdpServiceOverrides = overrides;
+}
+
+export function resetCdpServiceOverridesForTests(): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("resetCdpServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  cdpServiceOverrides = {};
+}
+
 let msgIdCounter = 1;
 
 function sendCmd(
@@ -658,6 +682,9 @@ export async function initCdpSession(
   sessionId: string,
   internalApiUrl: string
 ): Promise<boolean> {
+  if (cdpServiceOverrides.initCdpSession) {
+    return cdpServiceOverrides.initCdpSession(sessionId, internalApiUrl);
+  }
   // Extract container IP from internalApiUrl (e.g. http://192.168.x.x:3000)
   const url = new URL(internalApiUrl);
   const containerIp = url.hostname;
@@ -898,6 +925,9 @@ export async function closeBrowserGracefully(
   sessionId: string,
   timeoutMs = 8000
 ): Promise<boolean> {
+  if (cdpServiceOverrides.closeBrowserGracefully) {
+    return cdpServiceOverrides.closeBrowserGracefully(sessionId, timeoutMs);
+  }
   const ws = activeSessions.get(sessionId);
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
 
@@ -921,6 +951,9 @@ export async function closeBrowserGracefully(
 // Returns the URLs of all real (http/https) pages currently open in the browser.
 // Used to save tab state before stopping a session.
 export async function getOpenPageUrls(sessionId: string): Promise<string[]> {
+  if (cdpServiceOverrides.getOpenPageUrls) {
+    return cdpServiceOverrides.getOpenPageUrls(sessionId);
+  }
   const ws = activeSessions.get(sessionId);
   if (!ws || ws.readyState !== WebSocket.OPEN) return [];
 
@@ -945,6 +978,9 @@ export async function getOpenPageUrls(sessionId: string): Promise<string[]> {
 // Reuses the initial blank "New Tab" page for the first URL to avoid leaving
 // a stray empty tab; remaining URLs are opened as new targets.
 export async function openSavedTabs(sessionId: string, urls: string[]): Promise<void> {
+  if (cdpServiceOverrides.openSavedTabs) {
+    return cdpServiceOverrides.openSavedTabs(sessionId, urls);
+  }
   if (!urls.length) return;
   const ws = activeSessions.get(sessionId);
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -995,6 +1031,9 @@ export async function openSavedTabs(sessionId: string, urls: string[]): Promise<
 }
 
 export function cleanupCdpSession(sessionId: string): void {
+  if (cdpServiceOverrides.cleanupCdpSession) {
+    return cdpServiceOverrides.cleanupCdpSession(sessionId);
+  }
   const ws = activeSessions.get(sessionId);
   if (ws) {
     ws.terminate();

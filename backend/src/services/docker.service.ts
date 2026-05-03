@@ -16,9 +16,36 @@ export interface ContainerInfo {
   internalApiUrl: string;
 }
 
+type DockerServiceOverrides = Partial<{
+  createAndStartContainer: (sessionId: string) => Promise<ContainerInfo>;
+  waitForContainerReady: (internalApiUrl: string) => Promise<void>;
+  stopContainer: (containerId: string) => Promise<void>;
+  startExistingContainer: (containerId: string) => Promise<ContainerInfo>;
+  stopAndRemoveContainer: (containerId: string) => Promise<void>;
+}>;
+
+let dockerServiceOverrides: DockerServiceOverrides = {};
+
+export function setDockerServiceOverridesForTests(overrides: DockerServiceOverrides): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setDockerServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  dockerServiceOverrides = overrides;
+}
+
+export function resetDockerServiceOverridesForTests(): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("resetDockerServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  dockerServiceOverrides = {};
+}
+
 export async function createAndStartContainer(
   sessionId: string
 ): Promise<ContainerInfo> {
+  if (dockerServiceOverrides.createAndStartContainer) {
+    return dockerServiceOverrides.createAndStartContainer(sessionId);
+  }
   const containerName = `${CONTAINER_PREFIX}${sessionId}`;
 
   console.info(`[docker] Creating container ${containerName}`);
@@ -83,6 +110,9 @@ export async function createAndStartContainer(
 export async function waitForContainerReady(
   internalApiUrl: string
 ): Promise<void> {
+  if (dockerServiceOverrides.waitForContainerReady) {
+    return dockerServiceOverrides.waitForContainerReady(internalApiUrl);
+  }
   const healthUrl = `${internalApiUrl}/v1/health`;
   const startTime = Date.now();
 
@@ -110,6 +140,9 @@ export async function waitForContainerReady(
 // Stop-only: preserves the container filesystem so data survives across stop/start.
 // Use this for the Stop action. Use stopAndRemoveContainer for Delete.
 export async function stopContainer(containerId: string): Promise<void> {
+  if (dockerServiceOverrides.stopContainer) {
+    return dockerServiceOverrides.stopContainer(containerId);
+  }
   console.info(`[docker] Stopping container ${containerId.slice(0, 12)}`);
   try {
     const container = docker.getContainer(containerId);
@@ -156,6 +189,9 @@ export async function unpauseContainer(containerId: string): Promise<void> {
 export async function startExistingContainer(
   containerId: string
 ): Promise<ContainerInfo> {
+  if (dockerServiceOverrides.startExistingContainer) {
+    return dockerServiceOverrides.startExistingContainer(containerId);
+  }
   console.info(`[docker] Starting existing container ${containerId.slice(0, 12)}`);
   const container = docker.getContainer(containerId);
   try {
@@ -217,6 +253,9 @@ export async function startExistingContainer(
 export async function stopAndRemoveContainer(
   containerId: string
 ): Promise<void> {
+  if (dockerServiceOverrides.stopAndRemoveContainer) {
+    return dockerServiceOverrides.stopAndRemoveContainer(containerId);
+  }
   console.info(`[docker] Stopping and removing container ${containerId.slice(0, 12)}`);
   try {
     const container = docker.getContainer(containerId);
