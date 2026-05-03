@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Duplex } from "node:stream";
+import jwt from "jsonwebtoken";
+import type { IncomingMessage } from "node:http";
+import type { AppPrismaClient } from "../db/client.js";
 
 Object.assign(process.env, {
   DATABASE_URL: "postgresql://user:pass@localhost:5432/browsermint_test",
@@ -10,6 +14,7 @@ Object.assign(process.env, {
 
 const {
   getRequestProtocols,
+  handleWebSocketUpgrade,
   getHttpSource,
   getIncomingMessageIp,
   getWebSocketSource,
@@ -17,6 +22,70 @@ const {
   rewriteUpstreamWebSocketUrl,
   sanitizeRequestPath,
 } = await import("./proxy.service.js");
+const { config } = await import("../config.js");
+const { setPrismaForTests } = await import("../db/client.js");
+
+class TestSocket extends Duplex {
+  destroyCalled = false;
+
+  _read() {}
+
+  _write(_chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    callback();
+  }
+
+  destroy(error?: Error): this {
+    this.destroyCalled = true;
+    return super.destroy(error);
+  }
+}
+
+function makeWsRequest(url: string): IncomingMessage {
+  return {
+    url,
+    headers: { host: "browsermint.example" },
+    socket: { remoteAddress: "127.0.0.1" },
+  } as IncomingMessage;
+}
+
+function makeSessionToken(payload: { sessionId?: string; userId?: string; iat?: number } = {}) {
+  return jwt.sign(
+    {
+      sub: payload.userId ?? "user-owner",
+      sessionId: payload.sessionId ?? "session-running",
+      type: "session",
+      ...(payload.iat ? { iat: payload.iat } : {}),
+    },
+    config.JWT_SESSION_TOKEN_SECRET,
+    { expiresIn: "15m" }
+  );
+}
+
+function setProxyPrismaMock(session: {
+  id?: string;
+  status?: string;
+  containerId?: string | null;
+  containerName?: string | null;
+  internalApiUrl?: string | null;
+  tokenIssuedAt?: Date | null;
+} | null) {
+  const prisma = {
+    session: {
+      findFirst: async () => session ? {
+        id: session.id ?? "session-running",
+        status: session.status ?? "running",
+        containerId: "containerId" in session ? session.containerId : "container-running",
+        containerName: "containerName" in session ? session.containerName : "browsermint-session-running",
+        internalApiUrl: "internalApiUrl" in session ? session.internalApiUrl : "http://127.0.0.1:3000",
+        tokenIssuedAt: "tokenIssuedAt" in session ? session.tokenIssuedAt : null,
+      } : null,
+      update: async () => ({}),
+    },
+    $on: () => {},
+    $disconnect: async () => {},
+  };
+  setPrismaForTests(prisma as unknown as AppPrismaClient);
+}
 
 test("sanitizeRequestPath removes token without dropping other query params", () => {
   assert.equal(sanitizeRequestPath("/api/sessions/s1/details?token=secret&page=1"), "/api/sessions/s1/details?page=1");
@@ -84,4 +153,62 @@ test("getIncomingMessageIp prefers x-forwarded-for before socket address", () =>
     } as never),
     "10.0.0.2"
   );
+});
+
+test("handleWebSocketUpgrade rejects missing, invalid, wrong-session, and superseded tokens", async () => {
+  setProxyPrismaMock(null);
+
+  const missingTokenSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest("/ws/sessions/session-running/cdp/devtools/page/1"),
+    missingTokenSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(missingTokenSocket.destroyCalled, true);
+
+  const invalidTokenSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest("/ws/sessions/session-running/cdp/devtools/page/1?token=not-a-token"),
+    invalidTokenSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(invalidTokenSocket.destroyCalled, true);
+
+  const wrongSessionSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cdp/devtools/page/1?token=${encodeURIComponent(makeSessionToken({ sessionId: "other-session" }))}`),
+    wrongSessionSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(wrongSessionSocket.destroyCalled, true);
+
+  const issuedAt = Math.floor(Date.now() / 1000) - 10;
+  setProxyPrismaMock({ tokenIssuedAt: new Date((issuedAt + 5) * 1000) });
+  const supersededSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cdp/devtools/page/1?token=${encodeURIComponent(makeSessionToken({ iat: issuedAt }))}`),
+    supersededSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(supersededSocket.destroyCalled, true);
+});
+
+test("handleWebSocketUpgrade rejects unavailable and malformed paused sessions before proxying", async () => {
+  setProxyPrismaMock(null);
+  const unavailableSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cast?token=${encodeURIComponent(makeSessionToken())}`),
+    unavailableSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(unavailableSocket.destroyCalled, true);
+
+  setProxyPrismaMock({ status: "paused", containerId: null });
+  const pausedWithoutContainerSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cast?token=${encodeURIComponent(makeSessionToken())}`),
+    pausedWithoutContainerSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(pausedWithoutContainerSocket.destroyCalled, true);
 });
