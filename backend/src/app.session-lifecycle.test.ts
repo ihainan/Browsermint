@@ -389,6 +389,41 @@ test("POST /api/sessions enforces maxSessions before starting Docker work", asyn
   }
 });
 
+test("GET /api/sessions lists only owned active sessions and get rejects cross-user sessions", async () => {
+  const { app } = await makeApp([
+    makeSession({ id: "owned-active", userId: owner.id, deletedAt: null }),
+    makeSession({ id: "owned-deleted", userId: owner.id, deletedAt: new Date() }),
+    makeSession({ id: "other-active", userId: "user-other", deletedAt: null }),
+  ]);
+  try {
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/sessions",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(list.statusCode, 200);
+    assert.deepEqual(list.json().sessions.map((session: SessionRecord) => session.id), ["owned-active"]);
+
+    const owned = await app.inject({
+      method: "GET",
+      url: "/api/sessions/owned-active",
+      headers: { cookie: authCookie() },
+    });
+    assert.equal(owned.statusCode, 200);
+    assert.equal(owned.json().session.id, "owned-active");
+
+    const crossUser = await app.inject({
+      method: "GET",
+      url: "/api/sessions/other-active",
+      headers: { cookie: authCookie() },
+    });
+    assert.equal(crossUser.statusCode, 404);
+  } finally {
+    await closeApp(app);
+  }
+});
+
 test("POST /api/sessions/:id/stop saves tabs, stops the container, and accumulates online time", async () => {
   const originalNow = Date.now;
   Date.now = () => 10_000;
@@ -422,6 +457,26 @@ test("POST /api/sessions/:id/stop saves tabs, stops the container, and accumulat
     assert.ok(calls.includes("docker:stop:container-running"));
   } finally {
     Date.now = originalNow;
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/stop rejects sessions that are not running or paused", async () => {
+  const { app, calls } = await makeApp([
+    makeSession({ id: "session-stopped", status: "stopped" }),
+  ]);
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-stopped/stop",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.json().error, "Session is not running");
+    assert.equal(calls.some((call) => call.startsWith("docker:")), false);
+    assert.equal(calls.some((call) => call.startsWith("cdp:")), false);
+  } finally {
     await closeApp(app);
   }
 });
@@ -482,6 +537,27 @@ test("DELETE /api/sessions/:id marks deleted, removes the container, and returns
     assert.ok(calls.includes("cdp:close:session-delete"));
     assert.ok(calls.includes("cdp:cleanup:session-delete"));
     assert.ok(calls.includes("docker:remove:container-delete"));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/start enforces maxSessions before starting Docker work", async () => {
+  const { app, calls } = await makeApp([
+    makeSession({ id: "session-stopped", status: "stopped" }),
+    makeSession({ id: "session-running", status: "running" }),
+    makeSession({ id: "session-paused", status: "paused" }),
+  ]);
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-stopped/start",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 429);
+    assert.equal(res.json().error, "Session limit reached (max 2)");
+    assert.equal(calls.some((call) => call.startsWith("docker:")), false);
   } finally {
     await closeApp(app);
   }
