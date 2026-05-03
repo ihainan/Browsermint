@@ -35,6 +35,26 @@ interface ResolvedDevtoolsTarget {
   wsPath: string | null;
 }
 
+type ProxyServiceOverrides = Partial<{
+  getDevtoolsBaseUrl: (internalApiUrl: string) => URL;
+}>;
+
+let proxyServiceOverrides: ProxyServiceOverrides = {};
+
+export function setProxyServiceOverridesForTests(overrides: ProxyServiceOverrides): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setProxyServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  proxyServiceOverrides = overrides;
+}
+
+export function resetProxyServiceOverridesForTests(): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("resetProxyServiceOverridesForTests can only be used when NODE_ENV=test");
+  }
+  proxyServiceOverrides = {};
+}
+
 // ─── Proxy Server (singleton) ─────────────────────────────────────────────────
 
 export const proxyServer = httpProxy.createProxyServer({});
@@ -173,6 +193,9 @@ export function rewriteUpstreamWebSocketUrl(
 }
 
 function getDevtoolsBaseUrl(internalApiUrl: string): URL {
+  if (proxyServiceOverrides.getDevtoolsBaseUrl) {
+    return proxyServiceOverrides.getDevtoolsBaseUrl(internalApiUrl);
+  }
   const devtoolsUrl = new URL(internalApiUrl);
   devtoolsUrl.port = "9223";
   devtoolsUrl.pathname = "/";
@@ -597,6 +620,20 @@ function createCdpBridge(
   const wss = new WebSocketServer({ noServer: true });
   wss.handleUpgrade(request, socket, head, (agentWs) => {
     const chromeWs = new WebSocket(chromeWsUrl);
+    let bridgeClosed = false;
+
+    function closeBridge(): void {
+      if (bridgeClosed) return;
+      bridgeClosed = true;
+      onClose();
+      wss.close();
+    }
+
+    function closePeer(ws: WebSocket): void {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    }
 
     // IDs of commands we injected — filter their responses from the agent.
     const ourCmdIds = new Set<number>();
@@ -757,10 +794,10 @@ function createCdpBridge(
       if (forward && agentWs.readyState === WebSocket.OPEN) agentWs.send(data, { binary: isBinary });
     });
 
-    agentWs.on("close", () => { onClose(); if (chromeWs.readyState !== WebSocket.CLOSED) chromeWs.close(); });
-    agentWs.on("error", () => { onClose(); if (chromeWs.readyState !== WebSocket.CLOSED) chromeWs.close(); });
-    chromeWs.on("close", () => { if (agentWs.readyState !== WebSocket.CLOSED) agentWs.close(); });
-    chromeWs.on("error", () => { if (agentWs.readyState !== WebSocket.CLOSED) agentWs.close(); });
+    agentWs.on("close", () => { closeBridge(); closePeer(chromeWs); });
+    agentWs.on("error", () => { closeBridge(); closePeer(chromeWs); });
+    chromeWs.on("close", () => { closeBridge(); closePeer(agentWs); });
+    chromeWs.on("error", () => { closeBridge(); closePeer(agentWs); });
   });
 }
 

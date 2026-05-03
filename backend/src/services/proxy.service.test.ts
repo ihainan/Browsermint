@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Duplex } from "node:stream";
+import { once } from "node:events";
+import { AddressInfo, Socket } from "node:net";
+import { createServer } from "node:http";
 import jwt from "jsonwebtoken";
 import type { IncomingMessage } from "node:http";
+import WebSocket, { WebSocketServer } from "ws";
 import type { AppPrismaClient } from "../db/client.js";
 
 Object.assign(process.env, {
@@ -20,8 +24,10 @@ const {
   getWebSocketSource,
   parseSessionWebSocketPath,
   proxyServer,
+  resetProxyServiceOverridesForTests,
   rewriteUpstreamWebSocketUrl,
   sanitizeRequestPath,
+  setProxyServiceOverridesForTests,
 } = await import("./proxy.service.js");
 const { config } = await import("../config.js");
 const { setPrismaForTests } = await import("../db/client.js");
@@ -68,6 +74,20 @@ function makeSessionToken(payload: { sessionId?: string; userId?: string; iat?: 
     config.JWT_SESSION_TOKEN_SECRET,
     { expiresIn: "15m" }
   );
+}
+
+async function waitFor<T>(
+  predicate: () => T | undefined,
+  message: string,
+  timeoutMs = 1000
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = predicate();
+    if (result !== undefined) return result;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
 }
 
 function setProxyPrismaMock(session: {
@@ -404,6 +424,132 @@ test("handleWebSocketUpgrade waits for an in-flight unpause instead of unpausing
     config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
     resetDockerServiceOverridesForTests();
     resetCdpServiceOverridesForTests();
+  }
+});
+
+test("handleWebSocketUpgrade CDP bridge injects page-session scripts and filters its own responses", async () => {
+  setProxyPrismaMock({
+    status: "running",
+    internalApiUrl: "http://browsermint-session-running:3000",
+  });
+  let upstreamServer!: WebSocketServer;
+  await new Promise<void>((resolve, reject) => {
+    upstreamServer = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    upstreamServer.once("listening", resolve);
+    upstreamServer.once("error", reject);
+  });
+  const upstreamPort = (upstreamServer.address() as AddressInfo).port;
+  const proxyHttpServer = createServer();
+  const proxySockets = new Set<Socket>();
+  const clientMessages: Array<Record<string, unknown>> = [];
+  const upstreamMessages: Array<Record<string, unknown>> = [];
+  let client: WebSocket | undefined;
+  let upstream: WebSocket | undefined;
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = false;
+  setProxyServiceOverridesForTests({
+    getDevtoolsBaseUrl: () => new URL(`http://127.0.0.1:${upstreamPort}/`),
+  });
+  proxyHttpServer.on("upgrade", (request, socket, head) => {
+    handleWebSocketUpgrade(request, socket, head).catch(() => socket.destroy());
+  });
+  proxyHttpServer.on("connection", (socket) => {
+    proxySockets.add(socket);
+    socket.on("close", () => proxySockets.delete(socket));
+  });
+
+  try {
+    await new Promise<void>((resolve) => proxyHttpServer.listen(0, "127.0.0.1", resolve));
+    const proxyPort = (proxyHttpServer.address() as AddressInfo).port;
+    const upstreamConnection = once(upstreamServer, "connection") as Promise<[WebSocket]>;
+    const token = encodeURIComponent(makeSessionToken());
+    client = new WebSocket(
+      `ws://127.0.0.1:${proxyPort}/ws/sessions/session-running/cdp/devtools/page/page-1?token=${token}`
+    );
+    client.on("message", (data) => {
+      clientMessages.push(JSON.parse(data.toString()) as Record<string, unknown>);
+    });
+    await Promise.race([
+      once(client, "open"),
+      once(client, "error").then(([err]) => { throw err; }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for proxy WebSocket open")), 1000)),
+    ]);
+    [upstream] = await Promise.race([
+      upstreamConnection,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for upstream CDP connection")), 1000)),
+    ]);
+    upstream.on("message", (data) => {
+      upstreamMessages.push(JSON.parse(data.toString()) as Record<string, unknown>);
+    });
+
+    client.send(JSON.stringify({
+      id: 1,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-1", flatten: true },
+    }));
+
+    await waitFor(
+      () => upstreamMessages.find((msg) => msg.id === 1),
+      "expected the agent CDP command to reach upstream"
+    );
+    upstream.send(JSON.stringify({ id: 1, result: { sessionId: "page-session" } }));
+
+    const injectedCommands = await waitFor(
+      () => {
+        const commands = upstreamMessages.filter((msg) => msg.sessionId === "page-session" && typeof msg.id === "number");
+        return commands.length >= 2 ? commands : undefined;
+      },
+      "expected bridge-injected CDP commands"
+    );
+    const injectedMethods = injectedCommands.map((msg) => msg.method);
+    assert.equal(injectedMethods[0], "Page.addScriptToEvaluateOnNewDocument");
+    assert.equal(injectedMethods.at(-1), "Runtime.evaluate");
+    if (config.CAPSOLVER_API_KEY) {
+      assert.deepEqual(injectedMethods, [
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Runtime.addBinding",
+        "Page.enable",
+        "Runtime.evaluate",
+      ]);
+    } else {
+      assert.deepEqual(injectedMethods, [
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Runtime.evaluate",
+      ]);
+    }
+
+    for (const command of injectedCommands) {
+      upstream.send(JSON.stringify({ id: command.id, result: {} }));
+    }
+
+    const forwardedAttachResponse = await waitFor(
+      () => clientMessages.find((msg) => msg.id === 1),
+      "expected original attach response to reach the agent"
+    );
+    assert.deepEqual(forwardedAttachResponse, { id: 1, result: { sessionId: "page-session" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      clientMessages.some((msg) => injectedCommands.some((command) => command.id === msg.id)),
+      false
+    );
+
+  } finally {
+    const closeEvents = [client, upstream]
+      .filter((ws): ws is WebSocket => Boolean(ws) && ws.readyState !== WebSocket.CLOSED)
+      .map((ws) => Promise.race([
+        once(ws, "close"),
+        new Promise((resolve) => setTimeout(resolve, 100)),
+      ]));
+    client?.terminate();
+    upstream?.terminate();
+    for (const ws of upstreamServer.clients) ws.terminate();
+    await Promise.allSettled(closeEvents);
+    for (const socket of proxySockets) socket.destroy();
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    resetProxyServiceOverridesForTests();
+    proxyHttpServer.closeAllConnections();
+    await new Promise<void>((resolve) => proxyHttpServer.close(() => resolve()));
+    await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
   }
 });
 
