@@ -22,6 +22,7 @@ type DockerServiceOverrides = Partial<{
   stopContainer: (containerId: string) => Promise<void>;
   startExistingContainer: (containerId: string) => Promise<ContainerInfo>;
   stopAndRemoveContainer: (containerId: string) => Promise<void>;
+  listContainers: () => Promise<Docker.ContainerInfo[]>;
 }>;
 
 let dockerServiceOverrides: DockerServiceOverrides = {};
@@ -287,10 +288,12 @@ export async function reconcileContainers(startup = false): Promise<void> {
 async function _reconcileContainers(startup: boolean): Promise<void> {
   let managedContainers: Docker.ContainerInfo[] = [];
   try {
-    managedContainers = await docker.listContainers({
-      all: true,
-      filters: JSON.stringify({ label: [`${MANAGED_LABEL}=true`] }),
-    });
+    managedContainers = dockerServiceOverrides.listContainers
+      ? await dockerServiceOverrides.listContainers()
+      : await docker.listContainers({
+          all: true,
+          filters: JSON.stringify({ label: [`${MANAGED_LABEL}=true`] }),
+        });
   } catch (err) {
     console.error("[reconcile] Failed to list Docker containers:", err);
     return;
@@ -389,7 +392,10 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
     } else if (container.State === "running") {
       // Backend crashed after unpause but before updating DB — correct DB to "running"
       console.info(`[reconcile] Session ${session.id}: container running but DB says paused — correcting to "running"`);
-      await prisma.session.update({ where: { id: session.id }, data: { status: "running" } });
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: "running", runningStartedAt: new Date(Date.now()) },
+      });
     } else {
       console.info(`[reconcile] Session ${session.id}: paused but container state "${container.State}" — marking error`);
       await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
