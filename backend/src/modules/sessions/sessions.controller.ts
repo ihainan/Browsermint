@@ -74,7 +74,10 @@ export async function handleCreateSession(
   try {
     containerInfo = await createAndStartContainer(sessionId);
     await waitForContainerReady(containerInfo.internalApiUrl);
-    await initCdpSession(sessionId, containerInfo.internalApiUrl);
+    const cdpReady = await initCdpSession(sessionId, containerInfo.internalApiUrl);
+    if (!cdpReady) {
+      throw new Error("CDP initialization failed");
+    }
 
     // Session may have been deleted by the user while container was starting
     const current = await prisma.session.findUnique({ where: { id: sessionId } });
@@ -348,7 +351,10 @@ export async function handleStartSession(
       await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
       containerInfo = await createAndStartContainer(id);
       await waitForContainerReady(containerInfo.internalApiUrl);
-      await initCdpSession(id, containerInfo.internalApiUrl);
+      const freshCdpReady = await initCdpSession(id, containerInfo.internalApiUrl);
+      if (!freshCdpReady) {
+        throw new Error("CDP initialization failed after container recovery");
+      }
     }
 
     const current = await prisma.session.findUnique({ where: { id } });

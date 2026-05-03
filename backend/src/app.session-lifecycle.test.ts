@@ -101,6 +101,19 @@ function applySessionUpdate(session: SessionRecord, data: Record<string, unknown
   }
 }
 
+function cloneSession(session: SessionRecord): SessionRecord {
+  return {
+    ...session,
+    createdAt: new Date(session.createdAt),
+    lastActiveAt: new Date(session.lastActiveAt),
+    expiresAt: session.expiresAt ? new Date(session.expiresAt) : null,
+    tokenIssuedAt: session.tokenIssuedAt ? new Date(session.tokenIssuedAt) : null,
+    deletedAt: session.deletedAt ? new Date(session.deletedAt) : null,
+    runningStartedAt: session.runningStartedAt ? new Date(session.runningStartedAt) : null,
+    savedTabs: Array.isArray(session.savedTabs) ? [...session.savedTabs] : session.savedTabs,
+  };
+}
+
 function makePrismaMock(seedSessions: SessionRecord[] = []) {
   const sessions = [...seedSessions];
 
@@ -126,13 +139,13 @@ function makePrismaMock(seedSessions: SessionRecord[] = []) {
           lastActiveAt: new Date(),
         });
         sessions.push(session);
-        return { ...session };
+        return cloneSession(session);
       },
       update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
         const session = sessions.find((item) => item.id === args.where.id);
         if (!session) throw new Error("Session not found");
         applySessionUpdate(session, args.data);
-        return { ...session };
+        return cloneSession(session);
       },
     },
   };
@@ -147,11 +160,11 @@ function makePrismaMock(seedSessions: SessionRecord[] = []) {
     },
     session: {
       findFirst: async (args: { where: Record<string, unknown> }) =>
-        sessions.find((session) => matchesSessionWhere(session, args.where)) ?? null,
+        sessions.find((session) => matchesSessionWhere(session, args.where)) ? cloneSession(sessions.find((session) => matchesSessionWhere(session, args.where))!) : null,
       findUnique: async (args: { where: { id: string } }) =>
-        sessions.find((session) => session.id === args.where.id) ?? null,
+        sessions.find((session) => session.id === args.where.id) ? cloneSession(sessions.find((session) => session.id === args.where.id)!) : null,
       findMany: async (args: { where?: Record<string, unknown> }) =>
-        sessions.filter((session) => !args.where || matchesSessionWhere(session, args.where)),
+        sessions.filter((session) => !args.where || matchesSessionWhere(session, args.where)).map(cloneSession),
       count: tx.session.count,
       create: tx.session.create,
       update: tx.session.update,
@@ -295,6 +308,53 @@ test("POST /api/sessions marks failed creates as error and removes the started c
   }
 });
 
+test("POST /api/sessions fails and cleans up when initial CDP initialization returns false", async () => {
+  const { app, prisma, calls } = await makeApp();
+  setCdpServiceOverridesForTests({
+    initCdpSession: async (sessionId, internalApiUrl) => {
+      calls.push(`cdp:init:false:${sessionId}:${internalApiUrl}`);
+      return false;
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { cookie: authCookie() },
+      payload: {},
+    });
+
+    assert.equal(res.statusCode, 500);
+    assert.equal(prisma.__sessions[0].status, "error");
+    assert.ok(calls.some((call) => call.startsWith("cdp:init:false:")));
+    assert.ok(calls.some((call) => call.startsWith("docker:remove:")));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions enforces maxSessions before starting Docker work", async () => {
+  const { app, calls } = await makeApp([
+    makeSession({ id: "session-running", status: "running" }),
+    makeSession({ id: "session-paused", status: "paused" }),
+  ]);
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { cookie: authCookie() },
+      payload: {},
+    });
+
+    assert.equal(res.statusCode, 429);
+    assert.equal(res.json().error, "Session limit reached (max 2)");
+    assert.equal(calls.some((call) => call.startsWith("docker:")), false);
+  } finally {
+    await closeApp(app);
+  }
+});
+
 test("POST /api/sessions/:id/stop saves tabs, stops the container, and accumulates online time", async () => {
   const originalNow = Date.now;
   Date.now = () => 10_000;
@@ -328,6 +388,37 @@ test("POST /api/sessions/:id/stop saves tabs, stops the container, and accumulat
     assert.ok(calls.includes("docker:stop:container-running"));
   } finally {
     Date.now = originalNow;
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/stop handles paused sessions without CDP tab inspection", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({
+      id: "session-paused",
+      status: "paused",
+      containerId: "container-paused",
+      onlineMs: 10_000,
+      runningStartedAt: null,
+    }),
+  ]);
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-paused/stop",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 200);
+    const session = prisma.__sessions[0];
+    assert.equal(session.status, "stopped");
+    assert.equal(session.onlineMs, 10_000);
+    assert.equal(session.savedTabs, null);
+    assert.ok(calls.includes("cdp:cleanup:session-paused"));
+    assert.ok(calls.includes("docker:stop:container-paused"));
+    assert.equal(calls.some((call) => call.startsWith("cdp:tabs:")), false);
+    assert.equal(calls.some((call) => call.startsWith("cdp:close:")), false);
+  } finally {
     await closeApp(app);
   }
 });
@@ -393,6 +484,97 @@ test("POST /api/sessions/:id/start restarts an existing container and restores s
     assert.ok(calls.includes("docker:wait:http://127.0.0.1:3999"));
     assert.ok(calls.includes("cdp:init:session-stopped:http://127.0.0.1:3999"));
     assert.ok(calls.includes("cdp:restore:session-stopped:https://example.com"));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/start falls back to a fresh container on stale Docker network 404", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({
+      id: "session-stale",
+      status: "stopped",
+      containerId: "container-stale",
+      containerName: "old-container",
+      internalApiUrl: "http://127.0.0.1:3000",
+      runningStartedAt: null,
+    }),
+  ]);
+  setDockerServiceOverridesForTests({
+    startExistingContainer: async (containerId) => {
+      calls.push(`docker:start:404:${containerId}`);
+      throw Object.assign(new Error("stale network"), { statusCode: 404 });
+    },
+    stopAndRemoveContainer: async (containerId) => {
+      calls.push(`docker:remove:${containerId}`);
+    },
+    createAndStartContainer: async (sessionId) => {
+      calls.push(`docker:create:fallback:${sessionId}`);
+      return {
+        containerId: `fresh-${sessionId}`,
+        containerName: `fresh-${sessionId}`,
+        internalApiUrl: "http://127.0.0.1:3888",
+      };
+    },
+    waitForContainerReady: async (internalApiUrl) => {
+      calls.push(`docker:wait:${internalApiUrl}`);
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-stale/start",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 200);
+    const session = prisma.__sessions[0];
+    assert.equal(session.status, "running");
+    assert.equal(session.containerId, "fresh-session-stale");
+    assert.equal(session.containerName, "fresh-session-stale");
+    assert.equal(session.internalApiUrl, "http://127.0.0.1:3888");
+    assert.ok(calls.includes("docker:start:404:container-stale"));
+    assert.ok(calls.includes("docker:remove:container-stale"));
+    assert.ok(calls.includes("docker:create:fallback:session-stale"));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/start recovers once from CDP init failure and fails if fresh CDP init also fails", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({
+      id: "session-cdp-fail",
+      status: "stopped",
+      containerId: "container-cdp-fail",
+      containerName: "old-container",
+      internalApiUrl: "http://127.0.0.1:3000",
+      runningStartedAt: null,
+    }),
+  ]);
+  setCdpServiceOverridesForTests({
+    initCdpSession: async (sessionId, internalApiUrl) => {
+      calls.push(`cdp:init:false:${sessionId}:${internalApiUrl}`);
+      return false;
+    },
+  });
+
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/session-cdp-fail/start",
+      headers: { cookie: authCookie() },
+    });
+
+    assert.equal(res.statusCode, 500);
+    const session = prisma.__sessions[0];
+    assert.equal(session.status, "error");
+    assert.ok(calls.includes("docker:start:container-cdp-fail"));
+    assert.ok(calls.includes("docker:remove:container-cdp-fail"));
+    assert.ok(calls.includes("docker:create:session-cdp-fail"));
+    assert.ok(calls.some((call) => call.startsWith("docker:remove:container-session-cdp-fail")));
+    assert.equal(calls.filter((call) => call.startsWith("cdp:init:false:")).length, 2);
   } finally {
     await closeApp(app);
   }
