@@ -9,11 +9,11 @@ const prismaClientOptions = {
   ],
 } satisfies Prisma.PrismaClientOptions;
 
-type AppPrismaClient = PrismaClient<typeof prismaClientOptions>;
+export type AppPrismaClient = PrismaClient<typeof prismaClientOptions>;
 
 const globalForPrisma = globalThis as unknown as { prisma?: AppPrismaClient };
 
-export const prisma: AppPrismaClient =
+export let prisma: AppPrismaClient =
   globalForPrisma.prisma ??
   new PrismaClient(prismaClientOptions);
 
@@ -22,7 +22,15 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 export function bindPrismaLogger(logger: FastifyBaseLogger) {
+  if (typeof prisma.$on !== "function") return;
   prisma.$on("query", (e) => logger.debug({ query: e.query, duration: e.duration }, "prisma query"));
   prisma.$on("warn",  (e) => logger.warn({ message: e.message }, "prisma warn"));
   prisma.$on("error", (e) => logger.error({ message: e.message }, "prisma error"));
+}
+
+export function setPrismaForTests(testPrisma: AppPrismaClient): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setPrismaForTests can only be used when NODE_ENV=test");
+  }
+  prisma = testPrisma;
 }
