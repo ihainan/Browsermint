@@ -7,11 +7,11 @@ export const api = axios.create({
 });
 
 // Redirect to /login on 401, but only for auth-protected API calls.
-// Session proxy endpoints (/sessions/:id/details|browser|devtools*|devtools-target)
-// return 401 when the session is not running, not when the user is unauthenticated.
+// Session token endpoints return 401 when the per-session token is unavailable
+// or stale, not when the user's auth cookie is invalid.
 // Treating those as auth failures would log the user out whenever a session stops
 // while its details page is still open.
-const SESSION_PROXY_PATH = /^\/sessions\/[^/]+\/(details|browser|devtools|devtools-target)/;
+const SESSION_PROXY_PATH = /^\/sessions\/[^/]+\/(details|browser|vnc-viewer|clipboard|devtools(?:\/.*)?|devtools-target|targets(?:\/.*)?|navigate|go-back|go-forward|reload)(?:\?.*)?$/;
 
 api.interceptors.response.use(
   (res) => res,

@@ -34,6 +34,13 @@ test("401 interceptor does not redirect session proxy failures", async () => {
 
   await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/details?token=expired" } }));
   await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/devtools/devtools_app.html" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/targets?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/targets/page-1/activate?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/navigate?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/go-back?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/reload?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/clipboard?token=expired" } }));
+  await assert.rejects(() => rejected({ response: { status: 401 }, config: { url: "/sessions/s1/vnc-viewer?token=expired" } }));
 
   assert.equal(window.location.href, "");
 });
