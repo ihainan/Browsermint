@@ -51,6 +51,7 @@ function makePrismaMock() {
         if (!args.select) return session;
         return Object.fromEntries(Object.keys(args.select).map((key) => [key, session[key as keyof typeof session]]));
       },
+      update: async () => ({}),
     },
     sessionEvent: {
       create: async (args: { data: unknown }) => {
@@ -212,6 +213,80 @@ test("session navigation routes validate body and execute expected CDP commands"
       targetId: "page-1",
     });
   } finally {
+    await closeApp(app);
+  }
+});
+
+test("browser proxy rewrites websocket URL, injects helpers, and handles upstream failures", async () => {
+  const originalFetch = globalThis.fetch;
+  const token = sessionToken();
+  try {
+    globalThis.fetch = async () => new Response(
+      "<html><head></head><body><script>const baseWsUrl = 'ws://upstream/cast';</script><canvas></canvas></body></html>",
+      { status: 200, headers: { "content-type": "text/html" } }
+    );
+    const { app } = await makeApp();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/sessions/session-running/browser?token=${encodeURIComponent(token)}`,
+        headers: { host: "browsermint.example", "x-forwarded-proto": "https" },
+      });
+
+      assert.equal(res.statusCode, 200);
+      assert.match(res.body, /const baseWsUrl = 'wss:\/\/browsermint\.example\/ws\/sessions\/session-running\/cast\?token=/);
+      assert.match(res.body, /showContextMenu/);
+      assert.match(res.body, /metaKey/);
+      assert.equal(res.headers["x-frame-options"], "SAMEORIGIN");
+    } finally {
+      await closeApp(app);
+    }
+
+    globalThis.fetch = async () => new Response("bad", { status: 503 });
+    const failed = await makeApp();
+    try {
+      const res = await failed.app.inject({
+        method: "GET",
+        url: `/api/sessions/session-running/browser?token=${encodeURIComponent(token)}`,
+      });
+      assert.equal(res.statusCode, 502);
+    } finally {
+      await closeApp(failed.app);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("details proxy rewrites CDP websocket/debugger URLs and reflects token expiry", async () => {
+  const originalFetch = globalThis.fetch;
+  const token = sessionToken();
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/json/version")) {
+      return Response.json({ webSocketDebuggerUrl: "ws://172.20.0.2:9223/devtools/browser/browser-id" });
+    }
+    return Response.json([
+      { id: "steel-session", websocketUrl: "ws://upstream/v1/sessions/ws", solveCaptcha: false },
+    ]);
+  };
+
+  const { app } = await makeApp();
+  try {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-running/details?token=${encodeURIComponent(token)}`,
+      headers: { host: "browsermint.example", "x-forwarded-proto": "https" },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().id, "steel-session");
+    assert.equal(res.json().solveCaptcha, false);
+    assert.match(res.json().websocketUrl, /^wss:\/\/browsermint\.example\/ws\/sessions\/session-running\/cdp\/devtools\/browser\/browser-id\?token=/);
+    assert.match(res.json().debuggerUrl, /^https:\/\/browsermint\.example\/api\/sessions\/session-running\/devtools\/devtools_app\.html\?token=/);
+    assert.match(res.json().tokenExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    globalThis.fetch = originalFetch;
     await closeApp(app);
   }
 });
