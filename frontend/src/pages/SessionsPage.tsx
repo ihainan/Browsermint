@@ -6,6 +6,7 @@ import { Plus, Trash2, Monitor, LogOut, Loader2, ExternalLink, Globe, Play, Paus
 import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
+import { getSessionNameValidationError } from "./sessionNameValidation.ts";
 
 
 const BROWSER_GRADIENTS = [
@@ -141,11 +142,7 @@ export default function SessionsPage() {
   });
 
   function getNameValidationError(name: string): string {
-    const trimmed = name.trim();
-    if (!trimmed) return t("sessions.browserNameRequired");
-    const duplicate = sessions.some((s) => s.name?.toLowerCase() === trimmed.toLowerCase());
-    if (duplicate) return t("sessions.browserNameDuplicate");
-    return "";
+    return getSessionNameValidationError(name, sessions, t);
   }
 
   function handleCreate() {

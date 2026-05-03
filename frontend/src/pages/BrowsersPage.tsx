@@ -18,6 +18,7 @@ import clsx from "clsx";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
 import { StatusBadge, daysUntilExpiry } from "./OverviewPage.tsx";
+import { getSessionNameValidationError } from "./sessionNameValidation.ts";
 
 const EXPIRY_WARNING_DAYS = 30;
 const PER_PAGE = 25;
@@ -298,12 +299,7 @@ export default function BrowsersPage() {
   });
 
   function getNameValidationError(name: string): string {
-    const trimmed = name.trim();
-    if (!trimmed) return t("sessions.browserNameRequired");
-    if (trimmed.length > 64) return t("sessions.browserNameTooLong");
-    if (sessions.some((s) => s.name?.toLowerCase() === trimmed.toLowerCase()))
-      return t("sessions.browserNameDuplicate");
-    return "";
+    return getSessionNameValidationError(name, sessions, t);
   }
 
   function handleCreate() {
