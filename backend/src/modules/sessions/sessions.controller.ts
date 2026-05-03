@@ -413,8 +413,10 @@ export async function handleListSessionEvents(
   });
   if (!session) return reply.status(404).send({ error: "Session not found" });
 
-  const limit = Math.min(200, parseInt(request.query.limit ?? "50", 10) || 50);
-  const offset = parseInt(request.query.offset ?? "0", 10) || 0;
+  const parsedLimit = parseInt(request.query.limit ?? "50", 10);
+  const parsedOffset = parseInt(request.query.offset ?? "0", 10);
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(200, parsedLimit) : 50;
+  const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
 
   const [events, total] = await Promise.all([
     prisma.sessionEvent.findMany({
