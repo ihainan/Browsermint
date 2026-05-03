@@ -25,6 +25,14 @@ const {
 } = await import("./proxy.service.js");
 const { config } = await import("../config.js");
 const { setPrismaForTests } = await import("../db/client.js");
+const {
+  resetCdpServiceOverridesForTests,
+  setCdpServiceOverridesForTests,
+} = await import("./cdp.service.js");
+const {
+  resetDockerServiceOverridesForTests,
+  setDockerServiceOverridesForTests,
+} = await import("./docker.service.js");
 
 class TestSocket extends Duplex {
   destroyCalled = false;
@@ -246,6 +254,62 @@ test("handleWebSocketUpgrade rejects tokens for suspended users", async () => {
   );
 
   assert.equal(socket.destroyCalled, true);
+});
+
+test("handleWebSocketUpgrade unpauses paused sessions before proxying", async () => {
+  const { updates } = setProxyPrismaMock({
+    status: "paused",
+    containerId: "container-paused",
+    internalApiUrl: "http://10.0.0.6:3000",
+  });
+  const unpausedContainers: string[] = [];
+  const cdpInitCalls: Array<{ sessionId: string; internalApiUrl: string }> = [];
+  const proxyCalls: Array<{ url: string | undefined; target: unknown }> = [];
+  const originalWs = proxyServer.ws;
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = false;
+  setDockerServiceOverridesForTests({
+    unpauseContainer: async (containerId) => {
+      unpausedContainers.push(containerId);
+    },
+  });
+  setCdpServiceOverridesForTests({
+    initCdpSession: async (sessionId, internalApiUrl) => {
+      cdpInitCalls.push({ sessionId, internalApiUrl });
+      return true;
+    },
+  });
+  proxyServer.ws = ((request: IncomingMessage, socket: Duplex, _head: Buffer, options: { target?: unknown }) => {
+    proxyCalls.push({ url: request.url, target: options.target });
+    socket.emit("close");
+  }) as typeof proxyServer.ws;
+
+  try {
+    const socket = new TestSocket();
+    await handleWebSocketUpgrade(
+      makeWsRequest(`/ws/sessions/session-running/logs?token=${encodeURIComponent(makeSessionToken())}`),
+      socket,
+      Buffer.alloc(0)
+    );
+
+    assert.equal(socket.destroyCalled, false);
+    assert.deepEqual(unpausedContainers, ["container-paused"]);
+    assert.equal((updates[0] as { data: { status?: string } }).data.status, "running");
+    assert.ok((updates[0] as { data: { runningStartedAt?: Date } }).data.runningStartedAt instanceof Date);
+    assert.deepEqual(cdpInitCalls, [{
+      sessionId: "session-running",
+      internalApiUrl: "http://10.0.0.6:3000",
+    }]);
+    assert.deepEqual(proxyCalls, [{
+      url: "/v1/sessions/logs",
+      target: "http://10.0.0.6:3000",
+    }]);
+  } finally {
+    proxyServer.ws = originalWs;
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    resetDockerServiceOverridesForTests();
+    resetCdpServiceOverridesForTests();
+  }
 });
 
 test("handleWebSocketUpgrade proxies non-CDP websocket routes with rewritten upstream paths", async () => {

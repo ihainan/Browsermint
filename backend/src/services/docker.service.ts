@@ -24,6 +24,8 @@ type DockerServiceOverrides = Partial<{
   stopAndRemoveContainer: (containerId: string) => Promise<void>;
   listContainers: () => Promise<Docker.ContainerInfo[]>;
   setContainerClipboard: (containerId: string, text: string) => Promise<void>;
+  pauseContainer: (containerId: string) => Promise<void>;
+  unpauseContainer: (containerId: string) => Promise<void>;
 }>;
 
 let dockerServiceOverrides: DockerServiceOverrides = {};
@@ -162,6 +164,9 @@ export async function stopContainer(containerId: string): Promise<void> {
 }
 
 export async function pauseContainer(containerId: string): Promise<void> {
+  if (dockerServiceOverrides.pauseContainer) {
+    return dockerServiceOverrides.pauseContainer(containerId);
+  }
   console.info(`[docker] Pausing container ${containerId.slice(0, 12)}`);
   try {
     await docker.getContainer(containerId).pause();
@@ -174,6 +179,9 @@ export async function pauseContainer(containerId: string): Promise<void> {
 }
 
 export async function unpauseContainer(containerId: string): Promise<void> {
+  if (dockerServiceOverrides.unpauseContainer) {
+    return dockerServiceOverrides.unpauseContainer(containerId);
+  }
   console.info(`[docker] Unpausing container ${containerId.slice(0, 12)}`);
   try {
     await docker.getContainer(containerId).unpause();
