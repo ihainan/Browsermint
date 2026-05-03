@@ -553,6 +553,12 @@ type CdpServiceOverrides = Partial<{
   getOpenPageUrls: (sessionId: string) => Promise<string[]>;
   openSavedTabs: (sessionId: string, urls: string[]) => Promise<void>;
   cleanupCdpSession: (sessionId: string) => void;
+  executeCdpCommand: (
+    sessionId: string,
+    method: string,
+    params?: Record<string, unknown>,
+    targetId?: string
+  ) => Promise<Record<string, unknown>>;
 }>;
 
 let cdpServiceOverrides: CdpServiceOverrides = {};
@@ -1048,6 +1054,10 @@ export async function executeCdpCommand(
   params: Record<string, unknown> = {},
   targetId?: string
 ): Promise<Record<string, unknown>> {
+  if (cdpServiceOverrides.executeCdpCommand) {
+    return cdpServiceOverrides.executeCdpCommand(sessionId, method, params, targetId);
+  }
+
   const ws = activeSessions.get(sessionId);
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     throw new Error(`No active CDP session for session ${sessionId}`);
