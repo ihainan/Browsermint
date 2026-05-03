@@ -312,6 +312,101 @@ test("handleWebSocketUpgrade unpauses paused sessions before proxying", async ()
   }
 });
 
+test("handleWebSocketUpgrade waits for an in-flight unpause instead of unpausing twice", async () => {
+  const session = {
+    id: "session-running",
+    status: "paused",
+    containerId: "container-paused",
+    containerName: "browsermint-session-running",
+    internalApiUrl: "http://10.0.0.7:3000",
+    tokenIssuedAt: null as Date | null,
+  };
+  const updates: Array<Record<string, unknown>> = [];
+  const prisma = {
+    session: {
+      findFirst: async (args?: { where?: { user?: { isActive?: boolean } }; select?: Record<string, unknown> }) => {
+        if (args?.where?.user?.isActive === true) {
+          return { ...session };
+        }
+        if (args?.select) {
+          return Object.fromEntries(
+            Object.keys(args.select).map((key) => [key, session[key as keyof typeof session]])
+          );
+        }
+        return { ...session };
+      },
+      update: async (args: { data: { status?: string; runningStartedAt?: Date } }) => {
+        updates.push(args);
+        if (args.data.status) session.status = args.data.status;
+        return { ...session, ...args.data };
+      },
+    },
+    sessionEvent: { create: async () => ({}) },
+    $on: () => {},
+    $disconnect: async () => {},
+  };
+  setPrismaForTests(prisma as unknown as AppPrismaClient);
+
+  let releaseUnpause!: () => void;
+  const unpauseRelease = new Promise<void>((resolve) => { releaseUnpause = resolve; });
+  let signalUnpauseStarted!: () => void;
+  const unpauseStarted = new Promise<void>((resolve) => { signalUnpauseStarted = resolve; });
+  const unpausedContainers: string[] = [];
+  const proxyCalls: Array<{ url: string | undefined; target: unknown }> = [];
+  const originalWs = proxyServer.ws;
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = false;
+  setDockerServiceOverridesForTests({
+    unpauseContainer: async (containerId) => {
+      unpausedContainers.push(containerId);
+      signalUnpauseStarted();
+      await unpauseRelease;
+    },
+  });
+  setCdpServiceOverridesForTests({
+    initCdpSession: async () => true,
+  });
+  proxyServer.ws = ((request: IncomingMessage, socket: Duplex, _head: Buffer, options: { target?: unknown }) => {
+    proxyCalls.push({ url: request.url, target: options.target });
+    socket.emit("close");
+  }) as typeof proxyServer.ws;
+
+  try {
+    const token = encodeURIComponent(makeSessionToken());
+    const firstSocket = new TestSocket();
+    const first = handleWebSocketUpgrade(
+      makeWsRequest(`/ws/sessions/session-running/logs?token=${token}`),
+      firstSocket,
+      Buffer.alloc(0)
+    );
+    await unpauseStarted;
+
+    const secondSocket = new TestSocket();
+    const second = handleWebSocketUpgrade(
+      makeWsRequest(`/ws/sessions/session-running/cast?token=${token}`),
+      secondSocket,
+      Buffer.alloc(0)
+    );
+
+    releaseUnpause();
+    await Promise.all([first, second]);
+
+    assert.equal(firstSocket.destroyCalled, false);
+    assert.equal(secondSocket.destroyCalled, false);
+    assert.deepEqual(unpausedContainers, ["container-paused"]);
+    assert.equal(updates.filter((update) => (update as { data: { status?: string } }).data.status === "running").length, 1);
+    assert.deepEqual(proxyCalls, [
+      { url: "/v1/sessions/logs", target: "http://10.0.0.7:3000" },
+      { url: "/v1/sessions/cast", target: "http://10.0.0.7:3000" },
+    ]);
+  } finally {
+    proxyServer.ws = originalWs;
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    resetDockerServiceOverridesForTests();
+    resetCdpServiceOverridesForTests();
+  }
+});
+
 test("handleWebSocketUpgrade proxies non-CDP websocket routes with rewritten upstream paths", async () => {
   const { events, updates } = setProxyPrismaMock({
     status: "running",
