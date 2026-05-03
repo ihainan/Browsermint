@@ -25,7 +25,7 @@ import {
 import { clearIdleTimer } from "../../services/proxy.service.js";
 
 /** Returns ms elapsed since a running period started; 0 if null. */
-function calcOnlineMsDelta(runningStartedAt: Date | null | undefined): number {
+export function calcOnlineMsDelta(runningStartedAt: Date | null | undefined): number {
   if (!runningStartedAt) return 0;
   return Math.max(0, Date.now() - runningStartedAt.getTime());
 }

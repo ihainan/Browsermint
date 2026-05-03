@@ -11,6 +11,14 @@ import type { TooltipProps } from "recharts";
 import { sessionsApi, Session } from "../api/client.ts";
 import { useI18n } from "../i18n/I18nContext.tsx";
 import { getSessionStatusLabel } from "../i18n/sessionStatus.ts";
+import {
+  daysUntilExpiry,
+  effectiveOnlineMs,
+  formatOnlineTimeBrief,
+  formatOnlineTimeFull,
+} from "./overview.helpers.ts";
+
+export { daysUntilExpiry } from "./overview.helpers.ts";
 
 function StatusBadge({ status }: { status: Session["status"] }) {
   const { locale } = useI18n();
@@ -82,42 +90,10 @@ function ChartTooltip(props: TooltipProps<number, string>) {
 
 const EXPIRY_WARNING_DAYS = 30;
 
-export function daysUntilExpiry(expiresAt: string | null): number | null {
-  if (!expiresAt) return null;
-  return Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-}
-
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
   return String(n);
-}
-
-function formatOnlineTimeBrief(ms: number): string {
-  const m = Math.floor(ms / 60000);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  if (d > 0) return `${d}d ${h % 24}h`;
-  if (h > 0) return `${h}h ${m % 60}m`;
-  if (m > 0) return `${m}m`;
-  return "0m";
-}
-
-function formatOnlineTimeFull(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  if (h > 0) return `${h}h ${m % 60}m`;
-  if (m > 0) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
-
-function effectiveOnlineMs(session: Session): number {
-  const base = session.onlineMs ?? 0;
-  if (session.status === "running" && session.runningStartedAt) {
-    return base + Math.max(0, Date.now() - new Date(session.runningStartedAt).getTime());
-  }
-  return base;
 }
 
 export default function OverviewPage() {

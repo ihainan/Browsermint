@@ -17,7 +17,9 @@ declare module "fastify" {
   }
 }
 
-function extractToken(request: FastifyRequest): string | undefined {
+export function extractAuthToken(
+  request: Pick<FastifyRequest, "headers">
+): string | undefined {
   // Prefer HttpOnly cookie (browser clients) — JS cannot read this, preventing XSS theft.
   // Fall back to Authorization header for programmatic API clients (curl, scripts, etc.).
   const cookieHeader = request.headers.cookie;
@@ -34,7 +36,7 @@ export async function authMiddleware(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  const token = extractToken(request);
+  const token = extractAuthToken(request);
   if (!token) return reply.status(401).send({ error: "Unauthorized" });
   try {
     const payload = jwt.verify(token, config.JWT_SECRET) as JwtPayload;

@@ -105,7 +105,7 @@ async function getSessionProxyContext(
   return { userId: payload.userId, sessionId, session };
 }
 
-function getRequestProtocols(request: Pick<FastifyRequest, "headers"> | IncomingMessage) {
+export function getRequestProtocols(request: Pick<FastifyRequest, "headers"> | IncomingMessage) {
   const forwardedProto = getFirstHeaderValue(request.headers["x-forwarded-proto"]);
   let isHttps = forwardedProto === "https";
 
@@ -155,7 +155,7 @@ function getPublicRequestHost(
   return getFirstHeaderValue(request.headers.host) ?? "localhost";
 }
 
-function rewriteUpstreamWebSocketUrl(
+export function rewriteUpstreamWebSocketUrl(
   request: Pick<FastifyRequest, "headers"> | IncomingMessage,
   sessionId: string,
   token: string,
@@ -240,7 +240,7 @@ async function updateLastActiveAt(sessionId: string) {
 }
 
 /** Remove the `token` query parameter from a URL before storing it in the DB. */
-function sanitizeRequestPath(url: string): string {
+export function sanitizeRequestPath(url: string): string {
   try {
     const u = new URL(url, "http://localhost");
     u.searchParams.delete("token");
@@ -828,27 +828,44 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
 
 const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|pageId|cdp|vnc)(\/[^?]*)?/;
 
+export type SessionWebSocketPath = {
+  sessionId: string;
+  wsType: "cast" | "logs" | "pageId" | "cdp" | "vnc";
+  wsSubPath: string;
+  token: string | null;
+};
+
+export function parseSessionWebSocketPath(url: string): SessionWebSocketPath | null {
+  const match = url.match(WS_PATH_REGEX);
+  if (!match) return null;
+
+  // The session player appends params with "?" even when baseWsUrl already
+  // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
+  // Merge all "?"-separated segments into a valid query string before parsing.
+  const qs = new URLSearchParams(url.split("?").slice(1).join("&"));
+  return {
+    sessionId: match[1],
+    wsType: match[2] as SessionWebSocketPath["wsType"],
+    wsSubPath: match[3] ?? "/",
+    token: qs.get("token"),
+  };
+}
+
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer
 ) {
   const url = request.url ?? "";
-  const match = url.match(WS_PATH_REGEX);
-  if (!match) {
+  const parsedPath = parseSessionWebSocketPath(url);
+  if (!parsedPath) {
     console.warn("[ws-proxy] rejecting upgrade: path did not match", { url });
     socket.destroy();
     return;
   }
 
-  const sessionId = match[1];
-  const wsType = match[2] as "cast" | "logs" | "pageId" | "cdp" | "vnc";
-  const wsSubPath = match[3] ?? "/";
-  // The session player appends params with "?" even when baseWsUrl already
-  // has "?token=...", producing double-"?" URLs like "...cast?token=X?pageId=Y".
-  // Merge all "?"-separated segments into a valid query string before parsing.
+  const { sessionId, wsType, wsSubPath, token } = parsedPath;
   const qs = new URLSearchParams(url.split("?").slice(1).join("&"));
-  const token = qs.get("token");
 
   if (!token) {
     console.warn("[ws-proxy] rejecting upgrade: missing token", {

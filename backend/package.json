@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "prisma db push --schema=src/db/schema.prisma && tsx watch --env-file=.env src/index.ts",
     "build": "tsc",
+    "test": "node --import tsx --test $(find src -name '*.test.ts' -print)",
     "start": "node build/index.js",
     "db:generate": "prisma generate --schema=src/db/schema.prisma",
     "db:migrate": "prisma migrate dev --schema=src/db/schema.prisma",

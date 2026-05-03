@@ -8,7 +8,7 @@ const boolEnv = (defaultVal: boolean) =>
     z.boolean().default(defaultVal)
   );
 
-const envSchema = z.object({
+export const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16),
   JWT_SESSION_TOKEN_SECRET: z.string().min(16),
@@ -33,6 +33,10 @@ const envSchema = z.object({
   // Expiry for session WebSocket JWT tokens (e.g. "180d", "365d", "30d").
   SESSION_TOKEN_EXPIRY: z.string().default("180d"),
 });
+
+export function parseEnv(env: NodeJS.ProcessEnv) {
+  return envSchema.parse(env);
+}
 
 const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
