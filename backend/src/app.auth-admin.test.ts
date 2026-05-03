@@ -26,7 +26,17 @@ type UserRecord = {
   createdAt: Date;
 };
 
-type SessionRecord = { userId: string; deletedAt: Date | null };
+type SessionRecord = {
+  id: string;
+  userId: string;
+  name: string | null;
+  status: string;
+  createdAt: Date;
+  lastActiveAt: Date;
+  expiresAt: Date | null;
+  deletedAt: Date | null;
+  eventCount: number;
+};
 
 function applySelect(user: UserRecord, select?: Record<string, unknown>, sessions: SessionRecord[] = []) {
   if (!select) return { ...user };
@@ -43,9 +53,40 @@ function applySelect(user: UserRecord, select?: Record<string, unknown>, session
   return result;
 }
 
-function makePrismaMock(seedUsers: UserRecord[] = []) {
+function makeSession(overrides: Partial<SessionRecord>): SessionRecord {
+  return {
+    id: "session-1",
+    userId: "user-1",
+    name: null,
+    status: "running",
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    lastActiveAt: new Date("2026-01-01T00:00:00.000Z"),
+    expiresAt: null,
+    deletedAt: null,
+    eventCount: 0,
+    ...overrides,
+  };
+}
+
+function applySessionSelect(session: SessionRecord, users: UserRecord[], select?: Record<string, unknown>) {
+  if (!select) return { ...session };
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(select)) {
+    if (key === "user") {
+      const user = users.find((item) => item.id === session.userId);
+      result.user = user ? { id: user.id, username: user.username, email: user.email } : null;
+    } else if (key === "_count") {
+      result._count = { events: session.eventCount };
+    } else {
+      result[key] = session[key as keyof SessionRecord];
+    }
+  }
+  return result;
+}
+
+function makePrismaMock(seedUsers: UserRecord[] = [], seedSessions: SessionRecord[] = []) {
   const users = [...seedUsers];
-  const sessions: SessionRecord[] = [];
+  const sessions: SessionRecord[] = [...seedSessions];
   let nextId = users.length + 1;
 
   const prisma = {
@@ -102,14 +143,20 @@ function makePrismaMock(seedUsers: UserRecord[] = []) {
       },
     },
     session: {
-      findMany: async () => [],
+      findMany: async (args?: { where?: { userId?: string; deletedAt?: null }; select?: Record<string, unknown>; take?: number }) => {
+        const filtered = sessions
+          .filter((session) => !args?.where?.userId || session.userId === args.where.userId)
+          .filter((session) => !("deletedAt" in (args?.where ?? {})) || session.deletedAt === args!.where!.deletedAt);
+        return filtered.slice(0, args?.take).map((session) => applySessionSelect(session, users, args?.select));
+      },
     },
     $on: () => {},
     $disconnect: async () => {},
     __users: users,
+    __sessions: sessions,
   };
 
-  return prisma as unknown as AppPrismaClient & { __users: UserRecord[] };
+  return prisma as unknown as AppPrismaClient & { __users: UserRecord[]; __sessions: SessionRecord[] };
 }
 
 async function makeApp(prisma = makePrismaMock()) {
@@ -471,6 +518,86 @@ test("admin user deletion protects self and removes other users", async () => {
     });
     assert.equal(deleted.statusCode, 204);
     assert.equal(prisma.__users.some((item) => item.id === userId), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("admin session listing routes expose active sessions with user and event counts", async () => {
+  const { app, prisma } = await makeApp();
+  try {
+    const owner = await register(app, "owner", "owner@example.com");
+    const ownerCookie = authCookie(owner);
+
+    const user = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: { cookie: ownerCookie },
+      payload: {
+        username: "member",
+        email: "member@example.com",
+        password: "MemberPass123!",
+        isAdmin: false,
+      },
+    });
+    assert.equal(user.statusCode, 201);
+    const userId = user.json().user.id as string;
+
+    prisma.__sessions.push(
+      makeSession({
+        id: "session-active",
+        userId,
+        name: "Research",
+        status: "running",
+        eventCount: 3,
+      }),
+      makeSession({
+        id: "session-deleted",
+        userId,
+        name: "Deleted",
+        status: "stopped",
+        deletedAt: new Date(),
+        eventCount: 9,
+      })
+    );
+
+    const allSessions = await app.inject({
+      method: "GET",
+      url: "/api/admin/sessions",
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(allSessions.statusCode, 200);
+    assert.deepEqual(allSessions.json().sessions, [{
+      id: "session-active",
+      name: "Research",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: null,
+      user: { id: userId, username: "member", email: "member@example.com" },
+      eventCount: 3,
+    }]);
+
+    const userSessions = await app.inject({
+      method: "GET",
+      url: `/api/admin/users/${userId}/sessions`,
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(userSessions.statusCode, 200);
+    assert.deepEqual(userSessions.json().sessions, [{
+      id: "session-active",
+      name: "Research",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+    }]);
+
+    const missingUserSessions = await app.inject({
+      method: "GET",
+      url: "/api/admin/users/missing-user/sessions",
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(missingUserSessions.statusCode, 404);
   } finally {
     await app.close();
   }
