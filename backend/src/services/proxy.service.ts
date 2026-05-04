@@ -1116,6 +1116,51 @@ interface CdpTarget {
   attached?: boolean;
 }
 
+const PAGE_TRANSITION_RETRY_MS = 100;
+const PAGE_TRANSITION_TIMEOUT_MS = 3000;
+const PAGE_NOT_ATTACHED_ERROR = "Not attached to an active page";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientPageAttachmentError(err: unknown): boolean {
+  return String(err).includes(PAGE_NOT_ATTACHED_ERROR);
+}
+
+async function waitForPageTargetReady(sessionId: string, targetId: string): Promise<void> {
+  const deadline = Date.now() + PAGE_TRANSITION_TIMEOUT_MS;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      await executeCdpCommand(sessionId, "Page.getFrameTree", {}, targetId);
+      return;
+    } catch (err) {
+      if (!isTransientPageAttachmentError(err)) throw err;
+      lastError = err;
+      await sleep(PAGE_TRANSITION_RETRY_MS);
+    }
+  }
+
+  throw lastError ?? new Error(`Timed out waiting for target ${targetId} to become page-ready`);
+}
+
+async function executePageCommandWhenReady(
+  sessionId: string,
+  method: string,
+  params: Record<string, unknown>,
+  targetId: string
+): Promise<Record<string, unknown>> {
+  try {
+    return await executeCdpCommand(sessionId, method, params, targetId);
+  } catch (err) {
+    if (!isTransientPageAttachmentError(err)) throw err;
+    await waitForPageTargetReady(sessionId, targetId);
+    return executeCdpCommand(sessionId, method, params, targetId);
+  }
+}
+
 export async function handleGetTargets(
   request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
   reply: FastifyReply
@@ -1237,6 +1282,7 @@ export async function handleGoBack(
     if (currentIndex <= 0) return reply.status(400).send({ error: "No previous page in history" });
     const entryId = entries[currentIndex - 1].id;
     await executeCdpCommand(sessionId, "Page.navigateToHistoryEntry", { entryId }, targetId);
+    await waitForPageTargetReady(sessionId, targetId);
     logSessionEvent(sessionId, "go_back", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
@@ -1263,6 +1309,7 @@ export async function handleGoForward(
     if (currentIndex >= entries.length - 1) return reply.status(400).send({ error: "No next page in history" });
     const entryId = entries[currentIndex + 1].id;
     await executeCdpCommand(sessionId, "Page.navigateToHistoryEntry", { entryId }, targetId);
+    await waitForPageTargetReady(sessionId, targetId);
     logSessionEvent(sessionId, "go_forward", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {
@@ -1282,7 +1329,7 @@ export async function handleReload(
 
   const { targetId } = request.body as { targetId: string };
   try {
-    await executeCdpCommand(sessionId, "Page.reload", {}, targetId);
+    await executePageCommandWhenReady(sessionId, "Page.reload", {}, targetId);
     logSessionEvent(sessionId, "reload", request.ip, request.url, 200, { targetId }, getHttpSource(request));
     return reply.send({ ok: true });
   } catch (err) {

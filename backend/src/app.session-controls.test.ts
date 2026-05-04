@@ -77,29 +77,37 @@ function makePrismaMock(options: { userActive?: boolean } = {}) {
   return prisma as unknown as AppPrismaClient & { __events: unknown[] };
 }
 
-async function makeApp(options: { userActive?: boolean } = {}) {
+type ExecuteCdpCommandOverride = (
+  sessionId: string,
+  method: string,
+  params?: Record<string, unknown>,
+  targetId?: string
+) => Promise<Record<string, unknown>>;
+
+async function makeApp(options: { userActive?: boolean; executeCdpCommand?: ExecuteCdpCommandOverride } = {}) {
   const prisma = makePrismaMock(options);
   const calls: Array<{ sessionId: string; method: string; params: Record<string, unknown>; targetId?: string }> = [];
   const dockerCalls: Array<{ containerId: string; text: string }> = [];
   setPrismaForTests(prisma);
+  const defaultExecuteCdpCommand: ExecuteCdpCommandOverride = async (sessionId, method, params = {}, targetId) => {
+    calls.push({ sessionId, method, params, targetId });
+    if (method === "Target.getTargets") {
+      return {
+        targetInfos: [
+          { targetId: "page-1", type: "page", title: "Page", url: "https://example.com" },
+          { targetId: "worker-1", type: "worker", title: "Worker", url: "" },
+        ],
+      };
+    }
+    if (method === "Target.createTarget") return { targetId: "created-target" };
+    if (method === "Page.navigate") return { frameId: "frame-1" };
+    if (method === "Page.getNavigationHistory") {
+      return { currentIndex: 1, entries: [{ id: 10 }, { id: 11 }, { id: 12 }] };
+    }
+    return {};
+  };
   setCdpServiceOverridesForTests({
-    executeCdpCommand: async (sessionId, method, params = {}, targetId) => {
-      calls.push({ sessionId, method, params, targetId });
-      if (method === "Target.getTargets") {
-        return {
-          targetInfos: [
-            { targetId: "page-1", type: "page", title: "Page", url: "https://example.com" },
-            { targetId: "worker-1", type: "worker", title: "Worker", url: "" },
-          ],
-        };
-      }
-      if (method === "Target.createTarget") return { targetId: "created-target" };
-      if (method === "Page.navigate") return { frameId: "frame-1" };
-      if (method === "Page.getNavigationHistory") {
-        return { currentIndex: 1, entries: [{ id: 10 }, { id: 11 }, { id: 12 }] };
-      }
-      return {};
-    },
+    executeCdpCommand: options.executeCdpCommand ?? defaultExecuteCdpCommand,
   });
   setDockerServiceOverridesForTests({
     setContainerClipboard: async (containerId, text) => {
@@ -218,9 +226,10 @@ test("session navigation routes validate body and execute expected CDP commands"
       payload: { targetId: "page-1" },
     });
     assert.equal(back.statusCode, 200);
-    assert.deepEqual(calls.slice(-2), [
+    assert.deepEqual(calls.slice(-3), [
       { sessionId: "session-running", method: "Page.getNavigationHistory", params: {}, targetId: "page-1" },
       { sessionId: "session-running", method: "Page.navigateToHistoryEntry", params: { entryId: 10 }, targetId: "page-1" },
+      { sessionId: "session-running", method: "Page.getFrameTree", params: {}, targetId: "page-1" },
     ]);
 
     const forward = await app.inject({
@@ -229,9 +238,10 @@ test("session navigation routes validate body and execute expected CDP commands"
       payload: { targetId: "page-1" },
     });
     assert.equal(forward.statusCode, 200);
-    assert.deepEqual(calls.slice(-2), [
+    assert.deepEqual(calls.slice(-3), [
       { sessionId: "session-running", method: "Page.getNavigationHistory", params: {}, targetId: "page-1" },
       { sessionId: "session-running", method: "Page.navigateToHistoryEntry", params: { entryId: 12 }, targetId: "page-1" },
+      { sessionId: "session-running", method: "Page.getFrameTree", params: {}, targetId: "page-1" },
     ]);
 
     const reload = await app.inject({
@@ -246,6 +256,38 @@ test("session navigation routes validate body and execute expected CDP commands"
       params: {},
       targetId: "page-1",
     });
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("session reload retries while history navigation is reattaching the page target", async () => {
+  const calls: Array<{ method: string; targetId?: string }> = [];
+  let reloadAttempts = 0;
+  const { app } = await makeApp({
+    executeCdpCommand: async (_sessionId, method, _params = {}, targetId) => {
+      calls.push({ method, targetId });
+      if (method === "Page.reload" && reloadAttempts++ === 0) {
+        throw new Error('{"code":-32000,"message":"Not attached to an active page"}');
+      }
+      return {};
+    },
+  });
+  const token = sessionToken();
+  try {
+    const reload = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/reload?token=${encodeURIComponent(token)}`,
+      payload: { targetId: "page-1" },
+    });
+
+    assert.equal(reload.statusCode, 200);
+    assert.deepEqual(reload.json(), { ok: true });
+    assert.deepEqual(calls, [
+      { method: "Page.reload", targetId: "page-1" },
+      { method: "Page.getFrameTree", targetId: "page-1" },
+      { method: "Page.reload", targetId: "page-1" },
+    ]);
   } finally {
     await closeApp(app);
   }
