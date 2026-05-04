@@ -16,7 +16,7 @@ Steps:
 import argparse
 import asyncio
 import json
-import os
+import secrets
 import subprocess
 import sys
 import time
@@ -31,10 +31,11 @@ from websockets.asyncio.client import ClientConnection
 
 DOCKER_DIR = Path(__file__).parent / "docker"
 
-DEFAULT_BASE_URL = "http://localhost:24900"
+DEFAULT_BASE_URL = "http://localhost:24700"
 DEFAULT_EMAIL    = "test_e2e@browsermint.local"
 DEFAULT_USERNAME = "test_e2e"
 DEFAULT_PASSWORD = "TestE2EPass123!"
+DEFAULT_SESSION_NAME = "Browsermint E2E Smoke"
 
 SESSION_READY_TIMEOUT = 60   # seconds to wait for a session to reach "running"
 SESSION_WAIT_POLL     = 2    # poll interval
@@ -52,35 +53,35 @@ _passed = 0
 _failed = 0
 
 def section(title: str) -> None:
-    print(f"\n{BOLD}{CYAN}{'─' * 60}{RESET}")
-    print(f"{BOLD}{CYAN}  {title}{RESET}")
-    print(f"{BOLD}{CYAN}{'─' * 60}{RESET}")
+    print(f"\n{BOLD}{CYAN}{'─' * 60}{RESET}", flush=True)
+    print(f"{BOLD}{CYAN}  {title}{RESET}", flush=True)
+    print(f"{BOLD}{CYAN}{'─' * 60}{RESET}", flush=True)
 
 def ok(name: str, detail: str = "") -> None:
     global _passed
     _passed += 1
     suffix = f"  {YELLOW}{detail}{RESET}" if detail else ""
-    print(f"  {GREEN}✓{RESET} {name}{suffix}")
+    print(f"  {GREEN}✓{RESET} {name}{suffix}", flush=True)
 
 def fail(name: str, detail: str = "") -> None:
     global _failed
     _failed += 1
     suffix = f"  {RED}{detail}{RESET}" if detail else ""
-    print(f"  {RED}✗{RESET} {name}{suffix}")
+    print(f"  {RED}✗{RESET} {name}{suffix}", flush=True)
 
 def info(msg: str) -> None:
-    print(f"  {YELLOW}→{RESET} {msg}")
+    print(f"  {YELLOW}→{RESET} {msg}", flush=True)
 
 def fatal(msg: str) -> None:
-    print(f"\n{RED}{BOLD}FATAL: {msg}{RESET}\n")
+    print(f"\n{RED}{BOLD}FATAL: {msg}{RESET}\n", flush=True)
     _print_summary()
     sys.exit(1)
 
 def _print_summary() -> None:
     total = _passed + _failed
     color = GREEN if _failed == 0 else RED
-    print(f"\n{BOLD}{'─' * 60}{RESET}")
-    print(f"{color}{BOLD}Results: {_passed}/{total} passed, {_failed} failed{RESET}")
+    print(f"\n{BOLD}{'─' * 60}{RESET}", flush=True)
+    print(f"{color}{BOLD}Results: {_passed}/{total} passed, {_failed} failed{RESET}", flush=True)
 
 # ─── Docker Helpers ────────────────────────────────────────────────────────────
 
@@ -91,33 +92,111 @@ def docker_compose(*args: str) -> subprocess.CompletedProcess:
     return run(["docker", "compose", *args], cwd=DOCKER_DIR, check=False)
 
 def ensure_env_file() -> None:
-    """Create .env from .env.example if missing."""
+    """Create docker/.env from example and fill safe local E2E defaults."""
     env_file     = DOCKER_DIR / ".env"
     example_file = DOCKER_DIR / ".env.example"
+    if not env_file.exists():
+        if not example_file.exists():
+            fatal(".env and .env.example both missing in docker/")
+        info(".env not found — creating local E2E defaults from .env.example")
+        env_file.write_text(example_file.read_text())
+
+    values = _parse_env_file(env_file)
+    changed = False
+
+    defaults = {
+        "NGINX_PORT": "24700",
+        "POSTGRES_USER": "browsermint",
+        "POSTGRES_PASSWORD": f"browsermint_e2e_{secrets.token_hex(12)}",
+        "POSTGRES_DB": "browsermint",
+        "POSTGRES_DATA_DIR": str((DOCKER_DIR / "postgres-data").resolve()),
+        "JWT_SECRET": secrets.token_hex(32),
+        "JWT_SESSION_TOKEN_SECRET": secrets.token_hex(32),
+        "STEEL_BROWSER_IMAGE": "ihainan/browsermint-browser:0.5.1",
+        # The E2E script talks to nginx over http://localhost, so Secure cookies
+        # would be stored but not sent by requests.Session.
+        "COOKIE_SECURE": "false",
+    }
+
+    for key, value in defaults.items():
+        if not values.get(key):
+            values[key] = value
+            changed = True
+
+    if changed:
+        _write_env_file(env_file, values)
+        ok("Prepared docker/.env for local E2E")
+
+
+def _parse_env_file(env_file: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in env_file.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = _clean_env_value(value)
+    return values
+
+
+def _clean_env_value(value: str) -> str:
+    value = value.strip()
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    return value.strip("'\"")
+
+
+def _write_env_file(env_file: Path, values: dict[str, str]) -> None:
+    lines = [
+        "# Browsermint local E2E environment",
+        "# Generated/updated by test_e2e.py. docker/.env is gitignored.",
+    ]
+    for key in sorted(values):
+        lines.append(f"{key}={values[key]}")
+    env_file.write_text("\n".join(lines) + "\n")
+
+
+def default_base_url_from_env() -> str:
+    env_file = DOCKER_DIR / ".env"
     if env_file.exists():
-        return
-    if not example_file.exists():
-        fatal(".env and .env.example both missing in docker/")
-    info(".env not found — copying from .env.example")
-    env_file.write_text(example_file.read_text())
-    ok("Created docker/.env from .env.example")
+        port = _parse_env_file(env_file).get("NGINX_PORT")
+        if port:
+            return f"http://localhost:{port}"
+    return DEFAULT_BASE_URL
 
 def ensure_postgres_dir() -> None:
     """Ensure POSTGRES_DATA_DIR exists (compose will fail otherwise)."""
-    env_text = (DOCKER_DIR / ".env").read_text()
-    for line in env_text.splitlines():
-        if line.startswith("POSTGRES_DATA_DIR="):
-            data_dir = Path(line.split("=", 1)[1].strip())
-            if not data_dir.exists():
-                info(f"Creating POSTGRES_DATA_DIR: {data_dir}")
-                data_dir.mkdir(parents=True, exist_ok=True)
-                ok(f"Created {data_dir}")
-            return
+    data_dir_value = _parse_env_file(DOCKER_DIR / ".env").get("POSTGRES_DATA_DIR")
+    if not data_dir_value:
+        fatal("POSTGRES_DATA_DIR missing from docker/.env")
+    data_dir = Path(data_dir_value)
+    if not data_dir.exists():
+        info(f"Creating POSTGRES_DATA_DIR: {data_dir}")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        ok(f"Created {data_dir}")
+
+
+def ensure_browser_image() -> None:
+    """Build the browser image used by dynamically-created session containers."""
+    env = _parse_env_file(DOCKER_DIR / ".env")
+    image = env.get("STEEL_BROWSER_IMAGE", "ihainan/browsermint-browser:0.5.1")
+    inspect = run(["docker", "image", "inspect", image], check=False)
+    if inspect.returncode == 0:
+        ok(f"Browser image available: {image}")
+        return
+
+    info(f"Browser image {image} not found — building compose service 'browser'…")
+    build = docker_compose("--profile", "build", "build", "browser")
+    if build.returncode != 0:
+        print(build.stderr)
+        fatal("docker compose build browser failed")
+    ok(f"Built browser image: {image}")
 
 def ensure_services_up(base_url: str) -> None:
     section("Step 1: Docker Services")
     ensure_env_file()
     ensure_postgres_dir()
+    ensure_browser_image()
 
     # Check if all expected services are healthy / running
     result = docker_compose("ps", "--format", "json")
@@ -208,14 +287,17 @@ def wait_for_session_running(base_url: str, s: requests.Session, session_id: str
     fatal(f"Session {session_id} did not become 'running' within {SESSION_READY_TIMEOUT}s")
     return {}
 
-def ensure_session(base_url: str, s: requests.Session) -> tuple[str, str]:
-    """Return (session_id, token) for a running session, creating one if needed."""
+def ensure_session(base_url: str, s: requests.Session, reuse_any_session: bool) -> tuple[str, str, bool]:
+    """Return (session_id, token, created_by_e2e) for a running session."""
     section("Step 3: Session")
 
     # List existing sessions
     r = s.get(f"{base_url}/api/sessions")
     sessions = r.json().get("sessions", []) if r.status_code == 200 else []
-    usable = [x for x in sessions if x["status"] in ("running", "paused")]
+    usable = [
+        x for x in sessions
+        if x["status"] in ("running", "paused") and (reuse_any_session or x.get("name") == DEFAULT_SESSION_NAME)
+    ]
 
     if usable:
         sess = usable[0]
@@ -224,9 +306,10 @@ def ensure_session(base_url: str, s: requests.Session) -> tuple[str, str]:
         if sess["status"] == "paused":
             info("Session is paused — it will auto-unpause on first WS connect")
         ok(f"Using session {session_id}")
+        created_by_e2e = False
     else:
         info("No usable session found — creating a new one…")
-        r2 = s.post(f"{base_url}/api/sessions", json={})
+        r2 = s.post(f"{base_url}/api/sessions", json={"name": DEFAULT_SESSION_NAME})
         if r2.status_code >= 400:
             info(f"Create session response ({r2.status_code}): {r2.text}")
             fatal("Failed to create session — check maxSessions limit")
@@ -234,6 +317,7 @@ def ensure_session(base_url: str, s: requests.Session) -> tuple[str, str]:
         info(f"Session {session_id} created, waiting for 'running'…")
         sess = wait_for_session_running(base_url, s, session_id)
         ok(f"Session {session_id} is running")
+        created_by_e2e = True
 
     # Get / refresh token
     r3 = s.post(f"{base_url}/api/sessions/{session_id}/token", json={})
@@ -242,7 +326,18 @@ def ensure_session(base_url: str, s: requests.Session) -> tuple[str, str]:
     token = r3.json()["token"]
     ok("Session token obtained")
 
-    return session_id, token
+    return session_id, token, created_by_e2e
+
+
+def cleanup_session(base_url: str, s: requests.Session, session_id: str) -> None:
+    section("Cleanup")
+    r = s.delete(f"{base_url}/api/sessions/{session_id}", timeout=30)
+    if r.status_code == 200:
+        ok(f"Deleted E2E session {session_id}")
+    elif r.status_code == 404:
+        ok(f"E2E session {session_id} already gone")
+    else:
+        fail(f"Delete E2E session {session_id}", f"{r.status_code}: {r.text[:120]}")
 
 # ─── HTTP API Tests ────────────────────────────────────────────────────────────
 
@@ -729,31 +824,41 @@ async def async_main(base_url: str, session_id: str, token: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browsermint E2E Tests")
-    parser.add_argument("--base-url",  default=DEFAULT_BASE_URL, help="Base URL of Browsermint")
+    parser.add_argument("--base-url",  default=None, help="Base URL of Browsermint (defaults to docker/.env NGINX_PORT)")
     parser.add_argument("--email",     default=DEFAULT_EMAIL,    help="Test user email")
     parser.add_argument("--username",  default=DEFAULT_USERNAME, help="Test user username")
     parser.add_argument("--password",  default=DEFAULT_PASSWORD, help="Test user password")
     parser.add_argument("--skip-docker", action="store_true",    help="Skip docker setup step")
+    parser.add_argument("--reuse-any-session", action="store_true", help="Allow reusing any running/paused session, not just E2E-named sessions")
+    parser.add_argument("--keep-session", action="store_true", help="Do not delete a session created by this E2E run")
     args = parser.parse_args()
 
-    print(f"\n{BOLD}Browsermint E2E Test Suite{RESET}")
-    print(f"Target: {args.base_url}")
+    if not args.skip_docker:
+        ensure_env_file()
+    base_url = args.base_url or default_base_url_from_env()
+
+    print(f"\n{BOLD}Browsermint E2E Test Suite{RESET}", flush=True)
+    print(f"Target: {base_url}", flush=True)
 
     if not args.skip_docker:
-        ensure_services_up(args.base_url)
+        ensure_services_up(base_url)
     else:
         section("Step 1: Docker Services")
         info("Skipped (--skip-docker)")
 
-    session = ensure_user_and_login(args.base_url, args.email, args.username, args.password)
-    session_id, token = ensure_session(args.base_url, session)
+    session = ensure_user_and_login(base_url, args.email, args.username, args.password)
+    session_id, token, created_by_e2e = ensure_session(base_url, session, args.reuse_any_session)
 
-    test_http_apis(args.base_url, session, session_id, token)
+    try:
+        test_http_apis(base_url, session, session_id, token)
 
-    asyncio.run(async_main(args.base_url, session_id, token))
+        asyncio.run(async_main(base_url, session_id, token))
 
-    test_session_events(args.base_url, session, session_id)
-    test_admin_apis(args.base_url, session)
+        test_session_events(base_url, session, session_id)
+        test_admin_apis(base_url, session)
+    finally:
+        if created_by_e2e and not args.keep_session:
+            cleanup_session(base_url, session, session_id)
 
     _print_summary()
     sys.exit(0 if _failed == 0 else 1)
