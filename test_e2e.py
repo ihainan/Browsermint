@@ -91,6 +91,16 @@ def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subproce
 def docker_compose(*args: str) -> subprocess.CompletedProcess:
     return run(["docker", "compose", *args], cwd=DOCKER_DIR, check=False)
 
+def compose_down(remove_volumes: bool = False) -> None:
+    args = ["down"]
+    if remove_volumes:
+        args.append("-v")
+    result = docker_compose(*args)
+    if result.returncode == 0:
+        ok("docker compose down" + (" -v" if remove_volumes else ""))
+    else:
+        fail("docker compose down", result.stderr[:160])
+
 def ensure_env_file() -> None:
     """Create docker/.env from example and fill safe local E2E defaults."""
     env_file     = DOCKER_DIR / ".env"
@@ -831,6 +841,8 @@ def main() -> None:
     parser.add_argument("--skip-docker", action="store_true",    help="Skip docker setup step")
     parser.add_argument("--reuse-any-session", action="store_true", help="Allow reusing any running/paused session, not just E2E-named sessions")
     parser.add_argument("--keep-session", action="store_true", help="Do not delete a session created by this E2E run")
+    parser.add_argument("--down-after", action="store_true", help="Run docker compose down after the E2E run")
+    parser.add_argument("--down-volumes", action="store_true", help="When used with --down-after, also remove compose volumes")
     args = parser.parse_args()
 
     if not args.skip_docker:
@@ -859,6 +871,9 @@ def main() -> None:
     finally:
         if created_by_e2e and not args.keep_session:
             cleanup_session(base_url, session, session_id)
+        if args.down_after:
+            section("Docker Teardown")
+            compose_down(remove_volumes=args.down_volumes)
 
     _print_summary()
     sys.exit(0 if _failed == 0 else 1)

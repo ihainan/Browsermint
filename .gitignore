@@ -63,6 +63,7 @@ pids
 # Coverage directory
 coverage/
 .nyc_output/
+__pycache__/
 
 # Temporary files
 tmp/
