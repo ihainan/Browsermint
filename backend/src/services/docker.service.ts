@@ -203,27 +203,16 @@ function isNetworkNotFoundError(err: unknown): boolean {
   return /network\b.*\bnot found/i.test(msg) || /failed to set up container networking/i.test(msg);
 }
 
-async function reconnectContainerNetwork(
-  container: Docker.Container,
-  containerId: string
-): Promise<void> {
-  // Disconnect from every stale network endpoint (force=true handles non-running containers).
-  let staleNetworks: string[] = [];
+async function reconnectContainerNetwork(containerId: string): Promise<void> {
+  // When docker compose down+up recreates the network under the same name, the old
+  // NetworkID embedded in the container config is stale. Docker treats a connect() call
+  // as an upsert: if a stale endpoint exists it replaces it; if already current it
+  // returns 409 which we ignore. No explicit disconnect needed.
   try {
-    const info = await container.inspect();
-    staleNetworks = Object.keys(info.NetworkSettings.Networks ?? {});
-  } catch {
-    // If inspect fails we can still try to connect fresh.
+    await docker.getNetwork(config.DOCKER_NETWORK_NAME).connect({ Container: containerId });
+  } catch (err: unknown) {
+    if ((err as { statusCode?: number }).statusCode !== 409) throw err;
   }
-  for (const networkId of staleNetworks) {
-    try {
-      await docker.getNetwork(networkId).disconnect({ Container: containerId, Force: true });
-    } catch {
-      // Best-effort: the network may already be gone.
-    }
-  }
-  // Connect to the current compose network so the container gets a fresh IP.
-  await docker.getNetwork(config.DOCKER_NETWORK_NAME).connect({ Container: containerId });
 }
 
 // Start an existing (stopped) container and return its updated network info.
@@ -249,7 +238,7 @@ export async function startExistingContainer(
       console.warn(
         `[docker] Container ${containerId.slice(0, 12)}: network not found, reconnecting to ${config.DOCKER_NETWORK_NAME}`
       );
-      await reconnectContainerNetwork(container, containerId);
+      await reconnectContainerNetwork(containerId);
       await container.start();
       console.info(`[docker] Container ${containerId.slice(0, 12)} started after network reconnect`);
     } else {
