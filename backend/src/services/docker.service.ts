@@ -242,6 +242,9 @@ export async function startExistingContainer(
       await container.start();
       console.info(`[docker] Container ${containerId.slice(0, 12)} started after network reconnect`);
     } else {
+      console.warn(
+        `[docker] Container ${containerId.slice(0, 12)} start failed — statusCode=${statusCode} message=${(err as Error).message}`
+      );
       throw err;
     }
   }
