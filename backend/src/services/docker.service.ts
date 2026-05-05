@@ -254,10 +254,15 @@ export async function startExistingContainer(
   // same PID in the container's fresh PID namespace). Xvfb reads the lock, sees its
   // own PID as "already running", and exits. Chrome then has no display and crashes.
   //
-  // Fix: kill stale Xvfb, remove lock files, restart Xvfb fresh. Chrome is safe to
-  // do this before because it is started by the Node.js API ~2s after container boot
-  // (the entrypoint sleeps 2 seconds before launching the API, which then starts Chrome).
+  // The container CMD is: `nohup Xvfb & sleep 2 && nohup x0vncserver & sleep 1 && nohup websockify & exec api`
+  // We must wait for that 3-second sequence to finish before killing anything; otherwise
+  // our exec and the CMD race — both try to start x0vncserver, one wins, the other dies,
+  // and the survivor may also die due to the conflict, leaving VNC broken.
+  //
+  // After the 3.5 s wait the CMD has exec'd into the API and all services are settled;
+  // we can safely kill and restart them without interference.
   try {
+    await new Promise((r) => setTimeout(r, 3500));
     console.info(`[docker] Clearing stale Xvfb lock and restarting display for container ${containerId.slice(0, 12)}`);
     const exec = await container.exec({
       Cmd: [
@@ -265,9 +270,10 @@ export async function startExistingContainer(
         "pkill -x Xvfb 2>/dev/null || true; " +
         "rm -f /tmp/.X10-lock /tmp/.X11-unix/X10; " +
         "nohup Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 & " +
-        "sleep 1; " +
+        "sleep 2; " +
         "pkill -f x0vncserver 2>/dev/null || true; " +
         "nohup x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 >/tmp/x0vnc.log 2>&1 & " +
+        "sleep 1; " +
         "pkill -f 'websockify 6080' 2>/dev/null || true; " +
         "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 &",
       ],
@@ -275,8 +281,8 @@ export async function startExistingContainer(
       AttachStderr: false,
     });
     await exec.start({ Detach: true });
-    // Brief pause so Xvfb is ready before Chrome starts (which happens ~2s after boot)
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for Xvfb+x0vncserver+websockify to fully start (exec script sleeps 2+1=3s)
+    await new Promise((r) => setTimeout(r, 3500));
     console.info(`[docker] Xvfb restarted for container ${containerId.slice(0, 12)}`);
   } catch (err) {
     console.warn(`[docker] Failed to restart Xvfb for container ${containerId.slice(0, 12)}:`, (err as Error).message);
