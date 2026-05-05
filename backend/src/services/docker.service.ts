@@ -521,6 +521,45 @@ async function _reconcileContainers(
         where: { id: session.id },
         data: { containerId: null, containerName: null, internalApiUrl: null },
       });
+    } else if (container && container.State === "exited" && session.autoRestartAttempts < MAX_AUTO_RESTART) {
+      // Existing error session whose container exited (e.g. host rebooted while backend ran old code).
+      // Attempt auto-restart so the session self-heals without user intervention.
+      console.info(
+        `[reconcile] Session ${session.id}: error status with exited container — attempting auto-restart ` +
+        `(attempt ${session.autoRestartAttempts + 1}/${MAX_AUTO_RESTART})`
+      );
+      try {
+        const containerInfo = await startExistingContainer(session.containerId!);
+        await prisma.session.update({
+          where: { id: session.id },
+          data: {
+            status: "running",
+            autoRestartAttempts: 0,
+            internalApiUrl: containerInfo.internalApiUrl,
+            runningStartedAt: new Date(Date.now()),
+          },
+        });
+        console.info(`[reconcile] Session ${session.id}: auto-restart from error succeeded`);
+        onSessionRecovered?.(session.id, containerInfo.internalApiUrl);
+      } catch (err: unknown) {
+        const statusCode = (err as { statusCode?: number }).statusCode;
+        if (statusCode === 404) {
+          console.warn(`[reconcile] Session ${session.id}: container gone (404) during error auto-restart — clearing metadata`);
+          await prisma.session.update({
+            where: { id: session.id },
+            data: { containerId: null, containerName: null, internalApiUrl: null },
+          });
+        } else {
+          console.warn(
+            `[reconcile] Session ${session.id}: error auto-restart failed (attempt ${session.autoRestartAttempts + 1}):`,
+            (err as Error).message
+          );
+          await prisma.session.update({
+            where: { id: session.id },
+            data: { autoRestartAttempts: { increment: 1 } },
+          });
+        }
+      }
     }
   }
 }

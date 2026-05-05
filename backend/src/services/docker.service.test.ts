@@ -450,6 +450,36 @@ test("reconcileContainers auto-restarts a paused session whose container exited,
   assert.equal(recoveredSessions[0].sessionId, "paused-exited");
 });
 
+test("reconcileContainers auto-restarts an error session whose container exited (legacy error recovery)", async () => {
+  const recoveredSessions: Array<{ sessionId: string; url: string }> = [];
+  const { prisma, calls } = await runReconcileTest(
+    [
+      makeSession({
+        id: "legacy-error",
+        status: "error",
+        containerId: "container-legacy-error",
+        autoRestartAttempts: 0,
+      }),
+    ],
+    [makeContainer("container-legacy-error", "legacy-error", "exited")],
+    false,
+    {
+      onSessionRecovered: (sessionId, url) => recoveredSessions.push({ sessionId, url }),
+      startExistingContainer: async () => ({
+        containerId: "container-legacy-error",
+        containerName: "browsermint-session-legacy-error",
+        internalApiUrl: "http://10.0.0.5:3000",
+      }),
+    }
+  );
+
+  assert.ok(calls.includes("docker:start:container-legacy-error"));
+  assert.equal(prisma.__sessions[0].status, "running");
+  assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
+  assert.equal(recoveredSessions.length, 1);
+  assert.equal(recoveredSessions[0].sessionId, "legacy-error");
+});
+
 test("reconcileContainers resets autoRestartAttempts to 0 on successful restart after prior failures", async () => {
   const { prisma } = await runReconcileTest(
     [
