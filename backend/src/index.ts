@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { prisma } from "./db/client.js";
 import { createApp } from "./app.js";
-import { reconcileContainers, pullImageIfNeeded } from "./services/docker.service.js";
+import { reconcileContainers, pullImageIfNeeded, type SessionRecoveredCallback } from "./services/docker.service.js";
 import { scheduleIdlePauseOnStartup } from "./services/proxy.service.js";
 import { initCdpSession } from "./services/cdp.service.js";
 
@@ -17,10 +17,24 @@ const RECONCILE_INTERVAL_MS = 30_000;
 let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 
 server.addHook("onReady", async () => {
+  const onSessionRecovered: SessionRecoveredCallback = (sessionId, internalApiUrl) => {
+    server.log.info(`[session] Session ${sessionId}: auto-restart succeeded, re-attaching CDP...`);
+    void initCdpSession(sessionId, internalApiUrl).then((ok) => {
+      if (!ok) {
+        server.log.warn(`[session] Session ${sessionId}: CDP unreachable after auto-restart — marking error`);
+        return prisma.session.update({ where: { id: sessionId }, data: { status: "error" } });
+      }
+      server.log.info(`[session] Session ${sessionId}: CDP re-attached after auto-restart`);
+      scheduleIdlePauseOnStartup(sessionId);
+    }).catch((err) => {
+      server.log.warn({ err }, `[session] Failed to re-attach CDP for auto-restarted session ${sessionId}`);
+    });
+  };
+
   // Reconcile first (synchronously) so broken sessions are marked error before
   // we try to re-attach CDP — no point connecting to a session we're about to fix.
   server.log.info("Reconciling containers...");
-  await reconcileContainers(true).catch((err) => {
+  await reconcileContainers(true, onSessionRecovered).catch((err) => {
     server.log.warn({ err }, "Container reconcile failed");
   });
 
@@ -54,7 +68,7 @@ server.addHook("onReady", async () => {
   // Periodically reconcile to recover sessions stuck in creating/stopping
   // (e.g., after a backend crash or restart mid-operation).
   reconcileTimer = setInterval(() => {
-    void reconcileContainers().catch((err) => {
+    void reconcileContainers(false, onSessionRecovered).catch((err) => {
       server.log.warn({ err }, "Periodic reconcile failed");
     });
   }, RECONCILE_INTERVAL_MS);

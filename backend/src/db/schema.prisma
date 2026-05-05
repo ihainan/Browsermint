@@ -29,8 +29,9 @@ model Session {
   containerName  String?        @db.VarChar(128)
   internalApiUrl String?        @db.VarChar(256)
   savedTabs        Json?          // Array of URLs saved before stop, restored on resume
-  onlineMs         Int       @default(0)      // Accumulated milliseconds in "running" state
-  runningStartedAt DateTime?                  // When the current "running" period began
+  onlineMs            Int       @default(0)      // Accumulated milliseconds in "running" state
+  runningStartedAt    DateTime?                  // When the current "running" period began
+  autoRestartAttempts Int       @default(0)      // Incremented on each auto-restart failure; reset to 0 on success
   createdAt        DateTime  @default(now())
   lastActiveAt     DateTime  @default(now())
   expiresAt      DateTime?

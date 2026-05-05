@@ -16,6 +16,10 @@ export interface ContainerInfo {
   internalApiUrl: string;
 }
 
+export type SessionRecoveredCallback = (sessionId: string, internalApiUrl: string) => void;
+
+const MAX_AUTO_RESTART = 3;
+
 type DockerServiceOverrides = Partial<{
   createAndStartContainer: (sessionId: string) => Promise<ContainerInfo>;
   waitForContainerReady: (internalApiUrl: string) => Promise<void>;
@@ -284,17 +288,23 @@ export async function stopAndRemoveContainer(
 
 let reconcileRunning = false;
 
-export async function reconcileContainers(startup = false): Promise<void> {
+export async function reconcileContainers(
+  startup = false,
+  onSessionRecovered?: SessionRecoveredCallback
+): Promise<void> {
   if (reconcileRunning) return;
   reconcileRunning = true;
   try {
-    await _reconcileContainers(startup);
+    await _reconcileContainers(startup, onSessionRecovered);
   } finally {
     reconcileRunning = false;
   }
 }
 
-async function _reconcileContainers(startup: boolean): Promise<void> {
+async function _reconcileContainers(
+  startup: boolean,
+  onSessionRecovered: SessionRecoveredCallback | undefined
+): Promise<void> {
   let managedContainers: Docker.ContainerInfo[] = [];
   try {
     managedContainers = dockerServiceOverrides.listContainers
@@ -350,14 +360,60 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
         data: { status: "paused", onlineMs: { increment: delta }, runningStartedAt: null },
       });
     } else if (container.State !== "running") {
-      // Container exists but stopped/crashed — user can retry resume
-      console.info(`[reconcile] Session ${session.id}: container state is "${container.State}" — marking error`);
-      const delta = session.runningStartedAt
-        ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
-      await prisma.session.update({
-        where: { id: session.id },
-        data: { status: "error", onlineMs: { increment: delta }, runningStartedAt: null },
-      });
+      const isExited = container.State === "exited";
+      const canRetry = isExited && session.autoRestartAttempts < MAX_AUTO_RESTART;
+
+      if (canRetry) {
+        console.info(
+          `[reconcile] Session ${session.id}: container exited — attempting auto-restart ` +
+          `(attempt ${session.autoRestartAttempts + 1}/${MAX_AUTO_RESTART})`
+        );
+        try {
+          const containerInfo = await startExistingContainer(session.containerId!);
+          await prisma.session.update({
+            where: { id: session.id },
+            data: {
+              autoRestartAttempts: 0,
+              internalApiUrl: containerInfo.internalApiUrl,
+              runningStartedAt: new Date(Date.now()),
+            },
+          });
+          console.info(`[reconcile] Session ${session.id}: auto-restart succeeded`);
+          onSessionRecovered?.(session.id, containerInfo.internalApiUrl);
+        } catch (err: unknown) {
+          const statusCode = (err as { statusCode?: number }).statusCode;
+          if (statusCode === 404) {
+            console.warn(`[reconcile] Session ${session.id}: container gone (404) — marking error`);
+            const delta = session.runningStartedAt
+              ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+            await prisma.session.update({
+              where: { id: session.id },
+              data: { status: "error", onlineMs: { increment: delta }, runningStartedAt: null },
+            });
+          } else {
+            console.warn(
+              `[reconcile] Session ${session.id}: auto-restart failed ` +
+              `(attempt ${session.autoRestartAttempts + 1}):`,
+              (err as Error).message
+            );
+            await prisma.session.update({
+              where: { id: session.id },
+              data: { autoRestartAttempts: { increment: 1 } },
+            });
+          }
+        }
+      } else {
+        const reason = !isExited
+          ? `container state is "${container.State}"`
+          : `auto-restart limit reached (${session.autoRestartAttempts}/${MAX_AUTO_RESTART})`;
+        console.info(`[reconcile] Session ${session.id}: ${reason} — marking error`);
+        const delta = session.runningStartedAt
+          ? Math.max(0, Date.now() - session.runningStartedAt.getTime()) : 0;
+        await prisma.session.update({
+          where: { id: session.id },
+          data: { status: "error", onlineMs: { increment: delta }, runningStartedAt: null },
+        });
+      }
     } else if (session.status === "creating" && startup) {
       // Container is running but session is stuck in "creating" (backend crashed mid-init).
       // Only fix this on startup — during normal operation handleStartSession may still be
@@ -406,8 +462,45 @@ async function _reconcileContainers(startup: boolean): Promise<void> {
         data: { status: "running", runningStartedAt: new Date(Date.now()) },
       });
     } else {
-      console.info(`[reconcile] Session ${session.id}: paused but container state "${container.State}" — marking error`);
-      await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+      const isExited = container.State === "exited";
+      const canRetry = isExited && session.autoRestartAttempts < MAX_AUTO_RESTART;
+
+      if (canRetry) {
+        console.info(
+          `[reconcile] Session ${session.id}: paused container exited — attempting auto-restart ` +
+          `(attempt ${session.autoRestartAttempts + 1}/${MAX_AUTO_RESTART})`
+        );
+        try {
+          const containerInfo = await startExistingContainer(session.containerId!);
+          await prisma.session.update({
+            where: { id: session.id },
+            data: {
+              status: "running",
+              autoRestartAttempts: 0,
+              internalApiUrl: containerInfo.internalApiUrl,
+              runningStartedAt: new Date(Date.now()),
+            },
+          });
+          console.info(`[reconcile] Session ${session.id}: auto-restart from paused succeeded`);
+          onSessionRecovered?.(session.id, containerInfo.internalApiUrl);
+        } catch (err: unknown) {
+          const statusCode = (err as { statusCode?: number }).statusCode;
+          if (statusCode === 404) {
+            await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+          } else {
+            await prisma.session.update({
+              where: { id: session.id },
+              data: { autoRestartAttempts: { increment: 1 } },
+            });
+          }
+        }
+      } else {
+        const reason = !isExited
+          ? `container state is "${container.State}"`
+          : `auto-restart limit reached (${session.autoRestartAttempts}/${MAX_AUTO_RESTART})`;
+        console.info(`[reconcile] Session ${session.id}: paused — ${reason} — marking error`);
+        await prisma.session.update({ where: { id: session.id }, data: { status: "error" } });
+      }
     }
   }
 
