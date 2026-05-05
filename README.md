@@ -4,7 +4,7 @@
 
 # Browsermint
 
-[![CI](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml/badge.svg)](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml)
+[![CI](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 A self-hosted browser session management platform.  
