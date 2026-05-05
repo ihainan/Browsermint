@@ -198,6 +198,34 @@ export async function unpauseContainer(containerId: string): Promise<void> {
   }
 }
 
+function isNetworkNotFoundError(err: unknown): boolean {
+  const msg = (err as Error).message ?? "";
+  return /network\b.*\bnot found/i.test(msg) || /failed to set up container networking/i.test(msg);
+}
+
+async function reconnectContainerNetwork(
+  container: Docker.Container,
+  containerId: string
+): Promise<void> {
+  // Disconnect from every stale network endpoint (force=true handles non-running containers).
+  let staleNetworks: string[] = [];
+  try {
+    const info = await container.inspect();
+    staleNetworks = Object.keys(info.NetworkSettings.Networks ?? {});
+  } catch {
+    // If inspect fails we can still try to connect fresh.
+  }
+  for (const networkId of staleNetworks) {
+    try {
+      await docker.getNetwork(networkId).disconnect({ Container: containerId, Force: true });
+    } catch {
+      // Best-effort: the network may already be gone.
+    }
+  }
+  // Connect to the current compose network so the container gets a fresh IP.
+  await docker.getNetwork(config.DOCKER_NETWORK_NAME).connect({ Container: containerId });
+}
+
 // Start an existing (stopped) container and return its updated network info.
 // The container's filesystem (Chrome user data, cookies, etc.) is preserved.
 export async function startExistingContainer(
@@ -213,8 +241,20 @@ export async function startExistingContainer(
   } catch (err: unknown) {
     const statusCode = (err as { statusCode?: number }).statusCode;
     // 304: container is already running (e.g., backend crashed mid-init) — that's fine
-    if (statusCode !== 304) throw err;
-    console.info(`[docker] Container ${containerId.slice(0, 12)} was already running`);
+    if (statusCode === 304) {
+      console.info(`[docker] Container ${containerId.slice(0, 12)} was already running`);
+    } else if (isNetworkNotFoundError(err)) {
+      // docker compose down deletes managed networks; containers still reference the old
+      // network ID and cannot start. Reconnect to the current network and retry.
+      console.warn(
+        `[docker] Container ${containerId.slice(0, 12)}: network not found, reconnecting to ${config.DOCKER_NETWORK_NAME}`
+      );
+      await reconnectContainerNetwork(container, containerId);
+      await container.start();
+      console.info(`[docker] Container ${containerId.slice(0, 12)} started after network reconnect`);
+    } else {
+      throw err;
+    }
   }
 
   // Xvfb fails to start on container restart because /tmp/.X10-lock is left behind
