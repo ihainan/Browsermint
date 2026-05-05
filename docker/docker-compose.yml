@@ -33,6 +33,11 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       DEFAULT_USER_MAX_SESSIONS: ${DEFAULT_USER_MAX_SESSIONS:-2}
       CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-}
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
+      IDLE_PAUSE_ENABLED: ${IDLE_PAUSE_ENABLED:-true}
+      IDLE_PAUSE_TIMEOUT_MS: ${IDLE_PAUSE_TIMEOUT_MS:-600000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SESSION_TOKEN_EXPIRY: ${SESSION_TOKEN_EXPIRY:-180d}
       NODE_ENV: production
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
