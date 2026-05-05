@@ -4,9 +4,7 @@
 
 # Browsermint
 
-<!-- Build status badge goes here, e.g.:
-[![CI](https://github.com/your-org/browsermint/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/browsermint/actions/workflows/ci.yml)
--->
+[![CI](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml/badge.svg)](https://github.com/ihainan/Browsermint/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 A self-hosted browser session management platform.  
