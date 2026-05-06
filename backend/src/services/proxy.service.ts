@@ -809,6 +809,13 @@ export function clearIdleTimer(sessionId: string): void {
   wsConnectionCount.delete(sessionId);
 }
 
+export function hasIdleTimerForTests(sessionId: string): boolean {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("hasIdleTimerForTests can only be used when NODE_ENV=test");
+  }
+  return idleTimers.has(sessionId);
+}
+
 export function scheduleIdlePauseOnStartup(sessionId: string): void {
   scheduleIdlePause(sessionId);
 }

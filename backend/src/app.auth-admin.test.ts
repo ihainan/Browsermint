@@ -14,6 +14,7 @@ Object.assign(process.env, {
 const { createApp } = await import("./app.js");
 const { config } = await import("./config.js");
 const { setPrismaForTests } = await import("./db/client.js");
+const { handleDeleteUser } = await import("./modules/admin/admin.controller.js");
 
 type UserRecord = {
   id: string;
@@ -172,6 +173,13 @@ function authCookie(res: { headers: Record<string, string | string[] | undefined
   return cookie.split(";")[0];
 }
 
+function setCookieHeader(res: { headers: Record<string, string | string[] | undefined> }) {
+  const raw = res.headers["set-cookie"];
+  const cookie = Array.isArray(raw) ? raw[0] : raw;
+  assert.ok(cookie, "expected auth response to set a cookie");
+  return cookie;
+}
+
 async function register(app: Awaited<ReturnType<typeof createApp>>, username: string, email: string, password = "Password123!") {
   return app.inject({
     method: "POST",
@@ -232,6 +240,32 @@ test("registration creates the first user as admin and supports /me from auth co
     assert.equal(me.json().user.email, "owner@example.com");
   } finally {
     await app.close();
+  }
+});
+
+test("auth cookie attributes include API path, SameSite, HttpOnly, and conditional Secure", async () => {
+  const originalCookieSecure = config.COOKIE_SECURE;
+  try {
+    for (const secure of [false, true]) {
+      config.COOKIE_SECURE = secure;
+      const { app } = await makeApp();
+      try {
+        const res = await register(app, secure ? "secure_owner" : "plain_owner", secure ? "secure@example.com" : "plain@example.com");
+        assert.equal(res.statusCode, 201);
+
+        const cookie = setCookieHeader(res);
+        assert.match(cookie, /^browsermint_auth=[^;]+/);
+        assert.match(cookie, /; HttpOnly(?:;|$)/);
+        assert.match(cookie, /; Path=\/api\/(?:;|$)/);
+        assert.match(cookie, /; Max-Age=86400(?:;|$)/);
+        assert.match(cookie, /; SameSite=Lax(?:;|$)/);
+        assert.equal(cookie.includes("; Secure"), secure);
+      } finally {
+        await app.close();
+      }
+    }
+  } finally {
+    config.COOKIE_SECURE = originalCookieSecure;
   }
 });
 
@@ -563,6 +597,42 @@ test("admin user deletion protects self and removes other users", async () => {
   } finally {
     await app.close();
   }
+});
+
+test("admin delete controller blocks deleting the last admin", async () => {
+  const prisma = makePrismaMock([{
+    id: "last-admin",
+    username: "admin",
+    email: "admin@example.com",
+    passwordHash: "hash",
+    isAdmin: true,
+    isActive: true,
+    maxSessions: 0,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  }]);
+  setPrismaForTests(prisma);
+
+  let statusCode = 200;
+  let payload: unknown;
+  const reply = {
+    status(code: number) {
+      statusCode = code;
+      return this;
+    },
+    send(body?: unknown) {
+      payload = body;
+      return this;
+    },
+  };
+
+  await handleDeleteUser(
+    { params: { id: "last-admin" }, user: { sub: "other-admin" } } as never,
+    reply as never
+  );
+
+  assert.equal(statusCode, 400);
+  assert.deepEqual(payload, { error: "Cannot delete the last admin" });
+  assert.equal(prisma.__users.some((user) => user.id === "last-admin"), true);
 });
 
 test("admin session listing routes expose active sessions with user and event counts", async () => {

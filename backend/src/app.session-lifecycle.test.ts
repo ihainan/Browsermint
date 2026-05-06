@@ -23,6 +23,11 @@ const {
   resetCdpServiceOverridesForTests,
   setCdpServiceOverridesForTests,
 } = await import("./services/cdp.service.js");
+const {
+  clearIdleTimer,
+  hasIdleTimerForTests,
+  scheduleIdlePauseOnStartup,
+} = await import("./services/proxy.service.js");
 
 type UserRecord = {
   id: string;
@@ -114,14 +119,16 @@ function cloneSession(session: SessionRecord): SessionRecord {
   };
 }
 
-function makePrismaMock(seedSessions: SessionRecord[] = []) {
+function makePrismaMock(seedSessions: SessionRecord[] = [], userOverrides: Partial<UserRecord> = {}) {
   const sessions = [...seedSessions];
+  const user = { ...owner, ...userOverrides };
+  let txQueue = Promise.resolve();
 
   const tx = {
     $executeRaw: async () => undefined,
     user: {
       findUnique: async (args: { where: { id: string } }) =>
-        args.where.id === owner.id ? { ...owner } : null,
+        args.where.id === user.id ? { ...user } : null,
     },
     session: {
       count: async (args: { where: Record<string, unknown> }) =>
@@ -153,11 +160,11 @@ function makePrismaMock(seedSessions: SessionRecord[] = []) {
   const prisma = {
     user: {
       findUnique: async (args: { where: { id?: string }; select?: Record<string, unknown> }) => {
-        if (args.where.id !== owner.id) return null;
+        if (args.where.id !== user.id) return null;
         if (args.select) {
-          return Object.fromEntries(Object.keys(args.select).map((key) => [key, owner[key as keyof UserRecord]]));
+          return Object.fromEntries(Object.keys(args.select).map((key) => [key, user[key as keyof UserRecord]]));
         }
-        return { ...owner };
+        return { ...user };
       },
     },
     session: {
@@ -171,7 +178,11 @@ function makePrismaMock(seedSessions: SessionRecord[] = []) {
       create: tx.session.create,
       update: tx.session.update,
     },
-    $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>) => callback(tx),
+    $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>) => {
+      const run = txQueue.then(() => callback(tx));
+      txQueue = run.then(() => undefined, () => undefined);
+      return run;
+    },
     $on: () => {},
     $disconnect: async () => {},
     __sessions: sessions,
@@ -197,9 +208,9 @@ function containerInfo(sessionId: string): ContainerInfo {
   };
 }
 
-async function makeApp(seedSessions: SessionRecord[] = []) {
+async function makeApp(seedSessions: SessionRecord[] = [], userOverrides: Partial<UserRecord> = {}) {
   const calls: string[] = [];
-  const prisma = makePrismaMock(seedSessions);
+  const prisma = makePrismaMock(seedSessions, userOverrides);
   setPrismaForTests(prisma);
   setDockerServiceOverridesForTests({
     createAndStartContainer: async (sessionId) => {
@@ -368,11 +379,12 @@ test("POST /api/sessions cleans up CDP and container when deleted during creatio
   }
 });
 
-test("POST /api/sessions enforces maxSessions before starting Docker work", async () => {
+test("POST /api/sessions counts creating, running, and paused sessions toward maxSessions", async () => {
   const { app, calls } = await makeApp([
+    makeSession({ id: "session-creating", status: "creating" }),
     makeSession({ id: "session-running", status: "running" }),
     makeSession({ id: "session-paused", status: "paused" }),
-  ]);
+  ], { maxSessions: 3 });
   try {
     const res = await app.inject({
       method: "POST",
@@ -382,8 +394,47 @@ test("POST /api/sessions enforces maxSessions before starting Docker work", asyn
     });
 
     assert.equal(res.statusCode, 429);
-    assert.equal(res.json().error, "Session limit reached (max 2)");
+    assert.equal(res.json().error, "Session limit reached (max 3)");
     assert.equal(calls.some((call) => call.startsWith("docker:")), false);
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions treats maxSessions 0 as unlimited", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({ id: "session-creating", status: "creating" }),
+    makeSession({ id: "session-running", status: "running" }),
+    makeSession({ id: "session-paused", status: "paused" }),
+  ], { maxSessions: 0 });
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: { cookie: authCookie() },
+      payload: { name: "unlimited" },
+    });
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(prisma.__sessions.length, 4);
+    assert.ok(calls.some((call) => call.startsWith("docker:create:")));
+    assert.ok(calls.some((call) => call.startsWith("cdp:init:")));
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions serializes concurrent creates so maxSessions is not exceeded", async () => {
+  const { app, prisma, calls } = await makeApp([], { maxSessions: 1 });
+  try {
+    const [first, second] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/sessions", headers: { cookie: authCookie() }, payload: { name: "one" } }),
+      app.inject({ method: "POST", url: "/api/sessions", headers: { cookie: authCookie() }, payload: { name: "two" } }),
+    ]);
+
+    assert.deepEqual([first.statusCode, second.statusCode].sort(), [201, 429]);
+    assert.equal(prisma.__sessions.filter((session) => session.deletedAt === null && ["creating", "running", "paused"].includes(session.status)).length, 1);
+    assert.equal(calls.filter((call) => call.startsWith("docker:create:")).length, 1);
   } finally {
     await closeApp(app);
   }
@@ -446,6 +497,9 @@ test("POST /api/sessions/:id/stop saves tabs, stops the container, and accumulat
     assert.equal(res.statusCode, 200);
     const session = prisma.__sessions[0];
     assert.equal(session.status, "stopped");
+    assert.equal(session.containerId, "container-running");
+    assert.equal(session.containerName, "browsermint-session-1");
+    assert.equal(session.internalApiUrl, "http://127.0.0.1:3000");
     assert.deepEqual(session.savedTabs, ["https://example.com", "https://example.org"]);
     assert.equal(session.onlineMs, 3_500);
     assert.equal(session.runningStartedAt, null);
@@ -512,7 +566,13 @@ test("POST /api/sessions/:id/stop handles paused sessions without CDP tab inspec
   }
 });
 
-test("DELETE /api/sessions/:id marks deleted, removes the container, and returns success", async () => {
+test("DELETE /api/sessions/:id marks deleted, clears idle timers, updates online time, and removes the container", async () => {
+  const originalNow = Date.now;
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  const originalIdlePauseTimeout = config.IDLE_PAUSE_TIMEOUT_MS;
+  Date.now = () => 10_000;
+  config.IDLE_PAUSE_ENABLED = true;
+  config.IDLE_PAUSE_TIMEOUT_MS = 60_000;
   const { app, prisma, calls } = await makeApp([
     makeSession({
       id: "session-delete",
@@ -522,6 +582,9 @@ test("DELETE /api/sessions/:id marks deleted, removes the container, and returns
     }),
   ]);
   try {
+    scheduleIdlePauseOnStartup("session-delete");
+    assert.equal(hasIdleTimerForTests("session-delete"), true);
+
     const res = await app.inject({
       method: "DELETE",
       url: "/api/sessions/session-delete",
@@ -533,11 +596,17 @@ test("DELETE /api/sessions/:id marks deleted, removes the container, and returns
     const session = prisma.__sessions[0];
     assert.equal(session.status, "stopped");
     assert.ok(session.deletedAt instanceof Date);
+    assert.equal(session.onlineMs, 2_000);
     assert.equal(session.runningStartedAt, null);
+    assert.equal(hasIdleTimerForTests("session-delete"), false);
     assert.ok(calls.includes("cdp:close:session-delete"));
     assert.ok(calls.includes("cdp:cleanup:session-delete"));
     assert.ok(calls.includes("docker:remove:container-delete"));
   } finally {
+    Date.now = originalNow;
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    config.IDLE_PAUSE_TIMEOUT_MS = originalIdlePauseTimeout;
+    clearIdleTimer("session-delete");
     await closeApp(app);
   }
 });
@@ -558,6 +627,25 @@ test("POST /api/sessions/:id/start enforces maxSessions before starting Docker w
     assert.equal(res.statusCode, 429);
     assert.equal(res.json().error, "Session limit reached (max 2)");
     assert.equal(calls.some((call) => call.startsWith("docker:")), false);
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("POST /api/sessions/:id/start serializes concurrent starts so maxSessions is not exceeded", async () => {
+  const { app, prisma, calls } = await makeApp([
+    makeSession({ id: "session-stopped-1", status: "stopped", containerId: "container-stopped-1" }),
+    makeSession({ id: "session-stopped-2", status: "stopped", containerId: "container-stopped-2" }),
+  ], { maxSessions: 1 });
+  try {
+    const [first, second] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/sessions/session-stopped-1/start", headers: { cookie: authCookie() } }),
+      app.inject({ method: "POST", url: "/api/sessions/session-stopped-2/start", headers: { cookie: authCookie() } }),
+    ]);
+
+    assert.deepEqual([first.statusCode, second.statusCode].sort(), [200, 429]);
+    assert.equal(prisma.__sessions.filter((session) => session.status === "running").length, 1);
+    assert.equal(calls.filter((call) => call.startsWith("docker:start:")).length, 1);
   } finally {
     await closeApp(app);
   }

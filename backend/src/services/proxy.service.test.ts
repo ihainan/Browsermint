@@ -92,6 +92,7 @@ async function waitFor<T>(
 
 function setProxyPrismaMock(session: {
   id?: string;
+  userId?: string;
   status?: string;
   containerId?: string | null;
   containerName?: string | null;
@@ -103,11 +104,15 @@ function setProxyPrismaMock(session: {
   const updates: Array<Record<string, unknown>> = [];
   const prisma = {
     session: {
-      findFirst: async (args?: { where?: { user?: { isActive?: boolean } } }) => {
+      findFirst: async (args?: { where?: { id?: string; userId?: string; user?: { isActive?: boolean } } }) => {
         if (!session) return null;
+        const sessionId = session.id ?? "session-running";
+        const userId = session.userId ?? "user-owner";
+        if (args?.where?.id && args.where.id !== sessionId) return null;
+        if (args?.where?.userId && args.where.userId !== userId) return null;
         if (args?.where?.user?.isActive === true && session.userActive === false) return null;
         return {
-          id: session.id ?? "session-running",
+          id: sessionId,
           status: session.status ?? "running",
           containerId: "containerId" in session ? session.containerId : "container-running",
           containerName: "containerName" in session ? session.containerName : "browsermint-session-running",
@@ -205,7 +210,7 @@ test("getIncomingMessageIp prefers x-forwarded-for before socket address", () =>
   );
 });
 
-test("handleWebSocketUpgrade rejects missing, invalid, wrong-session, and superseded tokens", async () => {
+test("handleWebSocketUpgrade rejects missing, invalid, wrong-session, wrong-user, and superseded tokens", async () => {
   setProxyPrismaMock(null);
 
   const missingTokenSocket = new TestSocket();
@@ -231,6 +236,15 @@ test("handleWebSocketUpgrade rejects missing, invalid, wrong-session, and supers
     Buffer.alloc(0)
   );
   assert.equal(wrongSessionSocket.destroyCalled, true);
+
+  setProxyPrismaMock({ userId: "user-owner" });
+  const wrongUserSocket = new TestSocket();
+  await handleWebSocketUpgrade(
+    makeWsRequest(`/ws/sessions/session-running/cdp/devtools/page/1?token=${encodeURIComponent(makeSessionToken({ userId: "user-other" }))}`),
+    wrongUserSocket,
+    Buffer.alloc(0)
+  );
+  assert.equal(wrongUserSocket.destroyCalled, true);
 
   const issuedAt = Math.floor(Date.now() / 1000) - 10;
   setProxyPrismaMock({ tokenIssuedAt: new Date((issuedAt + 5) * 1000) });
