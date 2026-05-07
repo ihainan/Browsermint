@@ -213,6 +213,8 @@ make test-e2e-keep
 
 See [Test Entrypoints](#test-entrypoints) for details on each suite.
 
+`make test-fast` is the default CI gate. `make test-e2e` runs the real Docker stack and is available as a manual GitHub Actions workflow for high-risk browser/session/proxy/recovery changes.
+
 ---
 
 ## Upgrading
@@ -245,6 +247,8 @@ This runs:
 - `npm --prefix frontend test`
 - `npm --prefix frontend run build`
 
+This is the default GitHub Actions CI gate for every push and pull request.
+
 Individual targets:
 
 ```bash
@@ -260,6 +264,8 @@ Use the Docker E2E smoke test to validate the real compose stack, real browser c
 ```bash
 make test-e2e
 ```
+
+The Docker E2E suite is intentionally not part of the default push/PR CI gate because it builds and mutates a real Docker stack, creates browser containers, and exercises slower recovery paths. Run it locally before merging high-risk backend/session/proxy/recovery changes, or trigger the manual **Docker E2E** GitHub Actions workflow from the Actions tab.
 
 The E2E script will:
 
