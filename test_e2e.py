@@ -134,6 +134,19 @@ def docker_pause(container_id: str) -> bool:
 def docker_unpause(container_id: str) -> None:
     run(["docker", "unpause", container_id], check=False)
 
+def docker_stop(container_id: str) -> bool:
+    result = run(["docker", "stop", container_id], check=False)
+    if result.returncode == 0:
+        return True
+    fail("docker stop session container", (result.stderr or result.stdout)[:160])
+    return False
+
+def docker_container_state(container_id: str) -> str:
+    result = run(["docker", "inspect", "-f", "{{.State.Status}}", container_id], check=False)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
 def compose_down(remove_volumes: bool = False) -> None:
     args = ["down"]
     if remove_volumes:
@@ -717,6 +730,94 @@ def test_paused_session_auto_unpause(base_url: str, s: requests.Session, session
         docker_unpause(container_id)
 
 
+def test_recovery_visibility(base_url: str, s: requests.Session, session_id: str, token: str, docker_available: bool) -> None:
+    section("Step 4e: Phase 2 Recovery Visibility")
+    if not docker_available:
+        info("Skipped (--skip-docker)")
+        return
+
+    r = s.get(f"{base_url}/api/sessions/{session_id}")
+    if r.status_code != 200:
+        fail("Read session before recovery simulation", r.text[:120])
+        return
+
+    session = r.json().get("session", {})
+    container_id = session.get("containerId")
+    if not container_id:
+        fail("Read session containerId before recovery simulation")
+        return
+
+    if not docker_stop(container_id):
+        return
+
+    if docker_container_state(container_id) == "exited":
+        ok("Stopped session container to simulate unexpected exit")
+    else:
+        fail("Stopped session container to simulate unexpected exit", f"state={docker_container_state(container_id)}")
+        return
+
+    recovered_session: dict[str, Any] | None = None
+    deadline = time.time() + 100
+    while time.time() < deadline:
+        state = docker_container_state(container_id)
+        r = requests.get(f"{base_url}/api/sessions/{session_id}/targets", params={"token": token})
+        s_res = s.get(f"{base_url}/api/sessions/{session_id}")
+        if state == "running" and r.status_code == 200 and s_res.status_code == 200:
+            recovered_session = s_res.json().get("session", {})
+            break
+        time.sleep(3)
+
+    if recovered_session:
+        ok("Session auto-recovers after unexpected container exit")
+        if recovered_session.get("status") == "running":
+            ok("Session API shows recovered status='running'")
+        else:
+            fail("Session API shows recovered status='running'", f"status={recovered_session.get('status')}")
+
+        if recovered_session.get("autoRestartAttempts") == 0:
+            ok("Session API shows autoRestartAttempts reset to 0")
+        else:
+            fail("Session API shows autoRestartAttempts reset to 0", f"autoRestartAttempts={recovered_session.get('autoRestartAttempts')}")
+    else:
+        fail("Session auto-recovers after unexpected container exit", "timed out waiting for running container + working proxy")
+        return
+
+    me = s.get(f"{base_url}/api/auth/me")
+    if me.status_code != 200:
+        fail("Check current user before admin recovery visibility", me.text[:120])
+        return
+    user = me.json().get("user", {})
+    user_id = user.get("id", "")
+    original_is_admin = bool(user.get("isAdmin"))
+    promoted = False
+
+    try:
+        if not original_is_admin:
+            promoted = require_psql(
+                f'UPDATE "User" SET "isAdmin" = true WHERE id = {sql_literal(user_id)}::uuid;',
+                "Promote current user for admin recovery visibility",
+            )
+            if not promoted:
+                return
+
+        r = s.get(f"{base_url}/api/admin/sessions")
+        if r.status_code == 200:
+            sessions = r.json().get("sessions", [])
+            admin_session = next((x for x in sessions if x.get("id") == session_id), None)
+            if admin_session and admin_session.get("status") == "running":
+                ok("Admin sessions API shows recovered session running")
+            else:
+                fail("Admin sessions API shows recovered session running", f"session={admin_session}")
+        else:
+            fail("Admin sessions API shows recovered session running", f"{r.status_code}: {r.text[:120]}")
+    finally:
+        if promoted:
+            require_psql(
+                f'UPDATE "User" SET "isAdmin" = false WHERE id = {sql_literal(user_id)}::uuid;',
+                "Restore current user admin flag after recovery visibility",
+            )
+
+
 def test_phase2_admin_security(base_url: str, docker_available: bool) -> None:
     section("Step 8b: Phase 2 Admin + Suspended User Security")
     if not docker_available:
@@ -1232,6 +1333,7 @@ def main() -> None:
 
         asyncio.run(async_main(base_url, session_id, token))
         test_paused_session_auto_unpause(base_url, session, session_id, token, docker_available=not args.skip_docker)
+        test_recovery_visibility(base_url, session, session_id, token, docker_available=not args.skip_docker)
 
         test_session_events(base_url, session, session_id)
         test_admin_apis(base_url, session)
