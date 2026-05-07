@@ -36,6 +36,7 @@ DEFAULT_EMAIL    = "test_e2e@browsermint.local"
 DEFAULT_USERNAME = "test_e2e"
 DEFAULT_PASSWORD = "TestE2EPass123!"
 DEFAULT_SESSION_NAME = "Browsermint E2E Smoke"
+PHASE2_SESSION_NAME = "Browsermint E2E Phase 2 Security"
 
 SESSION_READY_TIMEOUT = 60   # seconds to wait for a session to reach "running"
 SESSION_WAIT_POLL     = 2    # poll interval
@@ -90,6 +91,48 @@ def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subproce
 
 def docker_compose(*args: str) -> subprocess.CompletedProcess:
     return run(["docker", "compose", *args], cwd=DOCKER_DIR, check=False)
+
+def unique_suffix() -> str:
+    return f"{int(time.time())}-{secrets.token_hex(3)}"
+
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+def docker_psql(sql: str) -> subprocess.CompletedProcess:
+    env = _parse_env_file(DOCKER_DIR / ".env")
+    user = env.get("POSTGRES_USER", "browsermint")
+    db = env.get("POSTGRES_DB", "browsermint")
+    return docker_compose(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        user,
+        "-d",
+        db,
+        "-c",
+        sql,
+    )
+
+def require_psql(sql: str, label: str) -> bool:
+    result = docker_psql(sql)
+    if result.returncode == 0:
+        return True
+    fail(label, (result.stderr or result.stdout)[:160])
+    return False
+
+def docker_pause(container_id: str) -> bool:
+    result = run(["docker", "pause", container_id], check=False)
+    if result.returncode == 0:
+        return True
+    fail("docker pause session container", (result.stderr or result.stdout)[:160])
+    return False
+
+def docker_unpause(container_id: str) -> None:
+    run(["docker", "unpause", container_id], check=False)
 
 def compose_down(remove_volumes: bool = False) -> None:
     args = ["down"]
@@ -279,6 +322,33 @@ def ensure_user_and_login(base_url: str, email: str, username: str, password: st
     fatal(f"Cannot login or register as {email}")
     return s  # unreachable
 
+def register_new_user(base_url: str, email: str, username: str, password: str) -> requests.Session | None:
+    s = requests.Session()
+    r = s.post(f"{base_url}/api/auth/register", json={
+        "username": username,
+        "email": email,
+        "password": password,
+    })
+    if r.status_code in (200, 201):
+        return s
+    fail(f"Register fixture user {email}", f"{r.status_code}: {r.text[:120]}")
+    return None
+
+def login_user(base_url: str, email: str, password: str) -> requests.Session | None:
+    s = requests.Session()
+    r = s.post(f"{base_url}/api/auth/login", json={"email": email, "password": password})
+    if r.status_code == 200:
+        return s
+    fail(f"Login fixture user {email}", f"{r.status_code}: {r.text[:120]}")
+    return None
+
+def expect_login_rejected(base_url: str, email: str, password: str, label: str) -> None:
+    r = requests.post(f"{base_url}/api/auth/login", json={"email": email, "password": password})
+    if r.status_code == 401:
+        ok(label)
+    else:
+        fail(label, f"{r.status_code}: {r.text[:120]}")
+
 # ─── Session Helpers ───────────────────────────────────────────────────────────
 
 def wait_for_session_running(base_url: str, s: requests.Session, session_id: str) -> dict:
@@ -296,6 +366,20 @@ def wait_for_session_running(base_url: str, s: requests.Session, session_id: str
         time.sleep(SESSION_WAIT_POLL)
     fatal(f"Session {session_id} did not become 'running' within {SESSION_READY_TIMEOUT}s")
     return {}
+
+def wait_for_session_status(base_url: str, s: requests.Session, session_id: str, expected: str, timeout: int = 30) -> dict | None:
+    deadline = time.time() + timeout
+    last_status = "unknown"
+    while time.time() < deadline:
+        r = s.get(f"{base_url}/api/sessions/{session_id}")
+        if r.status_code == 200:
+            sess = r.json().get("session", {})
+            last_status = sess.get("status", "unknown")
+            if last_status == expected:
+                return sess
+        time.sleep(1)
+    fail(f"Wait for session status {expected}", f"last_status={last_status}")
+    return None
 
 def ensure_session(base_url: str, s: requests.Session, reuse_any_session: bool) -> tuple[str, str, bool]:
     """Return (session_id, token, created_by_e2e) for a running session."""
@@ -490,6 +574,270 @@ def test_http_apis(base_url: str, s: requests.Session, session_id: str, token: s
     else:
         fail("GET /events/stats", r.text[:80])
 
+
+def test_stale_session_token(base_url: str, s: requests.Session, session_id: str, token: str) -> str:
+    section("Step 4b: Phase 2 Stale Token Revocation")
+
+    # JWT iat has second-level precision; wait so the refreshed token is newer.
+    time.sleep(1.1)
+    r = s.post(f"{base_url}/api/sessions/{session_id}/refresh-token", json={})
+    if r.status_code != 200:
+        fail("POST /refresh-token", r.text[:120])
+        return token
+
+    new_token = r.json().get("token", "")
+    if not new_token or new_token == token:
+        fail("POST /refresh-token returns a new token")
+        return token
+    ok("POST /refresh-token returns a new token")
+
+    old = requests.get(f"{base_url}/api/sessions/{session_id}/targets", params={"token": token})
+    if old.status_code == 401:
+        ok("Old session token rejected by HTTP proxy")
+    else:
+        fail("Old session token rejected by HTTP proxy", f"{old.status_code}: {old.text[:120]}")
+
+    fresh = requests.get(f"{base_url}/api/sessions/{session_id}/targets", params={"token": new_token})
+    if fresh.status_code == 200:
+        ok("Refreshed session token accepted by HTTP proxy")
+    else:
+        fail("Refreshed session token accepted by HTTP proxy", f"{fresh.status_code}: {fresh.text[:120]}")
+
+    ws_url = f"{base_url.replace('http', 'ws')}/ws/sessions/{session_id}/cdp?token={token}"
+    asyncio.run(expect_ws_rejected(ws_url, "Old session token rejected by CDP WebSocket"))
+    return new_token
+
+
+def test_multi_tab_lifecycle(base_url: str, session_id: str, token: str) -> None:
+    section("Step 4c: Phase 2 Multi-Tab Lifecycle")
+
+    created_targets: list[str] = []
+    original_target_id = ""
+    r = requests.get(f"{base_url}/api/sessions/{session_id}/targets", params={"token": token})
+    if r.status_code == 200:
+        original_targets = r.json().get("targets", [])
+        if original_targets:
+            original_target_id = original_targets[0].get("targetId", "")
+
+    try:
+        for url in ["https://example.com", "https://example.org"]:
+            r = requests.post(
+                f"{base_url}/api/sessions/{session_id}/targets",
+                params={"token": token},
+                json={"url": url},
+            )
+            if r.status_code == 200 and r.json().get("targetId"):
+                target_id = r.json()["targetId"]
+                created_targets.append(target_id)
+                ok("Create additional tab", f"{target_id[:20]}…")
+            else:
+                fail("Create additional tab", f"{r.status_code}: {r.text[:120]}")
+
+        r = requests.get(f"{base_url}/api/sessions/{session_id}/targets", params={"token": token})
+        targets = r.json().get("targets", []) if r.status_code == 200 else []
+        if r.status_code == 200 and len(targets) >= len(created_targets):
+            ok("List tabs after multi-tab create", f"{len(targets)} tab(s)")
+        else:
+            fail("List tabs after multi-tab create", f"{r.status_code}: {r.text[:120]}")
+
+        for target_id in created_targets:
+            r = requests.post(
+                f"{base_url}/api/sessions/{session_id}/targets/{target_id}/activate",
+                params={"token": token},
+                json={},
+            )
+            if r.status_code == 200:
+                ok("Activate additional tab", f"{target_id[:20]}…")
+            else:
+                fail("Activate additional tab", f"{r.status_code}: {r.text[:120]}")
+    finally:
+        if original_target_id:
+            requests.post(
+                f"{base_url}/api/sessions/{session_id}/targets/{original_target_id}/activate",
+                params={"token": token},
+                json={},
+            )
+            time.sleep(0.5)
+        for target_id in reversed(created_targets):
+            r = requests.delete(
+                f"{base_url}/api/sessions/{session_id}/targets/{target_id}",
+                params={"token": token},
+            )
+            if r.status_code == 200:
+                ok("Close additional tab", f"{target_id[:20]}…")
+            else:
+                fail("Close additional tab", f"{r.status_code}: {r.text[:120]}")
+
+
+def test_paused_session_auto_unpause(base_url: str, s: requests.Session, session_id: str, token: str, docker_available: bool) -> None:
+    section("Step 4d: Phase 2 Paused Session Auto-Unpause")
+    if not docker_available:
+        info("Skipped (--skip-docker)")
+        return
+
+    r = s.get(f"{base_url}/api/sessions/{session_id}")
+    if r.status_code != 200:
+        fail("Read session before forced pause", r.text[:120])
+        return
+
+    session = r.json().get("session", {})
+    container_id = session.get("containerId")
+    if not container_id:
+        fail("Read session containerId before forced pause")
+        return
+
+    if not docker_pause(container_id):
+        return
+    if not require_psql(
+        f'UPDATE "Session" SET status = {sql_literal("paused")}, "runningStartedAt" = NULL WHERE id = {sql_literal(session_id)}::uuid;',
+        "Mark session paused in DB",
+    ):
+        docker_unpause(container_id)
+        return
+    ok("Forced session into paused Docker/DB state")
+
+    try:
+        ws_url = f"{base_url.replace('http', 'ws')}/ws/sessions/{session_id}/cdp?token={token}"
+        try:
+            async def _connect_and_check() -> None:
+                async with websockets.connect(ws_url, open_timeout=25) as ws:
+                    resp = await _send(ws, {"id": 9902, "method": "Browser.getVersion"})
+                    if "result" in resp:
+                        ok("Paused session auto-unpaused on CDP WebSocket")
+                    else:
+                        fail("Paused session auto-unpaused on CDP WebSocket", str(resp.get("error"))[:120])
+            asyncio.run(_connect_and_check())
+        except Exception as e:
+            fail("Paused session auto-unpaused on CDP WebSocket", str(e)[:120])
+
+        sess = wait_for_session_status(base_url, s, session_id, "running")
+        if sess:
+            ok("Session status is running after auto-unpause")
+    finally:
+        docker_unpause(container_id)
+
+
+def test_phase2_admin_security(base_url: str, docker_available: bool) -> None:
+    section("Step 8b: Phase 2 Admin + Suspended User Security")
+    if not docker_available:
+        info("Skipped (--skip-docker)")
+        return
+
+    suffix = unique_suffix()
+    admin_email = f"e2e_admin_{suffix}@browsermint.local"
+    admin_username = f"e2e_admin_{suffix.replace('-', '_')}"
+    admin_password = "AdminE2EPass123!"
+    managed_email = f"e2e_suspended_{suffix}@browsermint.local"
+    managed_username = f"e2e_suspended_{suffix.replace('-', '_')}"
+    managed_password = "SuspendedE2EPass123!"
+    admin_s: requests.Session | None = None
+    managed_s: requests.Session | None = None
+    managed_user_id = ""
+    managed_session_id = ""
+
+    try:
+        if register_new_user(base_url, admin_email, admin_username, admin_password) is None:
+            return
+        if not require_psql(
+            f'UPDATE "User" SET "isAdmin" = true, "isActive" = true, "maxSessions" = 0 WHERE email = {sql_literal(admin_email)};',
+            "Promote E2E admin fixture",
+        ):
+            return
+        admin_s = login_user(base_url, admin_email, admin_password)
+        if admin_s is None:
+            return
+
+        r = admin_s.get(f"{base_url}/api/auth/me")
+        if r.status_code == 200 and r.json().get("user", {}).get("isAdmin") is True:
+            ok("E2E admin fixture can authenticate as admin")
+        else:
+            fail("E2E admin fixture can authenticate as admin", f"{r.status_code}: {r.text[:120]}")
+            return
+
+        r = admin_s.get(f"{base_url}/api/admin/users")
+        if r.status_code == 200:
+            ok("Admin GET /admin/users")
+        else:
+            fail("Admin GET /admin/users", f"{r.status_code}: {r.text[:120]}")
+            return
+
+        r = admin_s.post(f"{base_url}/api/admin/users", json={
+            "username": managed_username,
+            "email": managed_email,
+            "password": managed_password,
+            "isAdmin": False,
+        })
+        if r.status_code == 201:
+            managed_user_id = r.json()["user"]["id"]
+            ok("Admin creates managed user")
+        else:
+            fail("Admin creates managed user", f"{r.status_code}: {r.text[:120]}")
+            return
+
+        managed_s = login_user(base_url, managed_email, managed_password)
+        if managed_s is None:
+            return
+        r = managed_s.post(f"{base_url}/api/sessions", json={"name": PHASE2_SESSION_NAME})
+        if r.status_code >= 400:
+            fail("Managed user creates session", f"{r.status_code}: {r.text[:120]}")
+            return
+        managed_session_id = r.json()["session"]["id"]
+        wait_for_session_running(base_url, managed_s, managed_session_id)
+        ok("Managed user session is running")
+
+        r = managed_s.post(f"{base_url}/api/sessions/{managed_session_id}/token", json={})
+        if r.status_code != 200:
+            fail("Managed user obtains session token", f"{r.status_code}: {r.text[:120]}")
+            return
+        managed_token = r.json()["token"]
+        ok("Managed user obtains session token")
+
+        r = requests.get(f"{base_url}/api/sessions/{managed_session_id}/targets", params={"token": managed_token})
+        if r.status_code == 200:
+            ok("Managed user token works before suspension")
+        else:
+            fail("Managed user token works before suspension", f"{r.status_code}: {r.text[:120]}")
+
+        r = admin_s.get(f"{base_url}/api/admin/users/{managed_user_id}/sessions")
+        if r.status_code == 200 and any(x.get("id") == managed_session_id for x in r.json().get("sessions", [])):
+            ok("Admin lists managed user's session")
+        else:
+            fail("Admin lists managed user's session", f"{r.status_code}: {r.text[:120]}")
+
+        r = admin_s.patch(f"{base_url}/api/admin/users/{managed_user_id}", json={"isActive": False})
+        if r.status_code == 200 and r.json().get("user", {}).get("isActive") is False:
+            ok("Admin suspends managed user")
+        else:
+            fail("Admin suspends managed user", f"{r.status_code}: {r.text[:120]}")
+            return
+
+        expect_login_rejected(base_url, managed_email, managed_password, "Suspended user login rejected")
+
+        r = requests.get(f"{base_url}/api/sessions/{managed_session_id}/targets", params={"token": managed_token})
+        if r.status_code == 401:
+            ok("Suspended user's existing HTTP proxy token rejected")
+        else:
+            fail("Suspended user's existing HTTP proxy token rejected", f"{r.status_code}: {r.text[:120]}")
+
+        ws_url = f"{base_url.replace('http', 'ws')}/ws/sessions/{managed_session_id}/cdp?token={managed_token}"
+        asyncio.run(expect_ws_rejected(ws_url, "Suspended user's existing CDP WebSocket token rejected"))
+
+        r = admin_s.get(f"{base_url}/api/admin/sessions")
+        if r.status_code == 200 and any(x.get("id") == managed_session_id for x in r.json().get("sessions", [])):
+            ok("Admin GET /admin/sessions includes managed session")
+        else:
+            fail("Admin GET /admin/sessions includes managed session", f"{r.status_code}: {r.text[:120]}")
+    finally:
+        if admin_s is not None and managed_user_id:
+            admin_s.patch(f"{base_url}/api/admin/users/{managed_user_id}", json={"isActive": True})
+        if managed_s is None and managed_user_id:
+            managed_s = login_user(base_url, managed_email, managed_password)
+        if managed_s is not None and managed_session_id:
+            managed_s.delete(f"{base_url}/api/sessions/{managed_session_id}", timeout=30)
+        if admin_s is not None and managed_user_id:
+            admin_s.delete(f"{base_url}/api/admin/users/{managed_user_id}")
+        require_psql(f'DELETE FROM "User" WHERE email = {sql_literal(admin_email)};', "Delete E2E admin fixture")
+
 # ─── CDP WebSocket Tests ───────────────────────────────────────────────────────
 
 async def _recv_until(ws: ClientConnection, target_id: int, timeout: float = 8.0) -> dict:
@@ -507,6 +855,22 @@ async def _send(ws: ClientConnection, cmd: dict) -> dict:
     """Send a CDP command and wait for its response (ignores events)."""
     await ws.send(json.dumps(cmd))
     return await _recv_until(ws, cmd["id"])
+
+async def expect_ws_rejected(ws_url: str, label: str) -> None:
+    try:
+        async with websockets.connect(ws_url, open_timeout=5) as ws:
+            await ws.send(json.dumps({"id": 9901, "method": "Browser.getVersion"}))
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=2)
+            except websockets.exceptions.ConnectionClosed:
+                ok(label)
+                return
+            except (TimeoutError, asyncio.TimeoutError):
+                fail(label, "connection stayed open without closing")
+                return
+            fail(label, f"unexpected response: {str(msg)[:120]}")
+    except Exception:
+        ok(label)
 
 async def test_cdp_websocket(base_url: str, session_id: str, token: str) -> None:
     section("Step 5: CDP WebSocket")
@@ -863,11 +1227,15 @@ def main() -> None:
 
     try:
         test_http_apis(base_url, session, session_id, token)
+        token = test_stale_session_token(base_url, session, session_id, token)
+        test_multi_tab_lifecycle(base_url, session_id, token)
 
         asyncio.run(async_main(base_url, session_id, token))
+        test_paused_session_auto_unpause(base_url, session, session_id, token, docker_available=not args.skip_docker)
 
         test_session_events(base_url, session, session_id)
         test_admin_apis(base_url, session)
+        test_phase2_admin_security(base_url, docker_available=not args.skip_docker)
     finally:
         if created_by_e2e and not args.keep_session:
             cleanup_session(base_url, session, session_id)
