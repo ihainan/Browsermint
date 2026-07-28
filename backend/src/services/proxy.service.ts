@@ -95,7 +95,8 @@ async function validateSessionToken(
 
 async function getSessionProxyContext(
   sessionId: string,
-  token: string
+  token: string,
+  opts?: { wake?: boolean }
 ): Promise<SessionProxyContext | null> {
   const payload = await validateSessionToken(token);
   if (!payload || payload.sessionId !== sessionId) return null;
@@ -122,6 +123,16 @@ async function getSessionProxyContext(
   if (session.tokenIssuedAt && payload.iat * 1000 < session.tokenIssuedAt.getTime()) {
     console.warn("[ws-proxy] rejecting upgrade: token has been superseded", { sessionId });
     return null;
+  }
+
+  // Driving endpoints (navigate/targets/clipboard/…) auto-resume a paused
+  // session so REST-only clients work without opening a WebSocket first.
+  // Read-only endpoints (details/devtools/vnc page) leave paused sessions
+  // alone — the frontend polls those and must not defeat idle-pause.
+  if (opts?.wake) {
+    const freshUrl = await ensureSessionRunning(sessionId);
+    if (!freshUrl) return null;
+    session.internalApiUrl = freshUrl;
   }
 
   return { userId: payload.userId, sessionId, session };
@@ -887,6 +898,96 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
   }
 }
 
+// ─── Auto-resume (shared by WS upgrade and driving REST endpoints) ──────────
+// Resume a paused session, deduplicating concurrent attempts via
+// unpausingSession. Returns the fresh internalApiUrl, or null when the
+// session could not be brought to "running".
+async function ensureSessionRunning(sessionId: string): Promise<string | null> {
+  const session = await prisma.session.findFirst({
+    where: { id: sessionId, deletedAt: null, status: { in: ["running", "paused"] } },
+    select: { status: true, containerId: true, internalApiUrl: true },
+  });
+  if (!session) return null;
+  if (session.status === "running") return session.internalApiUrl;
+  if (!session.containerId) {
+    console.warn("[resume] paused session has no containerId", { sessionId });
+    return null;
+  }
+
+  if (unpausingSession.has(sessionId)) {
+    // Another caller is already resuming — wait for it to finish
+    const deadline = Date.now() + driver.resumeTimeoutMs;
+    while (unpausingSession.has(sessionId) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const refreshed = await prisma.session.findFirst({
+      where: { id: sessionId, deletedAt: null },
+      select: { status: true, internalApiUrl: true },
+    });
+    if (refreshed?.status !== "running" || !refreshed.internalApiUrl) {
+      console.warn("[resume] session not running after waiting for concurrent resume", { sessionId });
+      return null;
+    }
+    return refreshed.internalApiUrl;
+  }
+
+  unpausingSession.add(sessionId);
+  try {
+    console.info(`[resume] Resuming paused session ${sessionId}`);
+    const endpoint = await driver.resumeSession(sessionId, session.containerId);
+    await driver.waitForReady(endpoint.internalApiUrl);
+    // Persist the endpoint: on Docker the IP is unchanged, but on K8s the
+    // pod was recreated and the DB must reflect the fresh workload.
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: {
+        status: "running",
+        containerId: endpoint.containerId,
+        containerName: endpoint.containerName,
+        internalApiUrl: endpoint.internalApiUrl,
+        runningStartedAt: new Date(),
+      },
+    });
+    if (!driver.pauseReleasesWorkload) {
+      // docker unpause: Chrome thaws in place, give it a moment
+      await new Promise((r) => setTimeout(r, 500));
+      void initCdpSession(sessionId, endpoint.internalApiUrl).then((ok) => {
+        if (!ok) console.warn(`[resume] CDP re-init failed after unpause for session ${sessionId}`);
+      });
+    } else {
+      // Fresh Chrome in a new pod: re-attach CDP synchronously, then
+      // restore the tabs saved by pauseSessionIfIdle.
+      const ok = await initCdpSession(sessionId, endpoint.internalApiUrl);
+      if (!ok) console.warn(`[resume] CDP re-init failed after resume for session ${sessionId}`);
+      const current = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { savedTabs: true },
+      });
+      const savedTabs = Array.isArray(current?.savedTabs)
+        ? (current.savedTabs as unknown[]).filter((u): u is string => typeof u === "string")
+        : [];
+      if (ok && savedTabs.length > 0) {
+        console.info(`[resume] Session ${sessionId}: restoring ${savedTabs.length} saved tab(s)`);
+        await openSavedTabs(sessionId, savedTabs).catch(() => {});
+      }
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { savedTabs: Prisma.JsonNull },
+      }).catch(() => {});
+    }
+    // A session that was just driven should not immediately re-pause: restart
+    // the idle timer (WS callers replace this via incrementWsCount anyway).
+    scheduleIdlePause(sessionId);
+    return endpoint.internalApiUrl;
+  } catch (err) {
+    console.error(`[resume] Failed to resume session ${sessionId}:`, err);
+    await prisma.session.update({ where: { id: sessionId }, data: { status: "error" } }).catch(() => {});
+    return null;
+  } finally {
+    unpausingSession.delete(sessionId);
+  }
+}
+
 // ─── WebSocket Proxy ──────────────────────────────────────────────────────────
 // Handles the HTTP upgrade event from Fastify's underlying server.
 // Matches: /ws/sessions/:id/(cast|logs|pageId|cdp[/subpath])?token=xxx
@@ -989,87 +1090,16 @@ export async function handleWebSocketUpgrade(
     return;
   }
 
-  // ─── Auto-unpause if session is paused ───────────────────────────────────────
+  // ─── Auto-resume if session is paused ────────────────────────────────────────
   if (session.status === "paused") {
-    if (!session.containerId) {
-      console.warn("[ws-proxy] paused session has no containerId — rejecting", { sessionId });
+    const freshUrl = await ensureSessionRunning(sessionId);
+    if (!freshUrl) {
+      console.warn("[ws-proxy] rejecting upgrade: session could not be resumed", { sessionId });
       socket.destroy();
       return;
     }
-
-    if (unpausingSession.has(sessionId)) {
-      // Another WS is already unpausing — wait for it to finish
-      const deadline = Date.now() + driver.resumeTimeoutMs;
-      while (unpausingSession.has(sessionId) && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      const refreshed = await prisma.session.findFirst({
-        where: { id: sessionId, deletedAt: null },
-        select: { status: true, internalApiUrl: true },
-      });
-      if (refreshed?.status !== "running" || !refreshed.internalApiUrl) {
-        console.warn("[ws-proxy] session not running after waiting for concurrent unpause", { sessionId });
-        socket.destroy();
-        return;
-      }
-      session.status = "running";
-      session.internalApiUrl = refreshed.internalApiUrl;
-    } else {
-      unpausingSession.add(sessionId);
-      try {
-        console.info(`[ws-proxy] Resuming session ${sessionId} for incoming WS`);
-        const endpoint = await driver.resumeSession(sessionId, session.containerId);
-        await driver.waitForReady(endpoint.internalApiUrl);
-        // Persist the endpoint: on Docker the IP is unchanged, but on K8s the
-        // pod was recreated and the DB must reflect the fresh workload.
-        await prisma.session.update({
-          where: { id: sessionId },
-          data: {
-            status: "running",
-            containerId: endpoint.containerId,
-            containerName: endpoint.containerName,
-            internalApiUrl: endpoint.internalApiUrl,
-            runningStartedAt: new Date(),
-          },
-        });
-        if (!driver.pauseReleasesWorkload) {
-          // docker unpause: Chrome thaws in place, give it a moment
-          await new Promise((r) => setTimeout(r, 500));
-          void initCdpSession(sessionId, endpoint.internalApiUrl).then((ok) => {
-            if (!ok) console.warn(`[ws-proxy] CDP re-init failed after unpause for session ${sessionId}`);
-          });
-        } else {
-          // Fresh Chrome in a new pod: re-attach CDP synchronously, then
-          // restore the tabs saved by pauseSessionIfIdle.
-          const ok = await initCdpSession(sessionId, endpoint.internalApiUrl);
-          if (!ok) console.warn(`[ws-proxy] CDP re-init failed after resume for session ${sessionId}`);
-          const current = await prisma.session.findUnique({
-            where: { id: sessionId },
-            select: { savedTabs: true },
-          });
-          const savedTabs = Array.isArray(current?.savedTabs)
-            ? (current.savedTabs as unknown[]).filter((u): u is string => typeof u === "string")
-            : [];
-          if (ok && savedTabs.length > 0) {
-            console.info(`[ws-proxy] Session ${sessionId}: restoring ${savedTabs.length} saved tab(s)`);
-            await openSavedTabs(sessionId, savedTabs).catch(() => {});
-          }
-          await prisma.session.update({
-            where: { id: sessionId },
-            data: { savedTabs: Prisma.JsonNull },
-          }).catch(() => {});
-        }
-        session.status = "running";
-        session.internalApiUrl = endpoint.internalApiUrl;
-      } catch (err) {
-        console.error(`[ws-proxy] Failed to resume session ${sessionId}:`, err);
-        await prisma.session.update({ where: { id: sessionId }, data: { status: "error" } }).catch(() => {});
-        socket.destroy();
-        return;
-      } finally {
-        unpausingSession.delete(sessionId);
-      }
-    }
+    session.status = "running";
+    session.internalApiUrl = freshUrl;
   }
 
   if (!session.internalApiUrl) {
@@ -1225,7 +1255,7 @@ export async function handleGetTargets(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   try {
@@ -1247,7 +1277,7 @@ export async function handleCreateTarget(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const url = (request.body as { url?: string })?.url ?? "chrome://newtab/";
@@ -1267,7 +1297,7 @@ export async function handleCloseTarget(
   const { id: sessionId, targetId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   try {
@@ -1286,7 +1316,7 @@ export async function handleActivateTarget(
   const { id: sessionId, targetId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   try {
@@ -1305,7 +1335,7 @@ export async function handleNavigate(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { url, targetId } = request.body as { url: string; targetId: string };
@@ -1327,7 +1357,7 @@ export async function handleGoBack(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
@@ -1354,7 +1384,7 @@ export async function handleGoForward(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
@@ -1381,7 +1411,7 @@ export async function handleReload(
   const { id: sessionId } = request.params;
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
@@ -1610,7 +1640,7 @@ export async function handleSetClipboard(
   const token = request.query.token;
   if (!token) return reply.status(401).send({ error: "Missing token" });
 
-  const context = await getSessionProxyContext(sessionId, token);
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const body = request.body as { text?: unknown };

@@ -39,17 +39,21 @@ function sessionToken(sessionId = "session-running") {
   );
 }
 
-function makePrismaMock(options: { userActive?: boolean } = {}) {
+function makePrismaMock(options: { userActive?: boolean; sessionStatus?: string } = {}) {
   const events: unknown[] = [];
   const userActive = options.userActive ?? true;
+  let sessionStatus = options.sessionStatus ?? "running";
   const prisma = {
     session: {
       findFirst: async (args: { where: { id?: string; userId?: string; user?: { isActive?: boolean }; deletedAt?: null; status?: { in: string[] } }; select?: Record<string, unknown> }) => {
         if (args.where.id !== "session-running") return null;
-        if (args.where.userId !== owner.id) return null;
+        // ensureSessionRunning queries without userId; auth paths include it.
+        if ("userId" in args.where && args.where.userId !== owner.id) return null;
         if (args.where.user?.isActive === true && !userActive) return null;
         const session = {
           id: "session-running",
+          status: sessionStatus,
+          containerId: "container-running",
           containerName: "browsermint-session-running",
           internalApiUrl: "http://127.0.0.1:3000",
           tokenIssuedAt: null,
@@ -61,7 +65,10 @@ function makePrismaMock(options: { userActive?: boolean } = {}) {
         if (args.where.id !== "session-running") return null;
         return { id: "session-running", containerId: "container-running" };
       },
-      update: async () => ({}),
+      update: async (args?: { data?: { status?: string } }) => {
+        if (args?.data?.status) sessionStatus = args.data.status;
+        return {};
+      },
     },
     sessionEvent: {
       create: async (args: { data: unknown }) => {
@@ -84,7 +91,7 @@ type ExecuteCdpCommandOverride = (
   targetId?: string
 ) => Promise<Record<string, unknown>>;
 
-async function makeApp(options: { userActive?: boolean; executeCdpCommand?: ExecuteCdpCommandOverride } = {}) {
+async function makeApp(options: { userActive?: boolean; sessionStatus?: string; executeCdpCommand?: ExecuteCdpCommandOverride } = {}) {
   const prisma = makePrismaMock(options);
   const calls: Array<{ sessionId: string; method: string; params: Record<string, unknown>; targetId?: string }> = [];
   const dockerCalls: Array<{ containerId: string; text: string }> = [];
@@ -488,6 +495,65 @@ test("DevTools target route returns the first available page target path", async
     assert.deepEqual(res.json(), { pageId: "page-1", wsPath: "/devtools/page/page-1" });
   } finally {
     globalThis.fetch = originalFetch;
+    await closeApp(app);
+  }
+});
+
+test("driving REST endpoints auto-resume a paused session", async () => {
+  const { app, calls } = await makeApp({ sessionStatus: "paused" });
+  const token = sessionToken();
+  const resumedRefs: string[] = [];
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = false;
+  // Pause-by-deletion semantics (K8s): resume recreates the workload and the
+  // handler must use the fresh endpoint it returns.
+  setDriverOverridesForTests({
+    pauseReleasesWorkload: true,
+    resumeSession: async (_sessionId, ref) => {
+      resumedRefs.push(ref);
+      return {
+        containerId: ref,
+        containerName: "browsermint-session-running",
+        internalApiUrl: "http://10.0.0.9:3000",
+      };
+    },
+    waitForReady: async () => {},
+  });
+  setCdpServiceOverridesForTests({
+    initCdpSession: async () => true,
+    executeCdpCommand: async (sessionId, method, params = {}, targetId) => {
+      calls.push({ sessionId, method, params: params as Record<string, unknown>, targetId });
+      if (method === "Page.navigate") return { frameId: "frame-1" };
+      return {};
+    },
+  });
+
+  try {
+    const navigate = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/navigate?token=${encodeURIComponent(token)}`,
+      payload: { url: "https://example.com", targetId: "page-1" },
+    });
+
+    assert.equal(navigate.statusCode, 200);
+    assert.deepEqual(resumedRefs, ["container-running"]);
+    assert.deepEqual(calls.at(-1), {
+      sessionId: "session-running",
+      method: "Page.navigate",
+      params: { url: "https://example.com" },
+      targetId: "page-1",
+    });
+
+    // Session is now running — a second call must NOT resume again.
+    const again = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/navigate?token=${encodeURIComponent(token)}`,
+      payload: { url: "https://example.org", targetId: "page-1" },
+    });
+    assert.equal(again.statusCode, 200);
+    assert.equal(resumedRefs.length, 1);
+  } finally {
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
     await closeApp(app);
   }
 });
