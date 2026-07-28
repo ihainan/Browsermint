@@ -7,9 +7,10 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, openSavedTabs, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
-import { setContainerClipboard, pauseContainer, unpauseContainer } from "./docker.service.js";
+import { driver } from "./driver/index.js";
+import { Prisma } from "@prisma/client";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -856,14 +857,29 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
 
   console.info(`[idle-pause] Session ${sessionId} idle — pausing`);
   try {
+    // Pause-by-deletion drivers (K8s) lose the in-memory Chrome on pause: save
+    // the open tabs for restore on resume, and close Chrome gracefully so the
+    // profile (cookies etc.) is flushed to the PVC before the pod goes away.
+    let savedUrls: string[] = [];
+    if (driver.pauseReleasesWorkload) {
+      savedUrls = await getOpenPageUrls(sessionId).catch(() => []);
+      await closeBrowserGracefully(sessionId).catch(() => {});
+    }
     cleanupCdpSession(sessionId);
-    await pauseContainer(session.containerId);
+    await driver.pauseSession(sessionId, session.containerId);
     const delta = session.runningStartedAt
       ? Math.max(0, Date.now() - session.runningStartedAt.getTime())
       : 0;
     await prisma.session.update({
       where: { id: sessionId },
-      data: { status: "paused", onlineMs: { increment: delta }, runningStartedAt: null },
+      data: {
+        status: "paused",
+        onlineMs: { increment: delta },
+        runningStartedAt: null,
+        ...(driver.pauseReleasesWorkload
+          ? { savedTabs: savedUrls.length > 0 ? savedUrls : Prisma.JsonNull }
+          : {}),
+      },
     });
     console.info(`[idle-pause] Session ${sessionId} paused`);
   } catch (err) {
@@ -983,7 +999,7 @@ export async function handleWebSocketUpgrade(
 
     if (unpausingSession.has(sessionId)) {
       // Another WS is already unpausing — wait for it to finish
-      const deadline = Date.now() + 8000;
+      const deadline = Date.now() + driver.resumeTimeoutMs;
       while (unpausingSession.has(sessionId) && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 100));
       }
@@ -1001,18 +1017,52 @@ export async function handleWebSocketUpgrade(
     } else {
       unpausingSession.add(sessionId);
       try {
-        console.info(`[ws-proxy] Unpausing session ${sessionId} for incoming WS`);
-        await unpauseContainer(session.containerId);
-        await prisma.session.update({ where: { id: sessionId }, data: { status: "running", runningStartedAt: new Date() } });
-        await new Promise((r) => setTimeout(r, 500));
-        if (session.internalApiUrl) {
-          void initCdpSession(sessionId, session.internalApiUrl).then((ok) => {
+        console.info(`[ws-proxy] Resuming session ${sessionId} for incoming WS`);
+        const endpoint = await driver.resumeSession(sessionId, session.containerId);
+        await driver.waitForReady(endpoint.internalApiUrl);
+        // Persist the endpoint: on Docker the IP is unchanged, but on K8s the
+        // pod was recreated and the DB must reflect the fresh workload.
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: {
+            status: "running",
+            containerId: endpoint.containerId,
+            containerName: endpoint.containerName,
+            internalApiUrl: endpoint.internalApiUrl,
+            runningStartedAt: new Date(),
+          },
+        });
+        if (!driver.pauseReleasesWorkload) {
+          // docker unpause: Chrome thaws in place, give it a moment
+          await new Promise((r) => setTimeout(r, 500));
+          void initCdpSession(sessionId, endpoint.internalApiUrl).then((ok) => {
             if (!ok) console.warn(`[ws-proxy] CDP re-init failed after unpause for session ${sessionId}`);
           });
+        } else {
+          // Fresh Chrome in a new pod: re-attach CDP synchronously, then
+          // restore the tabs saved by pauseSessionIfIdle.
+          const ok = await initCdpSession(sessionId, endpoint.internalApiUrl);
+          if (!ok) console.warn(`[ws-proxy] CDP re-init failed after resume for session ${sessionId}`);
+          const current = await prisma.session.findUnique({
+            where: { id: sessionId },
+            select: { savedTabs: true },
+          });
+          const savedTabs = Array.isArray(current?.savedTabs)
+            ? (current.savedTabs as unknown[]).filter((u): u is string => typeof u === "string")
+            : [];
+          if (ok && savedTabs.length > 0) {
+            console.info(`[ws-proxy] Session ${sessionId}: restoring ${savedTabs.length} saved tab(s)`);
+            await openSavedTabs(sessionId, savedTabs).catch(() => {});
+          }
+          await prisma.session.update({
+            where: { id: sessionId },
+            data: { savedTabs: Prisma.JsonNull },
+          }).catch(() => {});
         }
         session.status = "running";
+        session.internalApiUrl = endpoint.internalApiUrl;
       } catch (err) {
-        console.error(`[ws-proxy] Failed to unpause session ${sessionId}:`, err);
+        console.error(`[ws-proxy] Failed to resume session ${sessionId}:`, err);
         await prisma.session.update({ where: { id: sessionId }, data: { status: "error" } }).catch(() => {});
         socket.destroy();
         return;
@@ -1571,6 +1621,6 @@ export async function handleSetClipboard(
   const session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session?.containerId) return reply.status(404).send({ error: "Container not found" });
 
-  await setContainerClipboard(session.containerId, body.text);
+  await driver.setClipboard(sessionId, session.containerId, body.text);
   return reply.send({ ok: true });
 }

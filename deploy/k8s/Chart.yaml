@@ -1,0 +1,6 @@
+apiVersion: v2
+name: browsermint
+description: Browsermint — self-hosted browser session platform (backend, frontend, per-session browser pods)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

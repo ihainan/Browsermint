@@ -19,9 +19,9 @@ const {
   setCdpServiceOverridesForTests,
 } = await import("./services/cdp.service.js");
 const {
-  resetDockerServiceOverridesForTests,
-  setDockerServiceOverridesForTests,
-} = await import("./services/docker.service.js");
+  resetDriverOverridesForTests,
+  setDriverOverridesForTests,
+} = await import("./services/driver/index.js");
 
 const owner = {
   id: "user-owner",
@@ -109,8 +109,8 @@ async function makeApp(options: { userActive?: boolean; executeCdpCommand?: Exec
   setCdpServiceOverridesForTests({
     executeCdpCommand: options.executeCdpCommand ?? defaultExecuteCdpCommand,
   });
-  setDockerServiceOverridesForTests({
-    setContainerClipboard: async (containerId, text) => {
+  setDriverOverridesForTests({
+    setClipboard: async (_sessionId, containerId, text) => {
       dockerCalls.push({ containerId, text });
     },
   });
@@ -121,7 +121,7 @@ async function makeApp(options: { userActive?: boolean; executeCdpCommand?: Exec
 async function closeApp(app: Awaited<ReturnType<typeof createApp>>) {
   await app.close();
   resetCdpServiceOverridesForTests();
-  resetDockerServiceOverridesForTests();
+  resetDriverOverridesForTests();
 }
 
 test("session target routes validate tokens, call CDP, and sanitize logged token paths", async () => {

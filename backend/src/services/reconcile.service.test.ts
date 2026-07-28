@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type Docker from "dockerode";
 import type { AppPrismaClient } from "../db/client.js";
 
 Object.assign(process.env, {
@@ -11,12 +10,17 @@ Object.assign(process.env, {
 });
 
 const { setPrismaForTests } = await import("../db/client.js");
+const { reconcileSessions } = await import("./reconcile.service.js");
 const {
-  reconcileContainers,
-  resetDockerServiceOverridesForTests,
-  setDockerServiceOverridesForTests,
-} = await import("./docker.service.js");
-import type { ContainerInfo, SessionRecoveredCallback } from "./docker.service.js";
+  resetDriverOverridesForTests,
+  setDriverOverridesForTests,
+} = await import("./driver/index.js");
+import type {
+  SessionEndpoint,
+  ManagedWorkload,
+  ManagedWorkloadState,
+} from "./driver/index.js";
+import type { SessionRecoveredCallback } from "./reconcile.service.js";
 
 type SessionRecord = {
   id: string;
@@ -101,78 +105,71 @@ function makePrismaMock(seedSessions: SessionRecord[]) {
   return prisma as unknown as AppPrismaClient & { __sessions: SessionRecord[] };
 }
 
-function makeContainer(id: string, sessionId: string, state: string): Docker.ContainerInfo {
-  return {
-    Id: id,
-    Names: [`/browsermint-session-${sessionId}`],
-    Image: "browsermint-browser:latest",
-    ImageID: "image-id",
-    Command: "",
-    Created: 0,
-    Ports: [],
-    Labels: {
-      "browsermint.managed": "true",
-      "browsermint.session": sessionId,
-    },
-    State: state,
-    Status: state,
-    HostConfig: { NetworkMode: "browsermint" },
-    NetworkSettings: { Networks: {} },
-    Mounts: [],
-  } as Docker.ContainerInfo;
+function makeWorkload(ref: string, sessionId: string, state: ManagedWorkloadState): ManagedWorkload {
+  return { ref, sessionId, state };
 }
 
 async function runReconcileTest(
   seedSessions: SessionRecord[],
-  containers: Docker.ContainerInfo[],
+  workloads: ManagedWorkload[],
   startup = false,
   extra?: {
     onSessionRecovered?: SessionRecoveredCallback;
-    startExistingContainer?: (containerId: string) => Promise<ContainerInfo>;
+    startSession?: (sessionId: string, ref: string) => Promise<SessionEndpoint>;
+    pauseReleasesWorkload?: boolean;
+    pauseSession?: (sessionId: string, ref: string) => Promise<void>;
   }
 ) {
   const calls: string[] = [];
   const prisma = makePrismaMock(seedSessions);
   setPrismaForTests(prisma);
-  setDockerServiceOverridesForTests({
-    listContainers: async () => {
-      calls.push("docker:list");
-      return containers;
+  setDriverOverridesForTests({
+    pauseReleasesWorkload: extra?.pauseReleasesWorkload,
+    listManagedWorkloads: async () => {
+      calls.push("driver:list");
+      return workloads;
     },
-    stopContainer: async (containerId) => {
-      calls.push(`docker:stop:${containerId}`);
+    stopSession: async (_sessionId, ref) => {
+      calls.push(`driver:stop:${ref}`);
     },
-    stopAndRemoveContainer: async (containerId) => {
-      calls.push(`docker:remove:${containerId}`);
+    destroySession: async (_sessionId, ref) => {
+      calls.push(`driver:remove:${ref}`);
     },
-    startExistingContainer: extra?.startExistingContainer
-      ? async (containerId) => {
-          calls.push(`docker:start:${containerId}`);
-          return extra.startExistingContainer!(containerId);
+    pauseSession: extra?.pauseSession
+      ? async (sessionId, ref) => {
+          calls.push(`driver:pause:${ref}`);
+          return extra.pauseSession!(sessionId, ref);
         }
       : undefined,
+    startSession: extra?.startSession
+      ? async (sessionId, ref) => {
+          calls.push(`driver:start:${ref}`);
+          return extra.startSession!(sessionId, ref);
+        }
+      : undefined,
+    sweepOrphanResources: async () => {},
   });
 
-  await reconcileContainers(startup, extra?.onSessionRecovered);
-  resetDockerServiceOverridesForTests();
+  await reconcileSessions(startup, extra?.onSessionRecovered);
+  resetDriverOverridesForTests();
   return { prisma, calls };
 }
 
-test("reconcileContainers removes orphan and deleted-session containers", async () => {
+test("reconcileSessions removes orphan and deleted-session workloads", async () => {
   const { calls } = await runReconcileTest(
     [makeSession({ id: "deleted", containerId: "container-deleted", deletedAt: new Date() })],
     [
-      makeContainer("container-orphan", "missing", "running"),
-      makeContainer("container-deleted", "deleted", "running"),
+      makeWorkload("container-orphan", "missing", "running"),
+      makeWorkload("container-deleted", "deleted", "running"),
     ]
   );
 
-  assert.ok(calls.includes("docker:list"));
-  assert.ok(calls.includes("docker:remove:container-orphan"));
-  assert.ok(calls.includes("docker:remove:container-deleted"));
+  assert.ok(calls.includes("driver:list"));
+  assert.ok(calls.includes("driver:remove:container-orphan"));
+  assert.ok(calls.includes("driver:remove:container-deleted"));
 });
 
-test("reconcileContainers marks running sessions with missing or stopped containers as error", async () => {
+test("reconcileSessions marks running sessions with missing or stopped workloads as error", async () => {
   const originalNow = Date.now;
   Date.now = () => 10_000;
   try {
@@ -191,7 +188,7 @@ test("reconcileContainers marks running sessions with missing or stopped contain
           autoRestartAttempts: 3,
         }),
       ],
-      [makeContainer("container-stopped", "stopped-running", "exited")]
+      [makeWorkload("container-stopped", "stopped-running", "exited")]
     );
 
     assert.equal(prisma.__sessions[0].status, "error");
@@ -205,7 +202,7 @@ test("reconcileContainers marks running sessions with missing or stopped contain
   }
 });
 
-test("reconcileContainers corrects running and paused mismatches without losing online time tracking", async () => {
+test("reconcileSessions corrects running and paused mismatches without losing online time tracking", async () => {
   const originalNow = Date.now;
   Date.now = () => 20_000;
   try {
@@ -227,8 +224,8 @@ test("reconcileContainers corrects running and paused mismatches without losing 
         }),
       ],
       [
-        makeContainer("container-paused", "running-but-paused", "paused"),
-        makeContainer("container-running", "paused-but-running", "running"),
+        makeWorkload("container-paused", "running-but-paused", "paused"),
+        makeWorkload("container-running", "paused-but-running", "running"),
       ]
     );
 
@@ -243,7 +240,7 @@ test("reconcileContainers corrects running and paused mismatches without losing 
   }
 });
 
-test("reconcileContainers completes stuck stopping sessions and startup-only creating sessions", async () => {
+test("reconcileSessions completes stuck stopping sessions and startup-only creating sessions", async () => {
   const originalNow = Date.now;
   Date.now = () => 50_000;
   try {
@@ -263,8 +260,8 @@ test("reconcileContainers completes stuck stopping sessions and startup-only cre
         }),
       ],
       [
-        makeContainer("container-stopping", "stopping", "running"),
-        makeContainer("container-creating", "creating", "running"),
+        makeWorkload("container-stopping", "stopping", "running"),
+        makeWorkload("container-creating", "creating", "running"),
       ],
       true
     );
@@ -273,13 +270,13 @@ test("reconcileContainers completes stuck stopping sessions and startup-only cre
     assert.equal(prisma.__sessions[0].onlineMs, 1_010);
     assert.equal(prisma.__sessions[0].runningStartedAt, null);
     assert.equal(prisma.__sessions[1].status, "error");
-    assert.ok(calls.includes("docker:stop:container-stopping"));
+    assert.ok(calls.includes("driver:stop:container-stopping"));
   } finally {
     Date.now = originalNow;
   }
 });
 
-test("reconcileContainers removes running containers for error sessions and clears metadata", async () => {
+test("reconcileSessions removes running workloads for error sessions and clears metadata", async () => {
   const { prisma, calls } = await runReconcileTest(
     [
       makeSession({
@@ -290,16 +287,16 @@ test("reconcileContainers removes running containers for error sessions and clea
         internalApiUrl: "http://127.0.0.1:3000",
       }),
     ],
-    [makeContainer("container-error-running", "error-running", "running")]
+    [makeWorkload("container-error-running", "error-running", "running")]
   );
 
-  assert.ok(calls.includes("docker:remove:container-error-running"));
+  assert.ok(calls.includes("driver:remove:container-error-running"));
   assert.equal(prisma.__sessions[0].containerId, null);
   assert.equal(prisma.__sessions[0].containerName, null);
   assert.equal(prisma.__sessions[0].internalApiUrl, null);
 });
 
-test("reconcileContainers auto-restarts an exited running session and fires recovery callback", async () => {
+test("reconcileSessions auto-restarts an exited running session and fires recovery callback", async () => {
   const originalNow = Date.now;
   Date.now = () => 30_000;
   const recoveredSessions: Array<{ sessionId: string; url: string }> = [];
@@ -313,11 +310,11 @@ test("reconcileContainers auto-restarts an exited running session and fires reco
           autoRestartAttempts: 0,
         }),
       ],
-      [makeContainer("container-exited", "auto-restart-ok", "exited")],
+      [makeWorkload("container-exited", "auto-restart-ok", "exited")],
       false,
       {
         onSessionRecovered: (sessionId, url) => recoveredSessions.push({ sessionId, url }),
-        startExistingContainer: async () => ({
+        startSession: async () => ({
           containerId: "container-exited",
           containerName: "browsermint-session-auto-restart-ok",
           internalApiUrl: "http://10.0.0.2:3000",
@@ -325,7 +322,7 @@ test("reconcileContainers auto-restarts an exited running session and fires reco
       }
     );
 
-    assert.ok(calls.includes("docker:start:container-exited"));
+    assert.ok(calls.includes("driver:start:container-exited"));
     assert.equal(prisma.__sessions[0].status, "running");
     assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
     assert.equal(prisma.__sessions[0].internalApiUrl, "http://10.0.0.2:3000");
@@ -338,7 +335,7 @@ test("reconcileContainers auto-restarts an exited running session and fires reco
   }
 });
 
-test("reconcileContainers increments autoRestartAttempts on start failure", async () => {
+test("reconcileSessions increments autoRestartAttempts on start failure", async () => {
   const { prisma, calls } = await runReconcileTest(
     [
       makeSession({
@@ -347,19 +344,19 @@ test("reconcileContainers increments autoRestartAttempts on start failure", asyn
         autoRestartAttempts: 1,
       }),
     ],
-    [makeContainer("container-exited-fail", "auto-restart-fail", "exited")],
+    [makeWorkload("container-exited-fail", "auto-restart-fail", "exited")],
     false,
     {
-      startExistingContainer: async () => { throw new Error("daemon error"); },
+      startSession: async () => { throw new Error("daemon error"); },
     }
   );
 
-  assert.ok(calls.includes("docker:start:container-exited-fail"));
+  assert.ok(calls.includes("driver:start:container-exited-fail"));
   assert.equal(prisma.__sessions[0].status, "running");
   assert.equal(prisma.__sessions[0].autoRestartAttempts, 2);
 });
 
-test("reconcileContainers marks error immediately when autoRestartAttempts exhausted", async () => {
+test("reconcileSessions marks error immediately when autoRestartAttempts exhausted", async () => {
   const originalNow = Date.now;
   Date.now = () => 10_000;
   try {
@@ -372,10 +369,10 @@ test("reconcileContainers marks error immediately when autoRestartAttempts exhau
           autoRestartAttempts: 3,
         }),
       ],
-      [makeContainer("container-exited-ex", "auto-restart-exhausted", "exited")]
+      [makeWorkload("container-exited-ex", "auto-restart-exhausted", "exited")]
     );
 
-    assert.ok(!calls.some((c) => c.startsWith("docker:start")));
+    assert.ok(!calls.some((c) => c.startsWith("driver:start")));
     assert.equal(prisma.__sessions[0].status, "error");
     assert.equal(prisma.__sessions[0].onlineMs, 2_000);
     assert.equal(prisma.__sessions[0].runningStartedAt, null);
@@ -384,7 +381,7 @@ test("reconcileContainers marks error immediately when autoRestartAttempts exhau
   }
 });
 
-test("reconcileContainers marks error immediately for non-exited container states (e.g. dead)", async () => {
+test("reconcileSessions marks error immediately for unrecoverable workload states (e.g. dead)", async () => {
   const { prisma, calls } = await runReconcileTest(
     [
       makeSession({
@@ -393,14 +390,29 @@ test("reconcileContainers marks error immediately for non-exited container state
         autoRestartAttempts: 0,
       }),
     ],
-    [makeContainer("container-dead", "dead-session", "dead")]
+    [makeWorkload("container-dead", "dead-session", "unknown")]
   );
 
-  assert.ok(!calls.some((c) => c.startsWith("docker:start")));
+  assert.ok(!calls.some((c) => c.startsWith("driver:start")));
   assert.equal(prisma.__sessions[0].status, "error");
 });
 
-test("reconcileContainers marks error immediately when container is gone (404) without incrementing counter", async () => {
+test("reconcileSessions leaves starting workloads alone", async () => {
+  const { prisma, calls } = await runReconcileTest(
+    [
+      makeSession({
+        id: "starting-session",
+        containerId: "container-starting",
+      }),
+    ],
+    [makeWorkload("container-starting", "starting-session", "starting")]
+  );
+
+  assert.ok(!calls.some((c) => c.startsWith("driver:start")));
+  assert.equal(prisma.__sessions[0].status, "running");
+});
+
+test("reconcileSessions marks error immediately when workload is gone (404) without incrementing counter", async () => {
   const { prisma } = await runReconcileTest(
     [
       makeSession({
@@ -409,10 +421,10 @@ test("reconcileContainers marks error immediately when container is gone (404) w
         autoRestartAttempts: 0,
       }),
     ],
-    [makeContainer("container-exited-404", "auto-restart-404", "exited")],
+    [makeWorkload("container-exited-404", "auto-restart-404", "exited")],
     false,
     {
-      startExistingContainer: async () => { const e = new Error("Not found") as Error & { statusCode?: number }; e.statusCode = 404; throw e; },
+      startSession: async () => { const e = new Error("Not found") as Error & { statusCode?: number }; e.statusCode = 404; throw e; },
     }
   );
 
@@ -420,7 +432,7 @@ test("reconcileContainers marks error immediately when container is gone (404) w
   assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
 });
 
-test("reconcileContainers auto-restarts a paused session whose container exited, sets status to running", async () => {
+test("reconcileSessions auto-restarts a paused session whose workload exited, sets status to running", async () => {
   const recoveredSessions: Array<{ sessionId: string; url: string }> = [];
   const { prisma, calls } = await runReconcileTest(
     [
@@ -431,11 +443,11 @@ test("reconcileContainers auto-restarts a paused session whose container exited,
         autoRestartAttempts: 0,
       }),
     ],
-    [makeContainer("container-paused-exited", "paused-exited", "exited")],
+    [makeWorkload("container-paused-exited", "paused-exited", "exited")],
     false,
     {
       onSessionRecovered: (sessionId, url) => recoveredSessions.push({ sessionId, url }),
-      startExistingContainer: async () => ({
+      startSession: async () => ({
         containerId: "container-paused-exited",
         containerName: "browsermint-session-paused-exited",
         internalApiUrl: "http://10.0.0.3:3000",
@@ -443,14 +455,14 @@ test("reconcileContainers auto-restarts a paused session whose container exited,
     }
   );
 
-  assert.ok(calls.includes("docker:start:container-paused-exited"));
+  assert.ok(calls.includes("driver:start:container-paused-exited"));
   assert.equal(prisma.__sessions[0].status, "running");
   assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
   assert.equal(recoveredSessions.length, 1);
   assert.equal(recoveredSessions[0].sessionId, "paused-exited");
 });
 
-test("reconcileContainers auto-restarts an error session whose container exited (legacy error recovery)", async () => {
+test("reconcileSessions auto-restarts an error session whose workload exited (legacy error recovery)", async () => {
   const recoveredSessions: Array<{ sessionId: string; url: string }> = [];
   const { prisma, calls } = await runReconcileTest(
     [
@@ -461,11 +473,11 @@ test("reconcileContainers auto-restarts an error session whose container exited 
         autoRestartAttempts: 0,
       }),
     ],
-    [makeContainer("container-legacy-error", "legacy-error", "exited")],
+    [makeWorkload("container-legacy-error", "legacy-error", "exited")],
     false,
     {
       onSessionRecovered: (sessionId, url) => recoveredSessions.push({ sessionId, url }),
-      startExistingContainer: async () => ({
+      startSession: async () => ({
         containerId: "container-legacy-error",
         containerName: "browsermint-session-legacy-error",
         internalApiUrl: "http://10.0.0.5:3000",
@@ -473,14 +485,14 @@ test("reconcileContainers auto-restarts an error session whose container exited 
     }
   );
 
-  assert.ok(calls.includes("docker:start:container-legacy-error"));
+  assert.ok(calls.includes("driver:start:container-legacy-error"));
   assert.equal(prisma.__sessions[0].status, "running");
   assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
   assert.equal(recoveredSessions.length, 1);
   assert.equal(recoveredSessions[0].sessionId, "legacy-error");
 });
 
-test("reconcileContainers resets autoRestartAttempts to 0 on successful restart after prior failures", async () => {
+test("reconcileSessions resets autoRestartAttempts to 0 on successful restart after prior failures", async () => {
   const { prisma } = await runReconcileTest(
     [
       makeSession({
@@ -489,10 +501,10 @@ test("reconcileContainers resets autoRestartAttempts to 0 on successful restart 
         autoRestartAttempts: 2,
       }),
     ],
-    [makeContainer("container-retry", "retry-success", "exited")],
+    [makeWorkload("container-retry", "retry-success", "exited")],
     false,
     {
-      startExistingContainer: async () => ({
+      startSession: async () => ({
         containerId: "container-retry",
         containerName: "browsermint-session-retry-success",
         internalApiUrl: "http://10.0.0.4:3000",
@@ -502,4 +514,74 @@ test("reconcileContainers resets autoRestartAttempts to 0 on successful restart 
 
   assert.equal(prisma.__sessions[0].status, "running");
   assert.equal(prisma.__sessions[0].autoRestartAttempts, 0);
+});
+
+// ─── Pause-by-deletion (Kubernetes) semantics ────────────────────────────────
+
+test("reconcileSessions treats paused sessions with no workload as healthy when pause releases the workload", async () => {
+  const { prisma, calls } = await runReconcileTest(
+    [
+      makeSession({
+        id: "k8s-paused",
+        status: "paused",
+        containerId: "browsermint-session-k8s-paused",
+      }),
+    ],
+    [],
+    false,
+    { pauseReleasesWorkload: true }
+  );
+
+  assert.equal(prisma.__sessions[0].status, "paused");
+  assert.ok(!calls.some((c) => c.startsWith("driver:start")));
+});
+
+test("reconcileSessions auto-restarts running sessions with a vanished workload when pause releases the workload", async () => {
+  const recoveredSessions: string[] = [];
+  const { prisma, calls } = await runReconcileTest(
+    [
+      makeSession({
+        id: "k8s-vanished",
+        status: "running",
+        containerId: "browsermint-session-k8s-vanished",
+        autoRestartAttempts: 0,
+      }),
+    ],
+    [],
+    false,
+    {
+      pauseReleasesWorkload: true,
+      onSessionRecovered: (sessionId) => recoveredSessions.push(sessionId),
+      startSession: async () => ({
+        containerId: "browsermint-session-k8s-vanished",
+        containerName: "browsermint-session-k8s-vanished",
+        internalApiUrl: "http://browsermint-session-k8s-vanished.browsermint.svc.cluster.local:3000",
+      }),
+    }
+  );
+
+  assert.ok(calls.includes("driver:start:browsermint-session-k8s-vanished"));
+  assert.equal(prisma.__sessions[0].status, "running");
+  assert.deepEqual(recoveredSessions, ["k8s-vanished"]);
+});
+
+test("reconcileSessions completes a half-finished pause when pause releases the workload", async () => {
+  const { prisma, calls } = await runReconcileTest(
+    [
+      makeSession({
+        id: "k8s-half-paused",
+        status: "paused",
+        containerId: "browsermint-session-k8s-half-paused",
+      }),
+    ],
+    [makeWorkload("browsermint-session-k8s-half-paused", "k8s-half-paused", "running")],
+    false,
+    {
+      pauseReleasesWorkload: true,
+      pauseSession: async () => {},
+    }
+  );
+
+  assert.ok(calls.includes("driver:pause:browsermint-session-k8s-half-paused"));
+  assert.equal(prisma.__sessions[0].status, "paused");
 });

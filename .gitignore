@@ -69,3 +69,4 @@ __pycache__/
 # Temporary files
 tmp/
 temp/
+deploy/k8s/values-prod.yaml

@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels: {{- include "browsermint.labels" . | nindent 4 }}
+spec:
+  # Single instance by design: in-memory CDP session map, WS connection
+  # counters, idle-pause timers and the 30s reconcile loop. The CMD also runs
+  # `prisma migrate deploy`, which must never run concurrently.
+  replicas: {{ .Values.replicas.backend }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "browsermint.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "browsermint.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: {{ .Release.Name }}-backend
+      {{- include "browsermint.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: backend
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag }}"
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports:
+            - containerPort: 24710
+          envFrom:
+            - secretRef:
+                name: {{ .Values.backendEnvSecret }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "24710"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.cnpgAppSecret }}
+                  key: {{ .Values.db.uriKey }}
+            - name: SESSION_DRIVER
+              value: kubernetes
+            - name: K8S_NAMESPACE
+              value: {{ .Release.Namespace }}
+            - name: STEEL_BROWSER_IMAGE
+              value: {{ .Values.images.browser | quote }}
+            - name: K8S_STORAGE_CLASS
+              value: {{ .Values.session.storageClass | quote }}
+            - name: K8S_PVC_SIZE
+              value: {{ .Values.session.pvcSize | quote }}
+            - name: K8S_SHM_SIZE
+              value: {{ .Values.session.shmSize | quote }}
+            - name: K8S_SESSION_CPU_REQUEST
+              value: {{ .Values.session.cpuRequest | quote }}
+            - name: K8S_SESSION_CPU_LIMIT
+              value: {{ .Values.session.cpuLimit | quote }}
+            - name: K8S_SESSION_MEMORY_REQUEST
+              value: {{ .Values.session.memoryRequest | quote }}
+            - name: K8S_SESSION_MEMORY_LIMIT
+              value: {{ .Values.session.memoryLimit | quote }}
+            - name: K8S_POD_START_TIMEOUT_MS
+              value: {{ .Values.session.podStartTimeoutMs | quote }}
+            {{- with (first .Values.imagePullSecrets) }}
+            - name: K8S_IMAGE_PULL_SECRET
+              value: {{ .name | quote }}
+            {{- end }}
+            - name: IDLE_PAUSE_ENABLED
+              value: {{ .Values.session.idlePauseEnabled | quote }}
+            - name: IDLE_PAUSE_TIMEOUT_MS
+              value: {{ .Values.session.idlePauseTimeoutMs | quote }}
+            - name: DEFAULT_USER_MAX_SESSIONS
+              value: {{ .Values.session.defaultUserMaxSessions | quote }}
+            - name: REGISTRATION_MODE
+              value: {{ .Values.registrationMode | quote }}
+            - name: COOKIE_SECURE
+              value: {{ if .Values.tls.secretName }}"true"{{ else }}"false"{{ end }}
+          readinessProbe:
+            httpGet: { path: /health, port: 24710 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 24710 }
+            initialDelaySeconds: 15
+          resources: {{- toYaml .Values.resources.backend | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels: {{- include "browsermint.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "browsermint.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+  ports:
+    - port: 24710
+      targetPort: 24710

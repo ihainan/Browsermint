@@ -36,9 +36,9 @@ const {
   setCdpServiceOverridesForTests,
 } = await import("./cdp.service.js");
 const {
-  resetDockerServiceOverridesForTests,
-  setDockerServiceOverridesForTests,
-} = await import("./docker.service.js");
+  resetDriverOverridesForTests,
+  setDriverOverridesForTests,
+} = await import("./driver/index.js");
 
 class TestSocket extends Duplex {
   destroyCalled = false;
@@ -302,10 +302,12 @@ test("handleWebSocketUpgrade unpauses paused sessions before proxying", async ()
   const originalWs = proxyServer.ws;
   const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
   config.IDLE_PAUSE_ENABLED = false;
-  setDockerServiceOverridesForTests({
-    unpauseContainer: async (containerId) => {
-      unpausedContainers.push(containerId);
+  setDriverOverridesForTests({
+    resumeSession: async (_sessionId, ref) => {
+      unpausedContainers.push(ref);
+      return { containerId: ref, containerName: "browsermint-session-running", internalApiUrl: "http://10.0.0.6:3000" };
     },
+    waitForReady: async () => {},
   });
   setCdpServiceOverridesForTests({
     initCdpSession: async (sessionId, internalApiUrl) => {
@@ -341,7 +343,7 @@ test("handleWebSocketUpgrade unpauses paused sessions before proxying", async ()
   } finally {
     proxyServer.ws = originalWs;
     config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
-    resetDockerServiceOverridesForTests();
+    resetDriverOverridesForTests();
     resetCdpServiceOverridesForTests();
   }
 });
@@ -390,12 +392,14 @@ test("handleWebSocketUpgrade waits for an in-flight unpause instead of unpausing
   const originalWs = proxyServer.ws;
   const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
   config.IDLE_PAUSE_ENABLED = false;
-  setDockerServiceOverridesForTests({
-    unpauseContainer: async (containerId) => {
-      unpausedContainers.push(containerId);
+  setDriverOverridesForTests({
+    resumeSession: async (_sessionId, ref) => {
+      unpausedContainers.push(ref);
       signalUnpauseStarted();
       await unpauseRelease;
+      return { containerId: ref, containerName: "browsermint-session-running", internalApiUrl: "http://10.0.0.7:3000" };
     },
+    waitForReady: async () => {},
   });
   setCdpServiceOverridesForTests({
     initCdpSession: async () => true,
@@ -436,7 +440,7 @@ test("handleWebSocketUpgrade waits for an in-flight unpause instead of unpausing
   } finally {
     proxyServer.ws = originalWs;
     config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
-    resetDockerServiceOverridesForTests();
+    resetDriverOverridesForTests();
     resetCdpServiceOverridesForTests();
   }
 });

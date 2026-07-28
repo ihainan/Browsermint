@@ -1,7 +1,8 @@
 import { config } from "./config.js";
 import { prisma } from "./db/client.js";
 import { createApp } from "./app.js";
-import { reconcileContainers, pullImageIfNeeded, type SessionRecoveredCallback } from "./services/docker.service.js";
+import { driver } from "./services/driver/index.js";
+import { reconcileSessions, type SessionRecoveredCallback } from "./services/reconcile.service.js";
 import { scheduleIdlePauseOnStartup } from "./services/proxy.service.js";
 import { initCdpSession } from "./services/cdp.service.js";
 
@@ -33,9 +34,9 @@ server.addHook("onReady", async () => {
 
   // Reconcile first (synchronously) so broken sessions are marked error before
   // we try to re-attach CDP — no point connecting to a session we're about to fix.
-  server.log.info("Reconciling containers...");
-  await reconcileContainers(true, onSessionRecovered).catch((err) => {
-    server.log.warn({ err }, "Container reconcile failed");
+  server.log.info("Reconciling session workloads...");
+  await reconcileSessions(true, onSessionRecovered).catch((err) => {
+    server.log.warn({ err }, "Session reconcile failed");
   });
 
   // Re-attach CDP WebSockets for sessions that were running before this restart.
@@ -62,13 +63,13 @@ server.addHook("onReady", async () => {
     }
   }
 
-  server.log.info("Pulling steel-browser image...");
-  runStartupTask("Image pull", pullImageIfNeeded);
+  server.log.info("Preparing browser image...");
+  runStartupTask("Image prepare", () => driver.prepareImages());
 
   // Periodically reconcile to recover sessions stuck in creating/stopping
   // (e.g., after a backend crash or restart mid-operation).
   reconcileTimer = setInterval(() => {
-    void reconcileContainers(false, onSessionRecovered).catch((err) => {
+    void reconcileSessions(false, onSessionRecovered).catch((err) => {
       server.log.warn({ err }, "Periodic reconcile failed");
     });
   }, RECONCILE_INTERVAL_MS);

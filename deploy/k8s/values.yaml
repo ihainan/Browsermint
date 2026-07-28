@@ -1,0 +1,66 @@
+# Defaults / placeholders. Copy values.example.yaml to values-prod.yaml
+# (gitignored) for a real deployment.
+
+images:
+  backend:  { repository: REPLACE/browsermint-backend,  tag: "REPLACE" }
+  frontend: { repository: REPLACE/browsermint-frontend, tag: "REPLACE" }
+  # Browser image reference as seen by the CLUSTER (pull side).
+  browser: "REPLACE/browsermint-browser:REPLACE"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: harbor-registry
+
+domain: browsermint.example.com
+
+# TLS secret for the ingress host; leave empty for plain HTTP ingress
+# (e.g. when TLS terminates at an outer edge).
+tls:
+  secretName: ""
+
+# Secret with the backend runtime env (created manually, see README):
+#   JWT_SECRET, JWT_SESSION_TOKEN_SECRET, and optionally
+#   SERVICE_ASSERTION_SECRET / CAPSOLVER_API_KEY.
+backendEnvSecret: browsermint-backend-env
+
+db:
+  # CNPG app secret (prereqs/cnpg-cluster.yaml) — key `uri` is the Postgres URI.
+  cnpgAppSecret: browsermint-pg-app
+  uriKey: uri
+
+session:
+  storageClass: nfs-harbor
+  pvcSize: 2Gi
+  shmSize: 1Gi
+  cpuRequest: 500m
+  cpuLimit: "2"
+  memoryRequest: 1Gi
+  memoryLimit: 2Gi
+  podStartTimeoutMs: 120000
+  idlePauseEnabled: true
+  idlePauseTimeoutMs: 600000
+  defaultUserMaxSessions: 2
+
+registrationMode: open
+
+replicas:
+  # Backend is single-instance by design: in-memory CDP session map, WS
+  # counters, idle timers and the reconcile loop (mirrors dept-monitor/stats).
+  backend: 1
+  frontend: 2
+
+resources:
+  backend:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 2Gi }
+  frontend:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+ingress:
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # CDP / VNC / cast are long-lived WebSockets.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
 import type { AppPrismaClient } from "./db/client.js";
-import type { ContainerInfo } from "./services/docker.service.js";
+import type { SessionEndpoint } from "./services/driver/index.js";
 
 Object.assign(process.env, {
   DATABASE_URL: "postgresql://user:pass@localhost:5432/browsermint_test",
@@ -16,9 +16,9 @@ const { createApp } = await import("./app.js");
 const { config } = await import("./config.js");
 const { setPrismaForTests } = await import("./db/client.js");
 const {
-  resetDockerServiceOverridesForTests,
-  setDockerServiceOverridesForTests,
-} = await import("./services/docker.service.js");
+  resetDriverOverridesForTests,
+  setDriverOverridesForTests,
+} = await import("./services/driver/index.js");
 const {
   resetCdpServiceOverridesForTests,
   setCdpServiceOverridesForTests,
@@ -200,7 +200,7 @@ function authCookie() {
   return `browsermint_auth=${encodeURIComponent(token)}`;
 }
 
-function containerInfo(sessionId: string): ContainerInfo {
+function containerInfo(sessionId: string): SessionEndpoint {
   return {
     containerId: `container-${sessionId}`,
     containerName: `browsermint-${sessionId}`,
@@ -212,15 +212,15 @@ async function makeApp(seedSessions: SessionRecord[] = [], userOverrides: Partia
   const calls: string[] = [];
   const prisma = makePrismaMock(seedSessions, userOverrides);
   setPrismaForTests(prisma);
-  setDockerServiceOverridesForTests({
-    createAndStartContainer: async (sessionId) => {
+  setDriverOverridesForTests({
+    createSession: async (sessionId) => {
       calls.push(`docker:create:${sessionId}`);
       return containerInfo(sessionId);
     },
-    waitForContainerReady: async (internalApiUrl) => {
+    waitForReady: async (internalApiUrl) => {
       calls.push(`docker:wait:${internalApiUrl}`);
     },
-    startExistingContainer: async (containerId) => {
+    startSession: async (_sessionId, containerId) => {
       calls.push(`docker:start:${containerId}`);
       return {
         containerId,
@@ -228,10 +228,10 @@ async function makeApp(seedSessions: SessionRecord[] = [], userOverrides: Partia
         internalApiUrl: "http://127.0.0.1:3999",
       };
     },
-    stopContainer: async (containerId) => {
+    stopSession: async (_sessionId, containerId) => {
       calls.push(`docker:stop:${containerId}`);
     },
-    stopAndRemoveContainer: async (containerId) => {
+    destroySession: async (_sessionId, containerId) => {
       calls.push(`docker:remove:${containerId}`);
     },
   });
@@ -262,7 +262,7 @@ async function makeApp(seedSessions: SessionRecord[] = [], userOverrides: Partia
 
 async function closeApp(app: Awaited<ReturnType<typeof createApp>>) {
   await app.close();
-  resetDockerServiceOverridesForTests();
+  resetDriverOverridesForTests();
   resetCdpServiceOverridesForTests();
 }
 
@@ -291,16 +291,16 @@ test("POST /api/sessions creates a running browser session with mocked Docker an
 
 test("POST /api/sessions marks failed creates as error and removes the started container", async () => {
   const { app, prisma, calls } = await makeApp();
-  setDockerServiceOverridesForTests({
-    createAndStartContainer: async (sessionId) => {
+  setDriverOverridesForTests({
+    createSession: async (sessionId) => {
       calls.push(`docker:create:${sessionId}`);
       return containerInfo(sessionId);
     },
-    waitForContainerReady: async () => {
+    waitForReady: async () => {
       calls.push("docker:wait:fail");
       throw new Error("not ready");
     },
-    stopAndRemoveContainer: async (containerId) => {
+    destroySession: async (_sessionId, containerId) => {
       calls.push(`docker:remove:${containerId}`);
     },
   });
@@ -698,15 +698,15 @@ test("POST /api/sessions/:id/start falls back to a fresh container on stale Dock
       runningStartedAt: null,
     }),
   ]);
-  setDockerServiceOverridesForTests({
-    startExistingContainer: async (containerId) => {
+  setDriverOverridesForTests({
+    startSession: async (_sessionId, containerId) => {
       calls.push(`docker:start:404:${containerId}`);
       throw Object.assign(new Error("stale network"), { statusCode: 404 });
     },
-    stopAndRemoveContainer: async (containerId) => {
+    destroySession: async (_sessionId, containerId) => {
       calls.push(`docker:remove:${containerId}`);
     },
-    createAndStartContainer: async (sessionId) => {
+    createSession: async (sessionId) => {
       calls.push(`docker:create:fallback:${sessionId}`);
       return {
         containerId: `fresh-${sessionId}`,
@@ -714,7 +714,7 @@ test("POST /api/sessions/:id/start falls back to a fresh container on stale Dock
         internalApiUrl: "http://127.0.0.1:3888",
       };
     },
-    waitForContainerReady: async (internalApiUrl) => {
+    waitForReady: async (internalApiUrl) => {
       calls.push(`docker:wait:${internalApiUrl}`);
     },
   });

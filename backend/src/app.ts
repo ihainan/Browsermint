@@ -80,6 +80,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   await server.register(authRoutes, { prefix: "/api/auth" });
   await server.register(sessionsRoutes, { prefix: "/api/sessions" });
   await server.register(adminRoutes, { prefix: "/api/admin" });
+  if (config.SERVICE_ASSERTION_SECRET) {
+    const serviceRoutes = (await import("./modules/service/service.routes.js")).default;
+    await server.register(serviceRoutes, { prefix: "/api/service" });
+  }
 
   server.get("/api/sessions/:id/details", {
     handler: async (request, reply) =>

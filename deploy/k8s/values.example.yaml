@@ -1,0 +1,43 @@
+# Example: ZGCAI enterprise deployment. Copy to values-prod.yaml (gitignored),
+# set the image tags, and deploy:
+#   helm -n browsermint upgrade --install browsermint . -f values-prod.yaml
+
+images:
+  backend:  { repository: harbor.inner.bza.edu.cn/zgci/browsermint-backend,  tag: "REPLACE_WITH_BUILD_TAG" }
+  frontend: { repository: harbor.inner.bza.edu.cn/zgci/browsermint-frontend, tag: "REPLACE_WITH_BUILD_TAG" }
+  browser: "harbor.inner.bza.edu.cn/zgci/browsermint-browser:REPLACE_WITH_BUILD_TAG"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: harbor-registry
+
+# Internal-only host (Inner-CA wildcard; not exposed on the public edge nginx).
+domain: browsermint.inner.bza.edu.cn
+
+tls:
+  secretName: browsermint-inner-tls   # Inner-CA cert+key for *.inner.bza.edu.cn
+
+backendEnvSecret: browsermint-backend-env
+
+db:
+  cnpgAppSecret: browsermint-pg-app
+  uriKey: uri
+
+session:
+  storageClass: nfs-harbor
+  pvcSize: 2Gi
+  shmSize: 1Gi
+  cpuRequest: 500m
+  cpuLimit: "2"
+  memoryRequest: 1Gi
+  memoryLimit: 2Gi
+  podStartTimeoutMs: 180000   # cache-less nodes pull ~2GB browser image
+  idlePauseEnabled: true
+  idlePauseTimeoutMs: 600000
+  defaultUserMaxSessions: 2
+
+registrationMode: disabled    # agents get accounts via /api/service/agent-tokens
+
+replicas:
+  backend: 1
+  frontend: 2

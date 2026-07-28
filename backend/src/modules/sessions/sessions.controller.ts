@@ -8,13 +8,10 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/client.js";
 import { config } from "../../config.js";
 import {
-  createAndStartContainer,
-  startExistingContainer,
-  waitForContainerReady,
-  stopContainer,
-  stopAndRemoveContainer,
-  type ContainerInfo,
-} from "../../services/docker.service.js";
+  driver,
+  WorkloadGoneError,
+  type SessionEndpoint,
+} from "../../services/driver/index.js";
 import {
   initCdpSession,
   cleanupCdpSession,
@@ -70,10 +67,10 @@ export async function handleCreateSession(
 
   console.info(`[session] Creating session ${sessionId} (user ${userId})`);
 
-  let containerInfo: ContainerInfo | undefined;
+  let containerInfo: SessionEndpoint | undefined;
   try {
-    containerInfo = await createAndStartContainer(sessionId);
-    await waitForContainerReady(containerInfo.internalApiUrl);
+    containerInfo = await driver.createSession(sessionId);
+    await driver.waitForReady(containerInfo.internalApiUrl);
     const cdpReady = await initCdpSession(sessionId, containerInfo.internalApiUrl);
     if (!cdpReady) {
       throw new Error("CDP initialization failed");
@@ -83,7 +80,7 @@ export async function handleCreateSession(
     const current = await prisma.session.findUnique({ where: { id: sessionId } });
     if (!current || current.deletedAt) {
       cleanupCdpSession(sessionId);
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      await driver.destroySession(sessionId, containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during creation" });
     }
 
@@ -108,9 +105,9 @@ export async function handleCreateSession(
       where: { id: sessionId },
       data: { status: "error" },
     });
-    // Clean up any container that was started before the failure
+    // Clean up any workload that was started before the failure
     if (containerInfo) {
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      await driver.destroySession(sessionId, containerInfo.containerId).catch(() => {});
     }
     return reply.status(500).send({ error: "Failed to start browser session" });
   }
@@ -178,11 +175,9 @@ export async function handleDeleteSession(
   // Close Chrome gracefully so it flushes data before container removal
   await closeBrowserGracefully(id).catch(() => {});
   cleanupCdpSession(id);
-  if (session.containerId) {
-    await stopAndRemoveContainer(session.containerId).catch((err) =>
-      console.error(`[session] Failed to remove container for session ${id}:`, err)
-    );
-  }
+  await driver.destroySession(id, session.containerId).catch((err) =>
+    console.error(`[session] Failed to remove workload for session ${id}:`, err)
+  );
 
   await prisma.session.update({
     where: { id },
@@ -213,13 +208,15 @@ export async function handleStopSession(
   clearIdleTimer(id);
   await prisma.session.update({ where: { id }, data: { status: "stopping" } });
 
-  // Paused sessions: Chrome is frozen, skip CDP operations and go straight to docker stop.
-  // docker stop handles paused containers by unpausing then stopping them.
+  // Paused sessions: skip CDP operations and go straight to an engine stop.
+  // Docker: docker stop unpauses then stops the frozen container.
+  // Kubernetes: the pod is already gone (pause deleted it); stop is a no-op
+  // that just settles the DB state.
   if (session.status === "paused") {
     cleanupCdpSession(id);
     if (session.containerId) {
       try {
-        await stopContainer(session.containerId);
+        await driver.stopSession(id, session.containerId);
       } catch (err) {
         console.error(`[session] Failed to stop container for session ${id}:`, err);
         await prisma.session.update({ where: { id }, data: { status: "error" } });
@@ -249,9 +246,10 @@ export async function handleStopSession(
   cleanupCdpSession(id);
 
   if (session.containerId) {
-    // Stop-only: container filesystem (cookies, browser data) is preserved for resume.
+    // Stop-only: browser state (cookies, profile) is preserved for resume —
+    // container filesystem on Docker, profile PVC on Kubernetes.
     try {
-      await stopContainer(session.containerId);
+      await driver.stopSession(id, session.containerId);
     } catch (err) {
       console.error(`[session] Failed to stop container for session ${id}:`, err);
       await prisma.session.update({ where: { id }, data: { status: "error" } });
@@ -315,43 +313,43 @@ export async function handleStartSession(
 
   console.info(`[session] Resuming session ${id} (had container: ${session.containerId ? "yes" : "no"})`);
 
-  let containerInfo: ContainerInfo | undefined;
+  let containerInfo: SessionEndpoint | undefined;
   try {
-    // If a container already exists (session was stopped, not deleted), restart it
+    // If a workload already exists (session was stopped, not deleted), restart it
     // so the browser's cookies and local storage are preserved.
-    // Otherwise create a fresh container.
+    // Otherwise create a fresh one.
     if (session.containerId) {
       try {
-        containerInfo = await startExistingContainer(session.containerId);
+        containerInfo = await driver.startSession(id, session.containerId);
       } catch (err: unknown) {
         const statusCode = (err as { statusCode?: number }).statusCode;
-        if (statusCode === 404) {
-          // The container's stored network ID is stale — this happens when the Docker
-          // network is recreated (e.g. after a host reboot followed by docker compose down/up).
-          // Discard the broken container and create a fresh one. Browser state
+        if (err instanceof WorkloadGoneError || statusCode === 404) {
+          // The stored workload reference is stale — e.g. the Docker network was
+          // recreated (host reboot + docker compose down/up).
+          // Discard the broken workload and create a fresh one. Browser state
           // (cookies, local storage) will be lost for this session.
-          console.warn(`[session] Session ${id}: container network stale (404) — discarding, creating fresh one (browser state lost)`);
-          await stopAndRemoveContainer(session.containerId).catch(() => {});
-          containerInfo = await createAndStartContainer(id);
+          console.warn(`[session] Session ${id}: workload stale (gone) — discarding, creating fresh one (browser state lost)`);
+          await driver.destroySession(id, session.containerId).catch(() => {});
+          containerInfo = await driver.createSession(id);
         } else {
           throw err;
         }
       }
     } else {
-      containerInfo = await createAndStartContainer(id);
+      containerInfo = await driver.createSession(id);
     }
 
-    await waitForContainerReady(containerInfo.internalApiUrl);
+    await driver.waitForReady(containerInfo.internalApiUrl);
     const cdpReady = await initCdpSession(id, containerInfo.internalApiUrl);
 
     if (!cdpReady) {
       // Chrome failed to start inside the existing container (likely a corrupted profile
       // from a previous forced SIGKILL). Discard the broken container and create a fresh
       // one. Browser state (cookies, local storage) will be lost for this session.
-      console.warn(`[session] Session ${id}: Chrome unreachable — discarding broken container, creating fresh one (browser state lost)`);
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
-      containerInfo = await createAndStartContainer(id);
-      await waitForContainerReady(containerInfo.internalApiUrl);
+      console.warn(`[session] Session ${id}: Chrome unreachable — discarding broken workload, creating fresh one (browser state lost)`);
+      await driver.destroySession(id, containerInfo.containerId).catch(() => {});
+      containerInfo = await driver.createSession(id);
+      await driver.waitForReady(containerInfo.internalApiUrl);
       const freshCdpReady = await initCdpSession(id, containerInfo.internalApiUrl);
       if (!freshCdpReady) {
         throw new Error("CDP initialization failed after container recovery");
@@ -361,7 +359,7 @@ export async function handleStartSession(
     const current = await prisma.session.findUnique({ where: { id } });
     if (!current || current.deletedAt) {
       cleanupCdpSession(id);
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      await driver.destroySession(id, containerInfo.containerId).catch(() => {});
       return reply.status(409).send({ error: "Session was deleted during startup" });
     }
 
@@ -393,9 +391,9 @@ export async function handleStartSession(
   } catch (err) {
     console.error(`[session] Failed to resume session ${id}:`, err);
     await prisma.session.update({ where: { id }, data: { status: "error" } });
-    // Clean up any container that was started before the failure
+    // Clean up any workload that was started before the failure
     if (containerInfo) {
-      await stopAndRemoveContainer(containerInfo.containerId).catch(() => {});
+      await driver.destroySession(id, containerInfo.containerId).catch(() => {});
     }
     return reply.status(500).send({ error: "Failed to start browser session" });
   }

@@ -1,0 +1,18 @@
+# CloudNativePG cluster for Browsermint (operator must already be installed
+# cluster-wide). Creates a `browsermint-pg-app` secret whose `uri` key the
+# chart injects as DATABASE_URL.
+#   kubectl -n browsermint apply -f cnpg-cluster.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: browsermint-pg
+  namespace: browsermint
+spec:
+  instances: 3
+  storage:
+    storageClass: nfs-harbor
+    size: 5Gi
+  bootstrap:
+    initdb:
+      database: browsermint
+      owner: browsermint
