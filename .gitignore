@@ -70,3 +70,4 @@ __pycache__/
 tmp/
 temp/
 deploy/k8s/values-prod.yaml
+deploy/k8s/values-dev*.yaml

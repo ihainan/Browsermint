@@ -47,12 +47,21 @@ push() {
   local local_ref="$1" remote_repo="$2"
   local dest="docker://${HARBOR_PUSH_HOST}/${HARBOR_PROJECT}/${remote_repo}:${TAG}"
   echo ">>> skopeo push ${local_ref} -> ${dest}"
-  printf '%s' "$HARBOR_PASSWORD" | docker run --rm -i --net=host \
+  # Credentials via a throwaway authfile — never on the command line.
+  local authfile
+  authfile=$(mktemp)
+  chmod 600 "$authfile"
+  printf '{"auths":{"%s":{"auth":"%s"}}}' \
+    "$HARBOR_PUSH_HOST" \
+    "$(printf '%s:%s' "$HARBOR_USER" "$HARBOR_PASSWORD" | base64 -w0)" > "$authfile"
+  docker run --rm --net=host \
     -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "$authfile":/auth.json:ro \
     quay.io/skopeo/stable:latest copy \
     --dest-tls-verify=false \
-    --dest-username "$HARBOR_USER" --dest-password-stdin \
+    --dest-authfile /auth.json \
     "docker-daemon:${local_ref}" "$dest"
+  rm -f "$authfile"
 }
 
 build_backend() {

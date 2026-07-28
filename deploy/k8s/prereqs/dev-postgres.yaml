@@ -1,0 +1,79 @@
+# Plain Postgres for clusters WITHOUT the CloudNativePG operator (dev).
+# Produces the same contract the chart expects: a secret named
+# `browsermint-pg-app` with a `uri` key (see values: db.cnpgAppSecret).
+#
+#   kubectl -n browsermint apply -f dev-postgres.yaml
+#   # then create the secret (password of your choice):
+#   #   PW=$(openssl rand -hex 16)
+#   #   kubectl -n browsermint create secret generic browsermint-pg-app \
+#   #     --from-literal=password="$PW" \
+#   #     --from-literal=uri="postgresql://browsermint:${PW}@browsermint-pg:5432/browsermint"
+#
+# Production should use prereqs/cnpg-cluster.yaml instead (HA + backups).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browsermint-pg-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: nfs-harbor-v4
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browsermint-pg
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: browsermint-pg }
+  template:
+    metadata:
+      labels: { app: browsermint-pg }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: browsermint
+            - name: POSTGRES_USER
+              value: browsermint
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: browsermint-pg-app
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "browsermint"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "1",  memory: 1Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: browsermint-pg-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browsermint-pg
+spec:
+  selector: { app: browsermint-pg }
+  ports:
+    - port: 5432
+      targetPort: 5432

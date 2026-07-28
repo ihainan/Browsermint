@@ -32,6 +32,9 @@ export const envSchema = z.object({
   K8S_IMAGE_PULL_SECRET: z.string().optional(),
   // How long a session pod may take to schedule + pull + become Ready.
   K8S_POD_START_TIMEOUT_MS: z.coerce.number().default(120_000),
+  // How long Chrome may take to answer CDP /json/version after the Steel API
+  // is healthy (CPU-only rendering nodes need well over the old 30s).
+  CDP_INIT_TIMEOUT_MS: z.coerce.number().default(30_000),
   PORT: z.coerce.number().default(24710),
   CAPSOLVER_API_KEY: z.string().optional(),
   REGISTRATION_MODE: z.enum(["open", "disabled"]).default("open"),

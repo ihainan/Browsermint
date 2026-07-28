@@ -63,6 +63,8 @@ spec:
               value: {{ .Values.session.memoryLimit | quote }}
             - name: K8S_POD_START_TIMEOUT_MS
               value: {{ .Values.session.podStartTimeoutMs | quote }}
+            - name: CDP_INIT_TIMEOUT_MS
+              value: {{ .Values.session.cdpInitTimeoutMs | quote }}
             {{- with (first .Values.imagePullSecrets) }}
             - name: K8S_IMAGE_PULL_SECRET
               value: {{ .name | quote }}

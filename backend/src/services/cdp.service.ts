@@ -702,7 +702,9 @@ export async function initCdpSession(
   let browserWsUrl = "";
   {
     const CDP_RETRY_INTERVAL_MS = 2000;
-    const CDP_TIMEOUT_MS = 30_000;
+    // Configurable: Chrome cold-starts in ~40-50s on CPU-only (swiftshader)
+    // Kubernetes nodes, well past the old hard-coded 30s.
+    const CDP_TIMEOUT_MS = config.CDP_INIT_TIMEOUT_MS;
     const deadline = Date.now() + CDP_TIMEOUT_MS;
     let lastErr: unknown;
     let resolved = false;

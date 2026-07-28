@@ -32,6 +32,7 @@ session:
   memoryRequest: 1Gi
   memoryLimit: 2Gi
   podStartTimeoutMs: 180000   # cache-less nodes pull ~2GB browser image
+  cdpInitTimeoutMs: 120000   # CPU-only Chrome cold start takes 40-50s+
   idlePauseEnabled: true
   idlePauseTimeoutMs: 600000
   defaultUserMaxSessions: 2

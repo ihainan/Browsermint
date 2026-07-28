@@ -59,6 +59,11 @@ export class KubernetesDriver implements SessionDriver {
   }
 
   private serviceName(sessionId: string): string {
+    // Legacy: per-session Services existed in early deployments; kept only for
+    // cleanup. Chrome's remote-debugging endpoints reject any non-IP Host
+    // header ("Host header is specified and is not an IP address or
+    // localhost"), so addressing must use the Pod IP, exactly like the Docker
+    // driver uses the container IP.
     return `${WORKLOAD_PREFIX}${sessionId}`;
   }
 
@@ -66,26 +71,15 @@ export class KubernetesDriver implements SessionDriver {
     return `${WORKLOAD_PREFIX}${sessionId}-profile`;
   }
 
-  private serviceDns(sessionId: string): string {
-    return `${this.serviceName(sessionId)}.${this.namespace}.svc.cluster.local`;
-  }
-
-  private endpoint(sessionId: string): SessionEndpoint {
-    const podName = this.podName(sessionId);
-    return {
-      containerId: podName,
-      containerName: podName,
-      internalApiUrl: `http://${this.serviceDns(sessionId)}:3000`,
-    };
-  }
-
   private labels(sessionId: string): Record<string, string> {
     return { [MANAGED_LABEL]: "true", [SESSION_LABEL]: sessionId };
   }
 
   private buildPodSpec(sessionId: string): k8s.V1Pod {
+    // DOMAIN/CDP_DOMAIN are cosmetic for Steel (mirrors the Docker driver
+    // passing the container name, which the backend cannot resolve either).
     const env = {
-      ...buildBrowserEnv(this.serviceDns(sessionId)),
+      ...buildBrowserEnv(this.podName(sessionId)),
       CHROME_USER_DATA_DIR: CHROME_PROFILE_DIR,
     };
     // Chrome refuses a profile containing Singleton* symlinks left behind by a
@@ -162,26 +156,6 @@ export class KubernetesDriver implements SessionDriver {
     }
   }
 
-  private async ensureService(sessionId: string): Promise<void> {
-    const body: k8s.V1Service = {
-      metadata: { name: this.serviceName(sessionId), labels: this.labels(sessionId) },
-      spec: {
-        selector: { [SESSION_LABEL]: sessionId },
-        clusterIP: "None",
-        ports: [
-          { name: "api", port: 3000, targetPort: 3000 },
-          { name: "cdp", port: 9223, targetPort: 9223 },
-          { name: "vnc", port: 6080, targetPort: 6080 },
-        ],
-      },
-    };
-    try {
-      await this.core.createNamespacedService({ namespace: this.namespace, body });
-    } catch (err) {
-      if (!isConflict(err)) throw err;
-    }
-  }
-
   private async getPod(name: string): Promise<k8s.V1Pod | null> {
     try {
       return await this.core.readNamespacedPod({ name, namespace: this.namespace });
@@ -208,7 +182,7 @@ export class KubernetesDriver implements SessionDriver {
     throw new Error(`Pod ${name} did not terminate within ${POD_DELETE_TIMEOUT_MS}ms`);
   }
 
-  private async waitForPodReady(name: string): Promise<void> {
+  private async waitForPodReady(name: string): Promise<k8s.V1Pod> {
     const deadline = Date.now() + config.K8S_POD_START_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const pod = await this.getPod(name);
@@ -220,7 +194,7 @@ export class KubernetesDriver implements SessionDriver {
         const ready = pod.status?.conditions?.some(
           (c) => c.type === "Ready" && c.status === "True"
         );
-        if (phase === "Running" && ready) return;
+        if (phase === "Running" && ready && pod.status?.podIP) return pod;
         const waiting = pod.status?.containerStatuses?.[0]?.state?.waiting?.reason;
         if (waiting === "ImagePullBackOff" || waiting === "ErrImagePull" || waiting === "CrashLoopBackOff") {
           throw new Error(`Pod ${name} failed to start (${waiting})`);
@@ -231,31 +205,37 @@ export class KubernetesDriver implements SessionDriver {
     throw new Error(`Pod ${name} did not become ready within ${config.K8S_POD_START_TIMEOUT_MS}ms`);
   }
 
-  // Create PVC + Service + Pod and wait until ready. Idempotent on PVC/Service
-  // so it also serves as start/resume: the pod is recreated, the profile PVC
-  // and the stable Service DNS carry state and addressing across restarts.
+  // Create PVC + Pod and wait until ready. Idempotent on the PVC so it also
+  // serves as start/resume: the pod is recreated and the profile PVC carries
+  // state across restarts. The endpoint uses the Pod IP (Chrome's debugging
+  // endpoints reject DNS Host headers), so every resume path persists the
+  // fresh internalApiUrl it returns.
   private async provision(sessionId: string): Promise<SessionEndpoint> {
     const podName = this.podName(sessionId);
     console.info(`[k8s] Provisioning session pod ${podName}`);
     await this.ensurePvc(sessionId);
-    await this.ensureService(sessionId);
     // A leftover pod (crashed, terminating, or from a previous backend crash)
     // must be removed first — names are deterministic.
     if (await this.getPod(podName)) {
       await this.deletePodAndWait(podName);
     }
     await this.core.createNamespacedPod({ namespace: this.namespace, body: this.buildPodSpec(sessionId) });
+    let pod: k8s.V1Pod;
     try {
-      await this.waitForPodReady(podName);
+      pod = await this.waitForPodReady(podName);
     } catch (err) {
-      // Leave the PVC/Service in place — destroySession cleans up on delete,
-      // and a retry can reuse them. Remove the broken pod so the next attempt
-      // does not race it.
+      // Leave the PVC in place — destroySession cleans up on delete, and a
+      // retry can reuse it. Remove the broken pod so the next attempt does
+      // not race it.
       await this.deletePodAndWait(podName).catch(() => {});
       throw err;
     }
-    console.info(`[k8s] Session pod ${podName} ready`);
-    return this.endpoint(sessionId);
+    console.info(`[k8s] Session pod ${podName} ready (IP: ${pod.status!.podIP})`);
+    return {
+      containerId: podName,
+      containerName: podName,
+      internalApiUrl: `http://${pod.status!.podIP}:3000`,
+    };
   }
 
   createSession(sessionId: string): Promise<SessionEndpoint> {

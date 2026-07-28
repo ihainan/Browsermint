@@ -124,6 +124,10 @@ async function _reconcileSessions(
       if (driver.pauseReleasesWorkload && session.status === "running" &&
           session.containerId && session.autoRestartAttempts < MAX_AUTO_RESTART) {
         await tryAutoRestart(session, "running/missing");
+      } else if (session.status === "creating" && !session.containerId && !startup) {
+        // Provisioning in flight: containerId is only written once create
+        // finishes, and K8s pod startup can span several reconcile ticks.
+        // Stuck-creating sessions are settled on startup instead.
       } else {
         console.info(`[reconcile] Session ${session.id}: workload not found — marking error`);
         await markError(session);
