@@ -14,7 +14,7 @@ server {
     client_max_body_size 10M;
 
     # noVNC static files (served by backend)
-    location /novnc/ {
+    location ^~ /novnc/ {
         proxy_pass http://${BACKEND_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -23,7 +23,7 @@ server {
     }
 
     # Backend API
-    location /api/ {
+    location ^~ /api/ {
         proxy_pass http://${BACKEND_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -33,14 +33,14 @@ server {
         proxy_read_timeout 120s;
     }
 
-    location /health {
+    location ^~ /health {
         proxy_pass http://${BACKEND_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
     }
 
     # WebSocket proxy (CDP / VNC / cast)
-    location /ws/ {
+    location ^~ /ws/ {
         proxy_pass http://${BACKEND_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
