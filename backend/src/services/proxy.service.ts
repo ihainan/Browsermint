@@ -1653,33 +1653,42 @@ export async function handleVncViewer(
     rfb.viewOnly = true;
 
     // Ask the backend to match the remote desktop to this viewer's size
-    // (debounced; also once on connect).
+    // (debounced; also once on connect). A ResizeObserver rather than a window
+    // resize listener: the viewer is an iframe that also changes size when the
+    // sidebar collapses or the panel layout changes, without the window
+    // resizing at all.
     let resizeTimer = null;
-    function syncChromeWindowSize() {
+    let lastSent = '';
+    function syncRemoteSize() {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(async () => {
         const w = Math.floor(screenEl.clientWidth);
         const h = Math.floor(screenEl.clientHeight);
         if (w < 320 || h < 240) return;
+        const key = w + 'x' + h;
+        if (key === lastSent) return;
+        lastSent = key;
         try {
-          await fetch('${resizeApiUrl}', {
+          const res = await fetch('${resizeApiUrl}', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ width: w, height: h }),
           });
+          if (!res.ok) lastSent = ''; // let the next observation retry
         } catch (err) {
-          console.warn('[vnc] window resize sync failed:', err);
+          lastSent = '';
+          console.warn('[vnc] remote resize failed:', err);
         }
-      }, 500);
+      }, 400);
     }
-    window.addEventListener('resize', syncChromeWindowSize);
+    new ResizeObserver(syncRemoteSize).observe(screenEl);
 
     rfb.addEventListener('connect', () => {
       statusEl.style.display = 'none';
       screenEl.focus();
       // noVNC sets cursor:none on the canvas after connect — re-apply our override.
       applyViewOnlyCursor(rfb.viewOnly);
-      syncChromeWindowSize();
+      syncRemoteSize();
     });
     rfb.addEventListener('disconnect', (e) => {
       statusEl.style.display = '';
