@@ -11,6 +11,7 @@ import {
   WORKLOAD_PREFIX,
   waitForHealth,
   buildBrowserEnv,
+  buildResizeDisplayCommand,
   BROWSER_STARTUP_COMMAND,
 } from "./session-driver.js";
 
@@ -274,6 +275,15 @@ export class DockerDriver implements SessionDriver {
         setTimeout(resolve, 80);
       });
     });
+  }
+
+  async resizeDisplay(_sessionId: string, containerId: string, width: number, height: number): Promise<void> {
+    const exec = await this.docker.getContainer(containerId).exec({
+      Cmd: buildResizeDisplayCommand(width, height),
+      AttachStdout: false,
+      AttachStderr: false,
+    });
+    await exec.start({ Detach: true });
   }
 
   async listManagedWorkloads(): Promise<ManagedWorkload[]> {

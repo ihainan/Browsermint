@@ -53,6 +53,8 @@ export interface SessionDriver {
   resumeSession(sessionId: string, ref: string): Promise<SessionEndpoint>;
   waitForReady(internalApiUrl: string): Promise<void>;
   setClipboard(sessionId: string, ref: string, text: string): Promise<void>;
+  // Resize the workload's X screen (see buildResizeDisplayCommand).
+  resizeDisplay(sessionId: string, ref: string, width: number, height: number): Promise<void>;
   listManagedWorkloads(): Promise<ManagedWorkload[]>;
   prepareImages(): Promise<void>;
   // Optional: remove engine resources (Services/PVCs) whose session id is not
@@ -115,6 +117,24 @@ export function buildBrowserEnv(domainHost: string): Record<string, string> {
 // Xvnc (TigerVNC) is both the X server and the VNC server: unlike the old
 // Xvfb + x0vncserver pair it accepts the RFB SetDesktopSize request, so the
 // noVNC viewer can resize the remote resolution to match the viewer window.
+// Resize the X screen to an arbitrary size. Xvnc exposes RandR but only knows
+// the modes it was started with, so the mode is created on demand (a zero-clock
+// modeline is what TigerVNC expects); both steps are idempotent-by-|| true
+// because a repeated size reuses the existing mode. Callers must pass validated
+// integers — the values are interpolated into a shell command.
+export function buildResizeDisplayCommand(width: number, height: number): string[] {
+  const w = Math.floor(width);
+  const h = Math.floor(height);
+  return [
+    "sh", "-c",
+    `export DISPLAY=:10; ` +
+    `OUT=$(xrandr | awk '/ connected/{print $1; exit}'); ` +
+    `xrandr --newmode "${w}x${h}" 0 ${w} 0 0 0 ${h} 0 0 0 2>/dev/null || true; ` +
+    `xrandr --addmode "$OUT" "${w}x${h}" 2>/dev/null || true; ` +
+    `xrandr --output "$OUT" --mode "${w}x${h}"`,
+  ];
+}
+
 export const BROWSER_STARTUP_COMMAND =
   "nohup Xvnc :10 -geometry 1920x1080 -depth 24 -SecurityTypes None -rfbport 5900 -AlwaysShared -AcceptSetDesktopSize >/tmp/xvnc.log 2>&1 & sleep 2 && " +
   "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +

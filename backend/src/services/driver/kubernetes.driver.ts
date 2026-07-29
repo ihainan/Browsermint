@@ -12,6 +12,7 @@ import {
   WORKLOAD_PREFIX,
   waitForHealth,
   buildBrowserEnv,
+  buildResizeDisplayCommand,
   BROWSER_STARTUP_COMMAND,
 } from "./session-driver.js";
 
@@ -308,6 +309,28 @@ export class KubernetesDriver implements SessionDriver {
             } else {
               reject(new Error(`clipboard exec failed: ${status.message ?? status.status}`));
             }
+          }
+        )
+        .catch(reject);
+    });
+  }
+
+  async resizeDisplay(sessionId: string, _ref: string, width: number, height: number): Promise<void> {
+    const devNull = new Writable({ write(_c, _e, cb) { cb(); } });
+    await new Promise<void>((resolve, reject) => {
+      this.exec
+        .exec(
+          this.namespace,
+          this.podName(sessionId),
+          "browser",
+          buildResizeDisplayCommand(width, height),
+          devNull,
+          devNull,
+          null,
+          false,
+          (status) => {
+            if (status.status === "Success") resolve();
+            else reject(new Error(`resize exec failed: ${status.message ?? status.status}`));
           }
         )
         .catch(reject);

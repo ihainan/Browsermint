@@ -1430,10 +1430,13 @@ export async function handleReload(
 // The noVNC client connects via WebSocket to /ws/sessions/:id/vnc, which is proxied
 // to the container's websockify bridge (port 6080) → x11vnc → Xvfb :10 (full Chrome UI).
 
-// Resize the remote Chrome window to match the viewer. The X screen itself is
-// resized by the VNC client (noVNC resizeSession -> RFB SetDesktopSize, handled
-// by Xvnc); Chrome does not follow screen changes on its own, so the viewer
-// calls this endpoint and we move the window via CDP.
+// Resize the remote desktop to match the viewer window: first the X screen
+// (via xrandr inside the workload), then Chrome's window to fill it.
+//
+// The screen resize is done server-side rather than by the VNC client because
+// noVNC refuses to send RFB SetDesktopSize while it is in viewOnly mode — which
+// is exactly the default "observe" mode of the session view. Driving both from
+// here also keeps the two sizes from diverging.
 export async function handleResizeSession(
   request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { width: number; height: number } }>,
   reply: FastifyReply
@@ -1452,7 +1455,14 @@ export async function handleResizeSession(
     return reply.status(400).send({ error: "width/height out of range (320x240..3840x2160)" });
   }
 
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { containerId: true },
+  });
+  if (!session?.containerId) return reply.status(404).send({ error: "Container not found" });
+
   try {
+    await driver.resizeDisplay(sessionId, session.containerId, width, height);
     const targets = await executeCdpCommand(sessionId, "Target.getTargets");
     const page = (targets.targetInfos as Array<{ targetId: string; type: string }> | undefined)
       ?.find((t) => t.type === "page");
@@ -1465,7 +1475,9 @@ export async function handleResizeSession(
     logSessionEvent(sessionId, "resize", request.ip, request.url, 200, { width, height }, getHttpSource(request));
     return reply.send({ ok: true, width, height });
   } catch (err) {
-    return reply.status(502).send({ error: String(err) });
+    const detail = err instanceof Error ? err.message : JSON.stringify(err);
+    console.warn(`[resize] Session ${sessionId}: resize to ${width}x${height} failed:`, detail);
+    return reply.status(502).send({ error: detail });
   }
 }
 
@@ -1632,16 +1644,16 @@ export async function handleVncViewer(
 
     // Create the VNC connection (after listeners, so our keydown handler runs first)
     rfb = new RFB(screenEl, _vncWsUrl);
-    // Adaptive resolution: noVNC sends RFB SetDesktopSize so Xvnc resizes the
-    // remote X screen to the viewer size (1:1 pixels, no blur). scaleViewport
-    // stays on as a graceful fallback for servers that ignore the request
-    // (e.g. old sessions still running x0vncserver).
+    // Adaptive resolution is driven by the backend (/resize below): noVNC's own
+    // resizeSession is suppressed in viewOnly mode, which is this viewer's
+    // default. scaleViewport stays on so the picture still fits while a resize
+    // is in flight, or on sessions whose image predates the Xvnc switch.
     rfb.scaleViewport = true;
-    rfb.resizeSession = true;
+    rfb.resizeSession = false;
     rfb.viewOnly = true;
 
-    // The X screen resize does not move Chrome's window — ask the backend to
-    // match it via CDP (debounced; also once on connect).
+    // Ask the backend to match the remote desktop to this viewer's size
+    // (debounced; also once on connect).
     let resizeTimer = null;
     function syncChromeWindowSize() {
       if (resizeTimer) clearTimeout(resizeTimer);

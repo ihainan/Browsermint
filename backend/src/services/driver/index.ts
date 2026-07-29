@@ -18,6 +18,7 @@ export type DriverOverrides = Partial<
     | "resumeSession"
     | "waitForReady"
     | "setClipboard"
+    | "resizeDisplay"
     | "listManagedWorkloads"
     | "prepareImages"
     | "sweepOrphanResources"
@@ -76,6 +77,8 @@ export const driver: SessionDriver = {
     (driverOverrides.waitForReady ?? getRealDriver().waitForReady.bind(getRealDriver()))(url),
   setClipboard: (id, ref, text) =>
     (driverOverrides.setClipboard ?? getRealDriver().setClipboard.bind(getRealDriver()))(id, ref, text),
+  resizeDisplay: (id, ref, w, h) =>
+    (driverOverrides.resizeDisplay ?? getRealDriver().resizeDisplay.bind(getRealDriver()))(id, ref, w, h),
   listManagedWorkloads: () =>
     (driverOverrides.listManagedWorkloads ?? getRealDriver().listManagedWorkloads.bind(getRealDriver()))(),
   prepareImages: () =>

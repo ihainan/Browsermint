@@ -16,8 +16,11 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
+    # "get" as well as "create": the WebSocket exec transport used by
+    # @kubernetes/client-node issues an HTTP GET upgrade (kubectl's SPDY
+    # transport POSTs, which is why "create" alone looks sufficient).
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
