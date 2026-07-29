@@ -9,5 +9,8 @@ RUN npm run build
 
 FROM nginx:alpine AS production
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
+# Rendered into conf.d/default.conf by the nginx entrypoint (envsubst).
+# Overridden on Kubernetes to the backend Service (e.g. browsermint-backend:24710).
+ENV BACKEND_UPSTREAM=backend:24710
 EXPOSE 80

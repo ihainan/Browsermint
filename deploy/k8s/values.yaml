@@ -44,6 +44,9 @@ session:
 
 registrationMode: open
 
+# Direct node-IP access port; 0 = ClusterIP only (access via ingress)
+frontendNodePort: 0
+
 replicas:
   # Backend is single-instance by design: in-memory CDP session map, WS
   # counters, idle timers and the reconcile loop (mirrors dept-monitor/stats).

@@ -1,0 +1,65 @@
+# Rendered by the nginx image's envsubst entrypoint into conf.d/default.conf.
+# BACKEND_UPSTREAM (host:port) makes the frontend a self-contained entry point:
+# it proxies /api, /ws, /novnc and /health to the backend, so the site works
+# from a single origin without an external router — e.g. a bare NodePort
+# (http://<node-ip>:<port>) on Kubernetes, where the Ingress host cannot be
+# used. Compose keeps its dedicated nginx router in front; these locations are
+# simply never hit there (default backend:24710 still resolves on the compose
+# network, so the config stays valid).
+
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+    client_max_body_size 10M;
+
+    # noVNC static files (served by backend)
+    location /novnc/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Backend API
+    location /api/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    location /health {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    # WebSocket proxy (CDP / VNC / cast)
+    location /ws/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # React Router: serve index.html for all non-asset routes
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}

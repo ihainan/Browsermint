@@ -30,6 +30,11 @@ spec:
         - name: frontend
           image: "{{ .Values.images.frontend.repository }}:{{ .Values.images.frontend.tag }}"
           imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            # Frontend nginx proxies /api,/ws,/novnc,/health here, making it a
+            # self-contained origin (needed for bare NodePort access).
+            - name: BACKEND_UPSTREAM
+              value: "{{ .Release.Name }}-backend:24710"
           ports:
             - containerPort: 80
           readinessProbe:
@@ -43,9 +48,17 @@ metadata:
   name: {{ .Release.Name }}-frontend
   labels: {{- include "browsermint.labels" . | nindent 4 }}
 spec:
+  {{- if .Values.frontendNodePort }}
+  # Direct http://<node-ip>:<nodePort> access (full site: the frontend nginx
+  # proxies API/WS to the backend). Ingress access keeps working alongside.
+  type: NodePort
+  {{- end }}
   selector:
     {{- include "browsermint.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: frontend
   ports:
     - port: 80
       targetPort: 80
+      {{- if .Values.frontendNodePort }}
+      nodePort: {{ .Values.frontendNodePort }}
+      {{- end }}

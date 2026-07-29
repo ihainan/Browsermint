@@ -39,6 +39,9 @@ session:
 
 registrationMode: disabled    # agents get accounts via /api/service/agent-tokens
 
+# Direct node-IP access port; set e.g. 30470 for direct node-IP access
+frontendNodePort: 0
+
 replicas:
   backend: 1
   frontend: 2
