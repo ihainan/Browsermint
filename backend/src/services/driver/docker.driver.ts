@@ -130,18 +130,16 @@ export class DockerDriver implements SessionDriver {
     };
   }
 
-  // Xvfb fails to start on container restart because /tmp/.X10-lock is left behind
-  // from the previous run. Its PID collides with the new Xvfb process (both get the
-  // same PID in the container's fresh PID namespace). Xvfb reads the lock, sees its
-  // own PID as "already running", and exits. Chrome then has no display and crashes.
+  // The X server fails to start on container restart because /tmp/.X10-lock is
+  // left behind from the previous run. Its PID collides with the new process
+  // (both get the same PID in the container's fresh PID namespace), so Xvnc
+  // reads the lock, sees its own PID as "already running", and exits. Chrome
+  // then has no display and crashes.
   //
-  // The container CMD is: `nohup Xvfb & sleep 2 && nohup x0vncserver & sleep 1 && nohup websockify & exec api`
-  // We must wait for that 3-second sequence to finish before killing anything; otherwise
-  // our exec and the CMD race — both try to start x0vncserver, one wins, the other dies,
-  // and the survivor may also die due to the conflict, leaving VNC broken.
-  //
-  // After the 3.5 s wait the CMD has exec'd into the API and all services are settled;
-  // we can safely kill and restart them without interference.
+  // The container CMD is: `nohup Xvnc & sleep 2 && nohup websockify & exec api`
+  // We must wait for that sequence to finish before killing anything; otherwise
+  // our exec and the CMD race. After the 3.5 s wait the CMD has exec'd into the
+  // API and all services are settled; we can safely restart them.
   private async restartDisplayStack(container: Docker.Container, containerId: string): Promise<void> {
     try {
       await new Promise((r) => setTimeout(r, 3500));
@@ -149,13 +147,10 @@ export class DockerDriver implements SessionDriver {
       const exec = await container.exec({
         Cmd: [
           "sh", "-c",
-          "pkill -x Xvfb 2>/dev/null || true; " +
+          "pkill -x Xvnc 2>/dev/null || true; " +
           "rm -f /tmp/.X10-lock /tmp/.X11-unix/X10; " +
-          "nohup Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 & " +
+          "nohup Xvnc :10 -geometry 1920x1080 -depth 24 -SecurityTypes None -rfbport 5900 -AlwaysShared -AcceptSetDesktopSize >/tmp/xvnc.log 2>&1 & " +
           "sleep 2; " +
-          "pkill -f x0vncserver 2>/dev/null || true; " +
-          "nohup x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 >/tmp/x0vnc.log 2>&1 & " +
-          "sleep 1; " +
           "pkill -f 'websockify 6080' 2>/dev/null || true; " +
           "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 &",
         ],

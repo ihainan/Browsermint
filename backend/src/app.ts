@@ -12,6 +12,7 @@ import sessionsRoutes from "./modules/sessions/sessions.routes.js";
 import adminRoutes from "./modules/admin/admin.routes.js";
 import {
   handleActivateTarget,
+  handleResizeSession,
   handleBrowserProxy,
   handleCloseTarget,
   handleCreateTarget,
@@ -164,6 +165,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.post("/api/sessions/:id/reload", {
     handler: async (request, reply) =>
       handleReload(request as Parameters<typeof handleReload>[0], reply),
+  });
+  server.post("/api/sessions/:id/resize", {
+    handler: async (request, reply) =>
+      handleResizeSession(request as Parameters<typeof handleResizeSession>[0], reply),
   });
 
   server.get("/health", async (_request, reply) => {

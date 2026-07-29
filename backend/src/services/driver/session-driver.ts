@@ -112,8 +112,10 @@ export function buildBrowserEnv(domainHost: string): Record<string, string> {
   };
 }
 
+// Xvnc (TigerVNC) is both the X server and the VNC server: unlike the old
+// Xvfb + x0vncserver pair it accepts the RFB SetDesktopSize request, so the
+// noVNC viewer can resize the remote resolution to match the viewer window.
 export const BROWSER_STARTUP_COMMAND =
-  "nohup Xvfb :10 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 & sleep 2 && " +
-  "nohup x0vncserver -display :10 -SecurityTypes None -rfbport 5900 -Log *:stderr:0 >/tmp/x0vnc.log 2>&1 & " +
-  "sleep 1 && nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
+  "nohup Xvnc :10 -geometry 1920x1080 -depth 24 -SecurityTypes None -rfbport 5900 -AlwaysShared -AcceptSetDesktopSize >/tmp/xvnc.log 2>&1 & sleep 2 && " +
+  "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
   "exec /app/api/entrypoint.sh";

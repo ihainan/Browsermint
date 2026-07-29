@@ -1430,6 +1430,45 @@ export async function handleReload(
 // The noVNC client connects via WebSocket to /ws/sessions/:id/vnc, which is proxied
 // to the container's websockify bridge (port 6080) → x11vnc → Xvfb :10 (full Chrome UI).
 
+// Resize the remote Chrome window to match the viewer. The X screen itself is
+// resized by the VNC client (noVNC resizeSession -> RFB SetDesktopSize, handled
+// by Xvnc); Chrome does not follow screen changes on its own, so the viewer
+// calls this endpoint and we move the window via CDP.
+export async function handleResizeSession(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { width: number; height: number } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const body = request.body as { width?: unknown; height?: unknown };
+  const width = Math.floor(Number(body?.width));
+  const height = Math.floor(Number(body?.height));
+  if (!Number.isFinite(width) || !Number.isFinite(height) ||
+      width < 320 || height < 240 || width > 3840 || height > 2160) {
+    return reply.status(400).send({ error: "width/height out of range (320x240..3840x2160)" });
+  }
+
+  try {
+    const targets = await executeCdpCommand(sessionId, "Target.getTargets");
+    const page = (targets.targetInfos as Array<{ targetId: string; type: string }> | undefined)
+      ?.find((t) => t.type === "page");
+    if (!page) return reply.status(502).send({ error: "No page target" });
+    const win = await executeCdpCommand(sessionId, "Browser.getWindowForTarget", { targetId: page.targetId });
+    await executeCdpCommand(sessionId, "Browser.setWindowBounds", {
+      windowId: win.windowId,
+      bounds: { left: 0, top: 0, width, height, windowState: "normal" },
+    });
+    logSessionEvent(sessionId, "resize", request.ip, request.url, 200, { width, height }, getHttpSource(request));
+    return reply.send({ ok: true, width, height });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
 export async function handleVncViewer(
   request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
   reply: FastifyReply
@@ -1445,6 +1484,7 @@ export async function handleVncViewer(
   // (ws: for HTTP, wss: for HTTPS), regardless of X-Forwarded-Proto headers.
   const vncWsPath = `/ws/sessions/${sessionId}/vnc?token=${encodeURIComponent(token)}`;
   const clipboardApiUrl = `/api/sessions/${sessionId}/clipboard?token=${encodeURIComponent(token)}`;
+  const resizeApiUrl = `/api/sessions/${sessionId}/resize?token=${encodeURIComponent(token)}`;
 
   const html = `<!DOCTYPE html>
 <html>
@@ -1592,15 +1632,42 @@ export async function handleVncViewer(
 
     // Create the VNC connection (after listeners, so our keydown handler runs first)
     rfb = new RFB(screenEl, _vncWsUrl);
+    // Adaptive resolution: noVNC sends RFB SetDesktopSize so Xvnc resizes the
+    // remote X screen to the viewer size (1:1 pixels, no blur). scaleViewport
+    // stays on as a graceful fallback for servers that ignore the request
+    // (e.g. old sessions still running x0vncserver).
     rfb.scaleViewport = true;
-    rfb.resizeSession = false;
+    rfb.resizeSession = true;
     rfb.viewOnly = true;
+
+    // The X screen resize does not move Chrome's window — ask the backend to
+    // match it via CDP (debounced; also once on connect).
+    let resizeTimer = null;
+    function syncChromeWindowSize() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(async () => {
+        const w = Math.floor(screenEl.clientWidth);
+        const h = Math.floor(screenEl.clientHeight);
+        if (w < 320 || h < 240) return;
+        try {
+          await fetch('${resizeApiUrl}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ width: w, height: h }),
+          });
+        } catch (err) {
+          console.warn('[vnc] window resize sync failed:', err);
+        }
+      }, 500);
+    }
+    window.addEventListener('resize', syncChromeWindowSize);
 
     rfb.addEventListener('connect', () => {
       statusEl.style.display = 'none';
       screenEl.focus();
       // noVNC sets cursor:none on the canvas after connect — re-apply our override.
       applyViewOnlyCursor(rfb.viewOnly);
+      syncChromeWindowSize();
     });
     rfb.addEventListener('disconnect', (e) => {
       statusEl.style.display = '';

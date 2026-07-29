@@ -3,12 +3,14 @@ FROM ${STEEL_IMAGE}
 
 USER root
 
-# x0vncserver (TigerVNC): connects to an existing X display and serves plain VNC
-# without built-in WebSocket support, so websockify can bridge cleanly.
-# python3-websockify: bridges the noVNC WebSocket client to x0vncserver's plain TCP VNC.
+# Xvnc (TigerVNC standalone): X server + VNC server in one process. Supports the
+# RFB SetDesktopSize request, so the noVNC viewer can resize the remote
+# resolution to match the viewer window (x0vncserver, which only scrapes an
+# existing display, cannot).
+# python3-websockify: bridges the noVNC WebSocket client to Xvnc's plain TCP VNC.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      tigervnc-scraping-server \
+      tigervnc-standalone-server \
       python3-websockify \
       xclip && \
     rm -rf /var/lib/apt/lists/*
