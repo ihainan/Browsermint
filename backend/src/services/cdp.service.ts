@@ -551,7 +551,9 @@ type CdpServiceOverrides = Partial<{
   initCdpSession: (sessionId: string, internalApiUrl: string) => Promise<boolean>;
   closeBrowserGracefully: (sessionId: string, timeoutMs?: number) => Promise<boolean>;
   getOpenPageUrls: (sessionId: string) => Promise<string[]>;
+  getOpenPageEntries: (sessionId: string) => Promise<Array<{ targetId: string; url: string }>>;
   openSavedTabs: (sessionId: string, urls: string[]) => Promise<void>;
+  restoreSavedTabs: (sessionId: string, tabs: SavedTab[]) => Promise<Record<string, string>>;
   cleanupCdpSession: (sessionId: string) => void;
   executeCdpCommand: (
     sessionId: string,
@@ -958,6 +960,95 @@ export async function closeBrowserGracefully(
 
 // Returns the URLs of all real (http/https) pages currently open in the browser.
 // Used to save tab state before stopping a session.
+/** A page as persisted across a pause: the embedder's stable label plus its URL. */
+export type SavedTab = { label?: string; url: string };
+
+/**
+ * Open pages with their current CDP target ids, so callers can pair them with
+ * the labels they assigned (see `Session.targetLabels`). Kept separate from
+ * `getOpenPageUrls` to preserve that function's legacy shape.
+ */
+export async function getOpenPageEntries(
+  sessionId: string
+): Promise<Array<{ targetId: string; url: string }>> {
+  if (cdpServiceOverrides.getOpenPageEntries) {
+    return cdpServiceOverrides.getOpenPageEntries(sessionId);
+  }
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return [];
+  try {
+    const getTargetsId = sendCmd(ws, "Target.getTargets", {});
+    const targetsResp = await waitForResponse(ws, getTargetsId, 5000);
+    const targets = (
+      (targetsResp.result as Record<string, unknown>)?.targetInfos ?? []
+    ) as Array<Record<string, unknown>>;
+    return targets
+      .filter(t => t.type === "page")
+      .map(t => ({ targetId: t.targetId as string, url: t.url as string }))
+      .filter(t => t.url.startsWith("http://") || t.url.startsWith("https://"));
+  } catch (err) {
+    console.warn(`[cdp] Failed to get open page entries for session ${sessionId}:`, err);
+    return [];
+  }
+}
+
+/**
+ * Restore saved tabs and report which target now serves each label, so the
+ * embedder can rebind its own page ids after a pause destroyed the old targets.
+ */
+export async function restoreSavedTabs(
+  sessionId: string, tabs: SavedTab[]
+): Promise<Record<string, string>> {
+  if (cdpServiceOverrides.restoreSavedTabs) {
+    return cdpServiceOverrides.restoreSavedTabs(sessionId, tabs);
+  }
+  const labels: Record<string, string> = {};
+  if (!tabs.length) return labels;
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return labels;
+
+  try {
+    const getTargetsId = sendCmd(ws, "Target.getTargets", {});
+    const targetsResp = await waitForResponse(ws, getTargetsId, 5000);
+    const targets = (
+      (targetsResp.result as Record<string, unknown>)?.targetInfos ?? []
+    ) as Array<Record<string, unknown>>;
+    const blankTarget = targets.find(
+      t => t.type === "page" &&
+        ((t.url as string) === "about:blank" || (t.url as string).startsWith("chrome://newtab"))
+    );
+
+    for (const [i, tab] of tabs.entries()) {
+      let targetId: string | undefined;
+      if (i === 0 && blankTarget) {
+        // Reuse the blank startup tab for the first page (no stray empty tab),
+        // and navigate it synchronously so we can report its target id.
+        targetId = blankTarget.targetId as string;
+        const attachId = sendCmd(ws, "Target.attachToTarget", { targetId, flatten: true });
+        const attachResp = await waitForResponse(ws, attachId, 5000);
+        const pageSessionId = (
+          (attachResp.result as Record<string, unknown>)?.sessionId
+        ) as string | undefined;
+        if (pageSessionId) {
+          sendCmd(ws, "Page.navigate", { url: tab.url }, pageSessionId);
+        } else {
+          targetId = undefined;
+        }
+      }
+      if (!targetId) {
+        const createId = sendCmd(ws, "Target.createTarget", { url: tab.url });
+        const createResp = await waitForResponse(ws, createId, 10000);
+        targetId = (createResp.result as Record<string, unknown>)?.targetId as string | undefined;
+      }
+      if (targetId && tab.label) labels[tab.label] = targetId;
+    }
+    console.info(`[cdp] Restored ${tabs.length} tab(s) for session ${sessionId}`);
+  } catch (err) {
+    console.warn(`[cdp] Failed to restore tabs for session ${sessionId}:`, err);
+  }
+  return labels;
+}
+
 export async function getOpenPageUrls(sessionId: string): Promise<string[]> {
   if (cdpServiceOverrides.getOpenPageUrls) {
     return cdpServiceOverrides.getOpenPageUrls(sessionId);

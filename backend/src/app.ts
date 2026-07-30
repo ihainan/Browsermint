@@ -27,6 +27,8 @@ import {
   handleSetClipboard,
   handleVncViewer,
   handleWebSocketUpgrade,
+  handleSetTargetLabel,
+  handleGetTargetLabels,
 } from "./services/proxy.service.js";
 
 export interface CreateAppOptions {
@@ -145,6 +147,14 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.delete("/api/sessions/:id/targets/:targetId", {
     handler: async (request, reply) =>
       handleCloseTarget(request as Parameters<typeof handleCloseTarget>[0], reply),
+  });
+  server.put("/api/sessions/:id/target-labels", {
+    handler: async (request, reply) =>
+      handleSetTargetLabel(request as Parameters<typeof handleSetTargetLabel>[0], reply),
+  });
+  server.get("/api/sessions/:id/target-labels", {
+    handler: async (request, reply) =>
+      handleGetTargetLabels(request as Parameters<typeof handleGetTargetLabels>[0], reply),
   });
   server.post("/api/sessions/:id/targets/:targetId/activate", {
     handler: async (request, reply) =>

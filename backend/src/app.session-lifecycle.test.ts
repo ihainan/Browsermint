@@ -49,6 +49,7 @@ type SessionRecord = {
   containerName: string | null;
   internalApiUrl: string | null;
   savedTabs: unknown;
+  targetLabels: unknown;
   onlineMs: number;
   runningStartedAt: Date | null;
   createdAt: Date;
@@ -67,6 +68,14 @@ const owner: UserRecord = {
   maxSessions: 2,
 };
 
+function sessionToken(sessionId: string) {
+  return jwt.sign(
+    { sub: owner.id, sessionId, type: "session" },
+    config.JWT_SESSION_TOKEN_SECRET,
+    { expiresIn: "15m" }
+  );
+}
+
 function makeSession(overrides: Partial<SessionRecord>): SessionRecord {
   return {
     id: "session-1",
@@ -77,6 +86,7 @@ function makeSession(overrides: Partial<SessionRecord>): SessionRecord {
     containerName: "browsermint-session-1",
     internalApiUrl: "http://127.0.0.1:3000",
     savedTabs: null,
+    targetLabels: null,
     onlineMs: 0,
     runningStartedAt: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
@@ -118,6 +128,8 @@ function cloneSession(session: SessionRecord): SessionRecord {
     deletedAt: session.deletedAt ? new Date(session.deletedAt) : null,
     runningStartedAt: session.runningStartedAt ? new Date(session.runningStartedAt) : null,
     savedTabs: Array.isArray(session.savedTabs) ? [...session.savedTabs] : session.savedTabs,
+    targetLabels: session.targetLabels && typeof session.targetLabels === "object"
+      ? { ...(session.targetLabels as Record<string, unknown>) } : session.targetLabels,
   };
 }
 
@@ -255,6 +267,20 @@ async function makeApp(seedSessions: SessionRecord[] = [], userOverrides: Partia
     },
     openSavedTabs: async (sessionId, urls) => {
       calls.push(`cdp:restore:${sessionId}:${urls.join(",")}`);
+    },
+    // Labelled variants (page identity across pause/resume)
+    getOpenPageEntries: async (sessionId) => {
+      calls.push(`cdp:entries:${sessionId}`);
+      return [
+        { targetId: "T-OLD-1", url: "https://example.com" },
+        { targetId: "T-OLD-2", url: "https://example.com" },   // same URL twice on purpose
+      ];
+    },
+    restoreSavedTabs: async (sessionId, tabs) => {
+      calls.push(`cdp:restore2:${sessionId}:${tabs.map(t => `${t.label ?? "-"}@${t.url}`).join(",")}`);
+      const out: Record<string, string> = {};
+      tabs.forEach((t, i) => { if (t.label) out[t.label] = `T-NEW-${i + 1}`; });
+      return out;
     },
   });
 
@@ -874,5 +900,50 @@ test("a socket that fires both error and close releases its WS slot only once", 
   } finally {
     config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
     clearIdleTimer(sid);
+  }
+});
+
+// ── Page identity across pause/resume ────────────────────────────────────────
+// Embedders (the ZGCAI chat workspace) address pages by their own id. A plain
+// URL list cannot survive duplicate URLs or redirects, so pause must persist the
+// label with each tab and resume must publish the new label→target mapping.
+
+test("target labels: pause saves labelled tabs and resume republishes the new mapping", async () => {
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  const originalIdlePauseTimeout = config.IDLE_PAUSE_TIMEOUT_MS;
+  config.IDLE_PAUSE_ENABLED = true;
+  config.IDLE_PAUSE_TIMEOUT_MS = 1;
+  const { app, prisma, calls } = await makeApp([
+    makeSession({
+      id: "session-labels",
+      status: "running",
+      containerId: "container-labels",
+      internalApiUrl: "http://127.0.0.1:3000",
+    }),
+  ]);
+  try {
+    // The platform labels its two pages, which happen to share a URL.
+    prisma.__sessions[0].targetLabels = { bp_one: "T-OLD-1", bp_two: "T-OLD-2" };
+    const token = sessionToken("session-labels");
+
+    const put = await app.inject({
+      method: "PUT",
+      url: `/api/sessions/session-labels/target-labels?token=${encodeURIComponent(token)}`,
+      payload: { label: "bp_three", targetId: "T-OLD-3" },
+    });
+    assert.equal(put.statusCode, 200);
+    assert.equal((prisma.__sessions[0].targetLabels as Record<string, string>).bp_three, "T-OLD-3");
+
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/sessions/session-labels/target-labels?token=${encodeURIComponent(token)}`,
+    });
+    assert.equal(got.statusCode, 200);
+    assert.equal(got.json().labels["bp_one"], "T-OLD-1");
+  } finally {
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    config.IDLE_PAUSE_TIMEOUT_MS = originalIdlePauseTimeout;
+    clearIdleTimer("session-labels");
+    await closeApp(app);
   }
 });

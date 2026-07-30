@@ -28,7 +28,11 @@ model Session {
   containerId    String?        @db.VarChar(128)
   containerName  String?        @db.VarChar(128)
   internalApiUrl String?        @db.VarChar(256)
-  savedTabs        Json?          // Array of URLs saved before stop, restored on resume
+  savedTabs        Json?          // Restored on resume. Legacy: string[]; now [{label?, url}]
+  // Stable external page identity (platform page_id) → current CDP targetId.
+  // CDP target ids do not survive a pause (the pod, and with it Chrome, is gone),
+  // so embedders that track pages by their own id need this mapping to rebind.
+  targetLabels     Json?          // { [label: string]: targetId }
   onlineMs            Int       @default(0)      // Accumulated milliseconds in "running" state
   runningStartedAt    DateTime?                  // When the current "running" period began
   autoRestartAttempts Int       @default(0)      // Incremented on each auto-restart failure; reset to 0 on success

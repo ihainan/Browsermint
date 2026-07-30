@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, openSavedTabs, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
 import { Prisma } from "@prisma/client";
@@ -828,6 +828,58 @@ function createCdpBridge(
   });
 }
 
+// ─── Page labels (stable external page identity) ─────────────────────────────
+// Embedders track pages by their own id; CDP target ids are recreated on every
+// resume. These endpoints let them attach that id to a target and read back the
+// mapping after a restore.
+
+// PUT /api/sessions/:id/target-labels?token=xxx   { label, targetId }
+export async function handleSetTargetLabel(
+  request: FastifyRequest<{
+    Params: { id: string }; Querystring: { token?: string };
+    Body: { label?: string; targetId?: string };
+  }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const { label, targetId } = request.body ?? {};
+  if (!label || !targetId) {
+    return reply.status(400).send({ error: "label and targetId required" });
+  }
+  const row = await prisma.session.findUnique({
+    where: { id: sessionId }, select: { targetLabels: true },
+  });
+  const labels: Record<string, string> = {};
+  for (const [k, v] of Object.entries((row?.targetLabels ?? {}) as Record<string, unknown>)) {
+    if (typeof v === "string") labels[k] = v;
+  }
+  labels[label] = targetId;
+  await prisma.session.update({ where: { id: sessionId }, data: { targetLabels: labels } });
+  return reply.send({ ok: true });
+}
+
+// GET /api/sessions/:id/target-labels?token=xxx
+export async function handleGetTargetLabels(
+  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token);
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const row = await prisma.session.findUnique({
+    where: { id: sessionId }, select: { targetLabels: true },
+  });
+  return reply.send({ labels: (row?.targetLabels ?? {}) as Record<string, string> });
+}
+
 // ─── Idle-pause helpers ───────────────────────────────────────────────────────
 
 export function clearIdleTimer(sessionId: string): void {
@@ -923,9 +975,21 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
     // Pause-by-deletion drivers (K8s) lose the in-memory Chrome on pause: save
     // the open tabs for restore on resume, and close Chrome gracefully so the
     // profile (cookies etc.) is flushed to the PVC before the pod goes away.
-    let savedUrls: string[] = [];
+    // Save pages **with the embedder's labels**: CDP target ids die with the pod,
+    // so a plain URL list cannot tell which restored tab is which page when the
+    // same URL appears twice or a redirect changes it.
+    let savedTabs: Array<{ label?: string; url: string }> = [];
     if (driver.pauseReleasesWorkload) {
-      savedUrls = await getOpenPageUrls(sessionId).catch(() => []);
+      const entries = await getOpenPageEntries(sessionId).catch(() => []);
+      const labelRow = await prisma.session.findUnique({
+        where: { id: sessionId }, select: { targetLabels: true },
+      }).catch(() => null);
+      const labelByTarget = new Map<string, string>();
+      const stored = (labelRow?.targetLabels ?? {}) as Record<string, unknown>;
+      for (const [label, targetId] of Object.entries(stored)) {
+        if (typeof targetId === "string") labelByTarget.set(targetId, label);
+      }
+      savedTabs = entries.map((e: { targetId: string; url: string }) => ({ label: labelByTarget.get(e.targetId), url: e.url }));
       await closeBrowserGracefully(sessionId).catch(() => {});
     }
     cleanupCdpSession(sessionId);
@@ -940,7 +1004,7 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
         onlineMs: { increment: delta },
         runningStartedAt: null,
         ...(driver.pauseReleasesWorkload
-          ? { savedTabs: savedUrls.length > 0 ? savedUrls : Prisma.JsonNull }
+          ? { savedTabs: savedTabs.length > 0 ? savedTabs : Prisma.JsonNull }
           : {}),
       },
     });
@@ -1015,16 +1079,29 @@ async function ensureSessionRunning(sessionId: string): Promise<string | null> {
         where: { id: sessionId },
         select: { savedTabs: true },
       });
-      const savedTabs = Array.isArray(current?.savedTabs)
-        ? (current.savedTabs as unknown[]).filter((u): u is string => typeof u === "string")
-        : [];
+      // Accept both shapes: legacy string[] (sessions paused before this change)
+      // and the labelled [{label?, url}] written by pauseSessionIfIdle now.
+      const rawTabs = Array.isArray(current?.savedTabs) ? (current.savedTabs as unknown[]) : [];
+      const savedTabs = rawTabs
+        .map(t => (typeof t === "string"
+          ? { url: t }
+          : (t && typeof (t as { url?: unknown }).url === "string"
+            ? { label: (t as { label?: string }).label, url: (t as { url: string }).url }
+            : null)))
+        .filter((t): t is { label?: string; url: string } => t !== null);
+      let restoredLabels: Record<string, string> = {};
       if (ok && savedTabs.length > 0) {
         console.info(`[resume] Session ${sessionId}: restoring ${savedTabs.length} saved tab(s)`);
-        await openSavedTabs(sessionId, savedTabs).catch(() => {});
+        restoredLabels = await restoreSavedTabs(sessionId, savedTabs).catch(() => ({}));
       }
       await prisma.session.update({
         where: { id: sessionId },
-        data: { savedTabs: Prisma.JsonNull },
+        data: {
+          savedTabs: Prisma.JsonNull,
+          // Publish the new label→target mapping so embedders can rebind their
+          // own page ids; empty object when nothing was labelled.
+          targetLabels: restoredLabels,
+        },
       }).catch(() => {});
     }
     // A session that was just driven should not immediately re-pause: restart
