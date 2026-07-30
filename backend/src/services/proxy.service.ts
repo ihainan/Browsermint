@@ -350,7 +350,10 @@ export function getIncomingMessageIp(request: Pick<IncomingMessage, "headers" | 
 // Fetches debug HTML from container, rewrites the embedded wsUrl, and returns it.
 
 export async function handleBrowserProxy(
-  request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string } }>,
+  request: FastifyRequest<{
+    Params: { id: string };
+    Querystring: { token?: string; pageId?: string; interactive?: string; showControls?: string };
+  }>,
   reply: FastifyReply
 ) {
   const { id: sessionId } = request.params;
@@ -364,7 +367,17 @@ export async function handleBrowserProxy(
   }
   const { session } = context;
 
-  const debugUrl = `${session.internalApiUrl}/v1/sessions/debug`;
+  // Forward the viewer-shaping params to the upstream player. `pageId` puts it in
+  // single-page mode (one CDP target, no tab bar) — that is what the platform's
+  // right-hand "browser page" tab embeds; without forwarding, the upstream always
+  // renders the full multi-tab chrome.
+  const debugQs = new URLSearchParams();
+  const pageId = typeof request.query.pageId === "string" ? request.query.pageId : "";
+  if (pageId) debugQs.set("pageId", pageId);
+  if (typeof request.query.interactive === "string") debugQs.set("interactive", request.query.interactive);
+  if (typeof request.query.showControls === "string") debugQs.set("showControls", request.query.showControls);
+  const debugQsStr = debugQs.toString();
+  const debugUrl = `${session.internalApiUrl}/v1/sessions/debug${debugQsStr ? `?${debugQsStr}` : ""}`;
   let html: string;
   try {
     const res = await fetch(debugUrl, { signal: AbortSignal.timeout(10000) });
@@ -380,7 +393,9 @@ export async function handleBrowserProxy(
   // replace the assigned constant instead of matching one exact origin.
   const host = getPublicRequestHost(request);
   const { ws: wsProto } = getRequestProtocols(request);
-  const publicWsUrl = `${wsProto}://${host}/ws/sessions/${sessionId}/cast?token=${token}`;
+  const publicWsUrl = pageId
+    ? `${wsProto}://${host}/ws/sessions/${sessionId}/cast?token=${token}&pageId=${encodeURIComponent(pageId)}`
+    : `${wsProto}://${host}/ws/sessions/${sessionId}/cast?token=${token}`;
 
   html = html.replace(
     /const\s+baseWsUrl\s*=\s*['"][^'"]+['"];/,

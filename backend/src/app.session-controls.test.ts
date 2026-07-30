@@ -341,6 +341,62 @@ test("browser proxy rewrites websocket URL, injects helpers, and handles upstrea
   }
 });
 
+test("browser proxy forwards page-level viewer params upstream and pins the cast socket to that page", async () => {
+  const originalFetch = globalThis.fetch;
+  const token = sessionToken();
+  const upstreamUrls: string[] = [];
+  try {
+    globalThis.fetch = async (input) => {
+      upstreamUrls.push(typeof input === "string" ? input : String(input));
+      return new Response(
+        "<html><head></head><body><script>const baseWsUrl = 'ws://upstream/cast';</script><canvas></canvas></body></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    };
+    const { app } = await makeApp();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/sessions/session-running/browser?token=${encodeURIComponent(token)}`
+          + "&pageId=target-abc&interactive=false&showControls=false",
+        headers: { host: "browsermint.example", "x-forwarded-proto": "https" },
+      });
+
+      assert.equal(res.statusCode, 200);
+      // Upstream player must be asked for single-page mode, otherwise it renders
+      // the whole multi-tab chrome regardless of what the embedder wants.
+      const upstream = upstreamUrls.at(-1) ?? "";
+      assert.match(upstream, /\/v1\/sessions\/debug\?/);
+      assert.match(upstream, /pageId=target-abc/);
+      assert.match(upstream, /interactive=false/);
+      assert.match(upstream, /showControls=false/);
+      // In single-page mode the player uses baseWsUrl verbatim → it must already
+      // carry the pageId, or the cast stream would fall back to the first target.
+      assert.match(res.body, /const baseWsUrl = 'wss:\/\/browsermint\.example\/ws\/sessions\/session-running\/cast\?token=[^']*&pageId=target-abc'/);
+    } finally {
+      await closeApp(app);
+    }
+
+    // No pageId → unchanged legacy behaviour (full chrome, no query on upstream).
+    upstreamUrls.length = 0;
+    const legacy = await makeApp();
+    try {
+      const res = await legacy.app.inject({
+        method: "GET",
+        url: `/api/sessions/session-running/browser?token=${encodeURIComponent(token)}`,
+        headers: { host: "browsermint.example" },
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal((upstreamUrls.at(-1) ?? "").includes("?"), false);
+      assert.equal(res.body.includes("&pageId="), false);
+    } finally {
+      await closeApp(legacy.app);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("details proxy rewrites CDP websocket/debugger URLs and reflects token expiry", async () => {
   const originalFetch = globalThis.fetch;
   const token = sessionToken();
