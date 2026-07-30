@@ -27,6 +27,8 @@ const {
   clearIdleTimer,
   hasIdleTimerForTests,
   scheduleIdlePauseOnStartup,
+  wsCountForTests,
+  trackWsConnectionForTests,
 } = await import("./services/proxy.service.js");
 
 type UserRecord = {
@@ -816,5 +818,61 @@ test("POST /api/sessions/:id/start recovers once from CDP init failure and fails
     assert.equal(calls.filter((call) => call.startsWith("cdp:init:false:")).length, 2);
   } finally {
     await closeApp(app);
+  }
+});
+
+// ── WS connection accounting (multi-viewer idle-pause correctness) ───────────
+// Regression for the "page view" work: several viewers may watch one session at
+// the same time (two browser windows / desktop + phone). The counter must track
+// every live connection, and a single socket must never release twice.
+
+test("multiple viewers accumulate the WS count and only the last disconnect arms idle-pause", () => {
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  const originalIdlePauseTimeout = config.IDLE_PAUSE_TIMEOUT_MS;
+  config.IDLE_PAUSE_ENABLED = true;
+  config.IDLE_PAUSE_TIMEOUT_MS = 60_000;
+  const sid = "session-ws-count";
+  try {
+    const releaseA = trackWsConnectionForTests(sid);
+    assert.equal(wsCountForTests(sid), 1);
+    const releaseB = trackWsConnectionForTests(sid);
+    // Second viewer must add to the count, not replace it.
+    assert.equal(wsCountForTests(sid), 2);
+    assert.equal(hasIdleTimerForTests(sid), false);
+
+    releaseA();
+    // One viewer is still watching → no idle timer, count back to 1.
+    assert.equal(wsCountForTests(sid), 1);
+    assert.equal(hasIdleTimerForTests(sid), false);
+
+    releaseB();
+    assert.equal(wsCountForTests(sid), 0);
+    assert.equal(hasIdleTimerForTests(sid), true);
+  } finally {
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    config.IDLE_PAUSE_TIMEOUT_MS = originalIdlePauseTimeout;
+    clearIdleTimer(sid);
+  }
+});
+
+test("a socket that fires both error and close releases its WS slot only once", () => {
+  const originalIdlePauseEnabled = config.IDLE_PAUSE_ENABLED;
+  config.IDLE_PAUSE_ENABLED = true;
+  const sid = "session-ws-double-release";
+  try {
+    const releaseA = trackWsConnectionForTests(sid);
+    const releaseB = trackWsConnectionForTests(sid);
+    assert.equal(wsCountForTests(sid), 2);
+
+    releaseA();       // "error"
+    releaseA();       // followed by "close" — must be a no-op
+    assert.equal(wsCountForTests(sid), 1);
+    assert.equal(hasIdleTimerForTests(sid), false);
+
+    releaseB();
+    assert.equal(wsCountForTests(sid), 0);
+  } finally {
+    config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
+    clearIdleTimer(sid);
   }
 });

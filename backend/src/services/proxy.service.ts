@@ -816,9 +816,14 @@ function createCdpBridge(
 // ─── Idle-pause helpers ───────────────────────────────────────────────────────
 
 export function clearIdleTimer(sessionId: string): void {
+  cancelIdleTimer(sessionId);
+  wsConnectionCount.delete(sessionId);
+}
+
+/** Cancel only the pending idle timer, keeping the live WS connection count. */
+function cancelIdleTimer(sessionId: string): void {
   const timer = idleTimers.get(sessionId);
   if (timer) { clearTimeout(timer); idleTimers.delete(sessionId); }
-  wsConnectionCount.delete(sessionId);
 }
 
 export function hasIdleTimerForTests(sessionId: string): boolean {
@@ -828,13 +833,45 @@ export function hasIdleTimerForTests(sessionId: string): boolean {
   return idleTimers.has(sessionId);
 }
 
+export function wsCountForTests(sessionId: string): number {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("wsCountForTests can only be used when NODE_ENV=test");
+  }
+  return wsConnectionCount.get(sessionId) ?? 0;
+}
+
+export function trackWsConnectionForTests(sessionId: string): () => void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("trackWsConnectionForTests can only be used when NODE_ENV=test");
+  }
+  incrementWsCount(sessionId);
+  return createWsRelease(sessionId);
+}
+
 export function scheduleIdlePauseOnStartup(sessionId: string): void {
   scheduleIdlePause(sessionId);
 }
 
 function incrementWsCount(sessionId: string): void {
-  clearIdleTimer(sessionId);
+  // Only cancel the pending idle timer — clearing the whole counter here would
+  // wipe the connections opened by other viewers, so the *next* disconnect would
+  // drop the count to 0 and idle-pause a session that is still being watched.
+  cancelIdleTimer(sessionId);
   wsConnectionCount.set(sessionId, (wsConnectionCount.get(sessionId) ?? 0) + 1);
+}
+
+/**
+ * One-shot connection release. "error" is normally followed by "close", so a
+ * naive listener pair decrements twice and drives the shared counter below the
+ * number of live viewers (which then idle-pauses a watched session).
+ */
+function createWsRelease(sessionId: string): () => void {
+  let counted = true;
+  return () => {
+    if (!counted) return;
+    counted = false;
+    decrementWsCount(sessionId);
+  };
 }
 
 function decrementWsCount(sessionId: string): void {
@@ -1187,8 +1224,9 @@ export async function handleWebSocketUpgrade(
   logSessionEvent(sessionId, `ws_${wsType}`, getIncomingMessageIp(request), url, 101, undefined, getWebSocketSource(request));
 
   incrementWsCount(sessionId);
-  socket.once("close", () => decrementWsCount(sessionId));
-  socket.once("error", () => decrementWsCount(sessionId));
+  const releaseOnce = createWsRelease(sessionId);
+  socket.once("close", releaseOnce);
+  socket.once("error", releaseOnce);
 
   proxyServer.ws(request, socket, head, { target: proxyTarget });
 }
