@@ -745,6 +745,9 @@ export async function initCdpSession(
     console.info(`[cdp] Chrome CDP responding for session ${sessionId}, connecting WebSocket...`);
   }
 
+  // Page-level viewport sockets are built from the same host (see setTargetViewport).
+  sessionCdpBases.set(sessionId, browserWsUrl.replace(/\/devtools\/browser\/.*$/, ""));
+
   const ws = new WebSocket(browserWsUrl);
   activeSessions.set(sessionId, ws);
 
@@ -1139,45 +1142,61 @@ export async function openSavedTabs(sessionId: string, urls: string[]): Promise<
   }
 }
 
-// ── Per-target viewport (persistent flat sessions) ─────────────────────────
-// Emulation overrides are owned by the CDP session that set them: Chrome drops
-// them the moment that session goes away. executeCdpCommand attaches a fresh
-// flat session per call, so a viewport set through it never survives the call —
-// which is exactly why "set the viewport" looked like a no-op from the outside.
-// Keeping one long-lived flat session per target is what makes it stick.
-const targetSessions = new Map<string, string>();   // `${sessionId}:${targetId}` -> flat sessionId
-// The desired viewport per target. Re-applied after Steel's cast handler resets
-// device metrics on every viewer connect, and after a CDP reconnect.
+// ── Per-target viewport (persistent page-level devtools sockets) ───────────
+// Two facts, both established by experiment, shape this:
+//  1. Emulation overrides are owned by the CDP session that set them — Chrome
+//     drops them the moment that session goes away. So a fire-and-forget attach
+//     (what executeCdpCommand does) can never hold a viewport.
+//  2. A *flat* session (Target.attachToTarget) does not relayout the page:
+//     after setting 735px through one, the page still reported innerWidth 1920.
+//     A **page-level** socket (/devtools/page/<targetId>) does: innerWidth
+//     becomes 735 and `max-width` media queries flip. That is the one that makes
+//     the page actually reflow, so this is what we hold open per target.
+const targetViewportSockets = new Map<string, WebSocket>();          // `${sessionId}:${targetId}`
 const targetViewports = new Map<string, { width: number; height: number; deviceScaleFactor: number }>();
+const sessionCdpBases = new Map<string, string>();                    // sessionId -> ws://host:9223
 
 function targetKey(sessionId: string, targetId: string): string {
   return `${sessionId}:${targetId}`;
 }
 
 export function forgetTargetViewport(sessionId: string, targetId?: string): void {
-  if (targetId) {
-    targetSessions.delete(targetKey(sessionId, targetId));
-    targetViewports.delete(targetKey(sessionId, targetId));
-    return;
-  }
+  const drop = (k: string) => {
+    const sock = targetViewportSockets.get(k);
+    if (sock) { try { sock.terminate(); } catch { /* already gone */ } }
+    targetViewportSockets.delete(k);
+    targetViewports.delete(k);
+  };
+  if (targetId) return drop(targetKey(sessionId, targetId));
   const prefix = `${sessionId}:`;
-  for (const k of [...targetSessions.keys()]) if (k.startsWith(prefix)) targetSessions.delete(k);
-  for (const k of [...targetViewports.keys()]) if (k.startsWith(prefix)) targetViewports.delete(k);
+  for (const k of [...targetViewportSockets.keys()]) if (k.startsWith(prefix)) drop(k);
+  for (const k of [...targetViewports.keys()]) if (k.startsWith(prefix)) drop(k);
+  sessionCdpBases.delete(sessionId);
 }
 
-async function attachPersistent(
-  ws: WebSocket, sessionId: string, targetId: string, reattach = false
-): Promise<string> {
+async function openViewportSocket(sessionId: string, targetId: string): Promise<WebSocket> {
   const key = targetKey(sessionId, targetId);
-  const cached = targetSessions.get(key);
-  if (cached && !reattach) return cached;
-  const attachId = sendCmd(ws, "Target.attachToTarget", { targetId, flatten: true });
-  const resp = await waitForResponse(ws, attachId, 8000);
-  const flat = (resp.result as Record<string, unknown> | undefined)?.sessionId as string | undefined;
-  if (!flat) throw new Error(`Failed to attach to target ${targetId}`);
-  targetSessions.set(key, flat);
-  return flat;
+  const existing = targetViewportSockets.get(key);
+  if (existing && existing.readyState === WebSocket.OPEN) return existing;
+  const base = sessionCdpBases.get(sessionId);
+  if (!base) throw new Error(`No CDP base for session ${sessionId}`);
+  const sock = new WebSocket(`${base}/devtools/page/${targetId}`);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("viewport socket timeout")), 8000);
+    sock.once("open", () => { clearTimeout(timer); resolve(); });
+    sock.once("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+  // The page can go away under us (closed tab, crashed renderer): drop the
+  // handle so the next call reconnects instead of writing into a dead socket.
+  sock.on("close", () => {
+    if (targetViewportSockets.get(key) === sock) targetViewportSockets.delete(key);
+  });
+  sock.on("error", () => { /* surfaced via close */ });
+  targetViewportSockets.set(key, sock);
+  return sock;
 }
+
+let viewportCmdId = 1;
 
 export async function setTargetViewport(
   sessionId: string,
@@ -1189,30 +1208,21 @@ export async function setTargetViewport(
   if (cdpServiceOverrides.setTargetViewport) {
     return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor);
   }
-  const ws = activeSessions.get(sessionId);
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error(`No active CDP session for session ${sessionId}`);
-  }
   targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
-  const params = {
-    width, height, deviceScaleFactor, mobile: false,
-    screenWidth: width, screenHeight: height,
-    dontSetVisibleSize: false,
-  };
-  for (const reattach of [false, true]) {
-    const flat = await attachPersistent(ws, sessionId, targetId, reattach);
-    const cmdId = sendCmd(ws, "Emulation.setDeviceMetricsOverride", params, flat);
-    const resp = await waitForResponse(ws, cmdId, 8000);
-    if (!resp.error) return;
-    // A stale flat session (target navigated cross-process, browser reconnected)
-    // fails here; re-attach once and retry before giving up.
-    if (reattach) throw new Error(JSON.stringify(resp.error));
-    targetSessions.delete(targetKey(sessionId, targetId));
-  }
+  const sock = await openViewportSocket(sessionId, targetId);
+  sock.send(JSON.stringify({
+    id: viewportCmdId++,
+    method: "Emulation.setDeviceMetricsOverride",
+    params: {
+      width, height, deviceScaleFactor, mobile: false,
+      screenWidth: width, screenHeight: height, dontSetVisibleSize: false,
+    },
+  }));
 }
 
-/** Re-apply the remembered viewport (Steel's cast handler resets device metrics
- *  on every viewer connect, so callers re-assert after a stream starts). */
+/** Re-assert the remembered viewport. Steel's cast handler resets device metrics
+ *  from session.dimensions on every viewer connect, so viewers call this once
+ *  their stream is up. */
 export async function reapplyTargetViewport(sessionId: string, targetId: string): Promise<boolean> {
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!want) return false;
