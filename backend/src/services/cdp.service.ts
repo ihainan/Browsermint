@@ -1352,6 +1352,10 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // rendered at the size we asked for, not resized after the fact.
   const want = targetViewports.get(targetKey(sessionId, targetId));
   producerSend(p, "Page.enable");
+  // Chrome only emits screencast frames for a *visible* page. Several tabs share
+  // one browser window here, so a background target streams nothing at all —
+  // the viewer just sits on a blank canvas. Bring it to front first.
+  producerSend(p, "Page.bringToFront");
   if (want) {
     producerSend(p, "Emulation.setDeviceMetricsOverride", {
       width: want.width, height: want.height, deviceScaleFactor: want.deviceScaleFactor,
@@ -1412,6 +1416,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
     dontSetVisibleSize: false,
   });
   producerSend(p, "Page.stopScreencast");
+  producerSend(p, "Page.bringToFront");
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
   });
