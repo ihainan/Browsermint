@@ -213,9 +213,9 @@ test("不重排的站点：内容超出视口时缩放适配（而不是留一�
     const producerSock = created.at(-1)!;
     const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
     assert.equal(metrics.at(-1)!.params.width, 1250, "布局视口应放宽到内容宽度");
-    // 帧仍按栏宽输出：Chrome 等比缩小，viewer 拿到的是完整页面而不是被裁的一半
+    // 上限必须放行整幅布局：按栏宽封顶会把 1470 的帧又缩回 735，等于白做
     const casts = producerSock.sent.filter((m) => m.method === "Page.startScreencast");
-    assert.equal(casts.at(-1)!.params.maxWidth, 735);
+    assert.equal(casts.at(-1)!.params.maxWidth, 1250);
   } finally { teardown(); }
 });
 

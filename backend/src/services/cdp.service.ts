@@ -1437,10 +1437,14 @@ async function fitViewportToContent(
     deviceScaleFactor: want.deviceScaleFactor, mobile: false,
     screenWidth: layoutWidth, screenHeight: layoutHeight, dontSetVisibleSize: false,
   });
-  // maxWidth/maxHeight stay at the pane size: Chrome scales the frame down, so
-  // the viewer still receives pane-sized frames — full page, no scrollbar.
+  // The cap must allow the full layout through: capping at the pane's CSS width
+  // would scale the 1470px frame straight back down to 735 and undo the whole
+  // point (measured — that is exactly what happened the first time). The viewer
+  // does the fitting in CSS; we ship the pixels.
   producerSend(p, "Page.stopScreencast");
-  producerSend(p, "Page.startScreencast", { format: "jpeg", quality: CAST_QUALITY, ...castCaps(want) });
+  producerSend(p, "Page.startScreencast", {
+    format: "jpeg", quality: CAST_QUALITY, maxWidth: layoutWidth, maxHeight: layoutHeight,
+  });
   console.info(`[cast] ${targetId}: layout ${layoutWidth}px ` +
     `(content ${scrollWidth}px, pane ${want.width}px @${want.deviceScaleFactor}x), zoomed to fit`);
 }
