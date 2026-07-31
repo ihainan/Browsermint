@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { config } from "../config.js";
-import { holdsLease } from "./lease.service.js";
+import { holdsLease, forgetTargetLeases } from "./lease.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { prisma } from "../db/client.js";
 
@@ -1181,6 +1181,9 @@ function targetKey(sessionId: string, targetId: string): string {
  *  remembered viewport, producer + its viewers/timer, and any in-flight setup.
  *  Anything that forgets one of these in isolation leaks the others. */
 export function forgetTargetViewport(sessionId: string, targetId?: string): void {
+  // A target that is gone cannot be under anyone's control — drop its lease so
+  // the row does not outlive the page it guarded.
+  void forgetTargetLeases(sessionId, targetId);
   const drop = (k: string) => {
     const sock = targetViewportSockets.get(k);
     if (sock) { try { sock.terminate(); } catch { /* already gone */ } }
@@ -1523,7 +1526,10 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       if (ackId !== undefined) producerSend(p, "Page.screencastFrameAck", { sessionId: ackId });
       if (data) {
         if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
-        p.lastFrame = data;
+        // While masked we neither ship nor **retain** the frame: a cached frame
+        // would be handed to the next viewer that connects, which is exactly the
+        // password screen we are trying not to show.
+        if (!p.masked) p.lastFrame = data;
         broadcastFrame(p, data);
       }
       return;
@@ -1782,10 +1788,15 @@ export async function attachCastViewer(
     return;
   }
   producer.viewers.add(viewer);
-  // Paint something immediately instead of waiting for the next frame.
-  if (producer.lastFrame) {
+  // A viewer that joins while masked must be told so — otherwise it just sees a
+  // frozen (or blank) picture with no explanation.
+  if (producer.masked) {
+    viewer.send(JSON.stringify({ type: "masked", masked: true }));
+  } else if (producer.lastFrame) {
+    // Paint something immediately instead of waiting for the next frame.
     viewer.send(JSON.stringify({
       data: producer.lastFrame, url: producer.url, title: producer.title, favicon: null,
+      revision: producer.viewportRevision,
     }));
   }
   // Input is accepted only from a connection that carries a live lease. Viewers
@@ -1797,7 +1808,9 @@ export async function attachCastViewer(
       if (producer.closed) return;
       let msg: Record<string, any>;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (msg?.revision !== undefined && msg.revision !== producer.viewportRevision) {
+      // revision is mandatory: making it optional means "omit it and skip the
+      // check", which is not a check at all.
+      if (!Number.isInteger(msg?.revision) || msg.revision !== producer.viewportRevision) {
         return;   // aimed at a layout that no longer exists — dropping beats mis-clicking
       }
       holdsLease(sessionId, targetId, leaseId).then((ok) => {

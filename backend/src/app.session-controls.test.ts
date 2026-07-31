@@ -44,6 +44,16 @@ function makePrismaMock(options: { userActive?: boolean; sessionStatus?: string 
   const userActive = options.userActive ?? true;
   let sessionStatus = options.sessionStatus ?? "running";
   const prisma = {
+    $queryRaw: async () => [{ now: new Date() }],
+    // 无人接管时的租约表：写路径的 guard 会查它。fail-closed 之后，缺这张表会让
+    // 所有写端点变成 503，所以脚手架必须提供（也正好覆盖"没人接管"这条主路径）。
+    targetLease: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      create: async ({ data }: any) => data,
+      updateMany: async () => ({ count: 0 }),
+      deleteMany: async () => ({ count: 0 }),
+    },
     session: {
       findFirst: async (args: { where: { id?: string; userId?: string; user?: { isActive?: boolean }; deletedAt?: null; status?: { in: string[] } }; select?: Record<string, unknown> }) => {
         if (args.where.id !== "session-running") return null;

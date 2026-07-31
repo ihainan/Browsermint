@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { acquireLease, renewLease, releaseLease, currentLease, isLockedByOther, LEASE_RENEW_HINT_MS } from "./lease.service.js";
+import { acquireLease, renewLease, releaseLease, currentLease, isLockedByOther, anyLeaseHeld, sweepExpiredLeases, LEASE_RENEW_HINT_MS } from "./lease.service.js";
 import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, attachCastViewer, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
@@ -285,6 +285,9 @@ export function sanitizeRequestPath(url: string): string {
   try {
     const u = new URL(normalizedUrl, "http://localhost");
     u.searchParams.delete("token");
+    // The lease id is the fencing token for write access — as sensitive as the
+    // session token, and the agent can read its own session's events.
+    u.searchParams.delete("leaseId");
     return u.pathname + (u.search || "");
   } catch {
     return normalizedUrl.replace(/([?&])token=[^&]*/g, "$1").replace(/[?&]$/, "");
@@ -642,21 +645,37 @@ let bridgeCmdCounter = 0;
 // go through so the agent can observe rather than being told the browser broke.
 //
 // Runtime.evaluate counts as a write: it can do anything to the document.
-const CDP_WRITE_PREFIXES = [
-  "Input.", "Emulation.", "Storage.clear", "Browser.setWindowBounds",
+// During a takeover the agent is limited to **observing**. Chasing a denylist of
+// write commands is unwinnable — CDP has Runtime.runScript, Debugger.evaluateOnCallFrame,
+// CSS.setStyleTexts, IndexedDB.*, WebAuthn.* and more, and new ones arrive with
+// every Chrome release. So this is an allowlist of things known to be read-only,
+// and anything not on it is refused (fail-closed).
+const CDP_READONLY_PREFIXES = [
+  "Accessibility.get", "Animation.get", "Audits.",
+  "CSS.get", "CSS.take", "DOM.get", "DOM.describe", "DOM.resolveNode",
+  "DOM.querySelector", "DOM.requestChildNodes", "DOMDebugger.get",
+  "DOMSnapshot.", "Emulation.can", "LayerTree.compositingReasons",
+  "Log.enable", "Network.getResponseBody", "Network.getCookies",
+  "Network.getRequestPostData", "Page.getResource", "Page.getFrameTree",
+  "Page.getLayoutMetrics", "Page.getNavigationHistory", "Page.getAppManifest",
+  "Performance.getMetrics", "Profiler.get", "Runtime.getProperties",
+  "Runtime.globalLexicalScopeNames", "Security.",
+  "Target.getTarget", "Target.getBrowserContexts", "Tracing.getCategories",
 ];
-const CDP_WRITE_METHODS = new Set([
-  "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Page.close",
-  "Page.setDeviceMetricsOverride", "Page.bringToFront", "Page.setDocumentContent",
-  "Page.handleJavaScriptDialog", "Page.startScreencast", "Page.stopScreencast",
-  "Runtime.evaluate", "Runtime.callFunctionOn", "Target.closeTarget",
-  "Target.activateTarget", "DOM.setAttributeValue", "DOM.setOuterHTML",
-  "DOM.focus", "DOM.setFileInputFiles",
+const CDP_READONLY_METHODS = new Set([
+  "Browser.getVersion", "Browser.getWindowForTarget", "Browser.getWindowBounds",
+  "DOM.enable", "DOM.disable", "CSS.enable", "CSS.disable",
+  "Page.enable", "Page.disable", "Page.captureScreenshot", "Page.captureSnapshot",
+  "Page.printToPDF", "Network.enable", "Network.disable",
+  "Runtime.enable", "Runtime.disable", "Performance.enable", "Performance.disable",
+  "Target.getTargets", "Target.attachToTarget", "Target.detachFromTarget",
+  "Target.setDiscoverTargets", "Target.setAutoAttach",
 ]);
 
-function isWriteCommand(method: string): boolean {
-  if (CDP_WRITE_METHODS.has(method)) return true;
-  return CDP_WRITE_PREFIXES.some((p) => method.startsWith(p));
+/** True when the command is safe to run while someone else holds the lease. */
+function isReadOnlyCommand(method: string): boolean {
+  if (CDP_READONLY_METHODS.has(method)) return true;
+  return CDP_READONLY_PREFIXES.some((p) => method.startsWith(p));
 }
 
 function createCdpBridge(
@@ -779,28 +798,47 @@ function createCdpBridge(
 
       const method = typeof msg?.method === "string" ? msg.method : null;
       const cdpSessionId = typeof msg?.sessionId === "string" ? msg.sessionId : null;
-      const targetId = cdpSessionId ? agentSessionTargets.get(cdpSessionId) : undefined;
+      // Where does this command land? A flat session maps to its target; a
+      // browser-level command may name one in params; anything else is unknown.
+      const paramTarget = (msg?.params as Record<string, unknown> | undefined)?.targetId;
+      const targetId = (cdpSessionId ? agentSessionTargets.get(cdpSessionId) : undefined)
+        ?? (typeof paramTarget === "string" ? paramTarget : undefined);
 
-      if (method && isWriteCommand(method) && targetId) {
+      if (method && !isReadOnlyCommand(method)) {
         // Arbitration point. The agent has its own token and could reach CDP
         // directly, so this — not the platform — is where a takeover is enforced.
+        const refuse = (why: string) => {
+          if (typeof msg?.id === "number" && agentWs.readyState === WebSocket.OPEN) {
+            agentWs.send(JSON.stringify({
+              id: msg.id,
+              error: {
+                code: -32000,
+                message: `browsermint: ${why}; retry after the takeover ends ` +
+                  "(re-observe the page first)",
+              },
+            }));
+          }
+          logSessionEvent(bsSessionId, "agent_write_refused", "", method, 409,
+            { targetId: targetId ?? null, why }, "cdp");
+        };
+
+        // A write we cannot attribute to a target cannot be checked against a
+        // lease — refuse it rather than let it through unexamined.
+        if (!targetId) {
+          anyLeaseHeld(bsSessionId)
+            .then((held) => (held ? refuse("a page is being controlled by a user")
+                                  : forwardToChrome(data, isBinary)))
+            .catch(() => refuse("arbitration unavailable"));
+          return;
+        }
         isLockedByOther(bsSessionId, targetId, null)
           .then((holder) => {
             if (!holder) return forwardToChrome(data, isBinary);
-            if (typeof msg?.id === "number" && agentWs.readyState === WebSocket.OPEN) {
-              agentWs.send(JSON.stringify({
-                id: msg.id,
-                error: {
-                  code: -32000,
-                  message: "browsermint: target is being controlled by a user; " +
-                    "retry after the takeover ends (re-observe the page first)",
-                },
-              }));
-            }
-            logSessionEvent(bsSessionId, "agent_write_refused", "", method, 409,
-              { targetId, holder: holder.holderLabel }, "cdp");
+            refuse("target is being controlled by a user");
           })
-          .catch(() => forwardToChrome(data, isBinary));   // 仲裁失败不阻断 agent
+          // Fail closed: an arbitration outage must not silently reopen the
+          // agent's write path while the user believes they hold the page.
+          .catch(() => refuse("arbitration unavailable"));
         return;
       }
       forwardToChrome(data, isBinary);
@@ -1220,9 +1258,28 @@ export function parseSessionWebSocketPath(url: string): SessionWebSocketPath | n
   };
 }
 
+// `Sec-WebSocket-Protocol: bm-lease.<id>` — a header, so it never reaches the
+// request URL that gets logged.
+const LEASE_SUBPROTOCOL_PREFIX = "bm-lease.";
+
+function leaseFromSubprotocol(request: IncomingMessage): string | null {
+  const raw = request.headers["sec-websocket-protocol"];
+  if (!raw) return null;
+  const offered = (Array.isArray(raw) ? raw.join(",") : raw).split(",").map((p) => p.trim());
+  const hit = offered.find((p) => p.startsWith(LEASE_SUBPROTOCOL_PREFIX));
+  if (!hit) return null;
+  const id = hit.slice(LEASE_SUBPROTOCOL_PREFIX.length);
+  return /^[a-f0-9]{8,64}$/i.test(id) ? id : null;
+}
+
 // One shared server for viewer sockets we terminate ourselves (noServer: the
 // upgrade is handed to us by Fastify's http server).
 const pagecastWss = new WebSocketServer({ noServer: true });
+
+// Expired leases are already ignored on read; this only keeps the table from
+// growing without bound on a long-lived deployment.
+const LEASE_SWEEP_INTERVAL_MS = 10 * 60_000;
+setInterval(() => { void sweepExpiredLeases(); }, LEASE_SWEEP_INTERVAL_MS).unref?.();
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -1381,9 +1438,15 @@ export async function handleWebSocketUpgrade(
     }).catch(() => {});
     logSessionEvent(sessionId, "ws_pagecast", getIncomingMessageIp(request), url, 101,
       { targetId }, getWebSocketSource(request));
-    // A lease id on the cast URL turns this connection into a control channel;
-    // without one it stays a strict observer (input dropped server-side).
-    const leaseId = qs.get("leaseId") ?? undefined;
+    // The lease travels in a WS subprotocol, not the query string: request URLs
+    // land in session_events, and the agent can read its own session's events —
+    // a leaked leaseId would let it forge a control connection. (Same reason the
+    // session token is redacted from logs.)
+    const leaseId = leaseFromSubprotocol(request) ?? undefined;
+    if (leaseId) {
+      // ws needs to echo the accepted subprotocol back, or the client aborts.
+      (request as any).headers["sec-websocket-protocol"] = `${LEASE_SUBPROTOCOL_PREFIX}${leaseId}`;
+    }
     pagecastWss.handleUpgrade(request, socket, head, (viewer) => {
       incrementWsCount(sessionId);
       viewer.once("close", () => decrementWsCount(sessionId));
@@ -1394,6 +1457,23 @@ export async function handleWebSocketUpgrade(
     });
     return;
   } else if (wsType === "vnc") {
+    // VNC is a second,完全独立的 input path: RFB carries mouse and keyboard
+    // straight to the X server, bypassing every CDP-level check. While any page
+    // in this session is under user control, that would silently break the
+    // single-writer guarantee — so refuse the connection outright.
+    let vncBlocked = false;
+    try {
+      vncBlocked = await anyLeaseHeld(sessionId);
+    } catch {
+      vncBlocked = true;      // fail closed, same as every other write path
+    }
+    if (vncBlocked) {
+      console.warn(`[ws-proxy] refusing VNC while a page is under control: ${sessionId}`);
+      logSessionEvent(sessionId, "vnc_refused_lease", getIncomingMessageIp(request), url, 409,
+        undefined, getWebSocketSource(request));
+      socket.destroy();
+      return;
+    }
     // Forward to websockify (port 6080) which bridges the noVNC WebSocket client to
     // x0vncserver's plain TCP VNC port (5900). x0vncserver (TigerVNC) has no built-in
     // WebSocket support, so websockify can bridge cleanly without protocol conflicts.
@@ -1536,6 +1616,9 @@ export async function handleCloseTarget(
   if (!token) return reply.status(401).send({ error: "Missing token" });
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
 
   try {
     await executeCdpCommand(sessionId, "Target.closeTarget", { targetId });
@@ -1555,6 +1638,9 @@ export async function handleActivateTarget(
   if (!token) return reply.status(401).send({ error: "Missing token" });
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
 
   try {
     await executeCdpCommand(sessionId, "Target.activateTarget", { targetId });
@@ -1565,17 +1651,26 @@ export async function handleActivateTarget(
   }
 }
 
-// A lease lookup that cannot run must not take the endpoint down with it: an
-// arbitration outage degrades to previous behaviour (allow) rather than 500.
-// The CDP bridge does the same — refusing everything would strand the agent.
-async function leaseHolderBlocking(
-  sessionId: string, targetId: string, leaseId: string | null
-) {
+// Guard for every REST path that changes browser state. Fail **closed**: if the
+// lease store cannot be read we do not know whether a user is driving, and
+// letting writes through would break the single-writer promise exactly when the
+// user believes they hold the page.
+type WriteGuard = { status: number; body: Record<string, unknown> } | null;
+
+async function guardWrite(
+  sessionId: string, targetId: string | undefined, leaseId: string | null
+): Promise<WriteGuard> {
   try {
-    return await isLockedByOther(sessionId, targetId, leaseId);
+    if (!targetId) {
+      // Session-wide write (resize, VNC input): any live lease blocks it.
+      const held = await anyLeaseHeld(sessionId);
+      return held ? { status: 409, body: { error: "held" } } : null;
+    }
+    const holder = await isLockedByOther(sessionId, targetId, leaseId);
+    return holder ? { status: 409, body: { error: "held", holderLabel: holder.holderLabel } } : null;
   } catch (err) {
-    console.warn(`[lease] arbitration unavailable for ${targetId}:`, err);
-    return null;
+    console.warn(`[lease] arbitration unavailable for ${targetId ?? sessionId}:`, err);
+    return { status: 503, body: { error: "arbitration_unavailable" } };
   }
 }
 
@@ -1676,6 +1771,9 @@ export async function handleSetTargetViewport(
   if (!token) return reply.status(401).send({ error: "Missing token" });
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
 
   const body = request.body as {
     width?: unknown; height?: unknown; deviceScaleFactor?: unknown; zoom?: unknown;
@@ -1720,6 +1818,9 @@ export async function handleReapplyTargetViewport(
   if (!token) return reply.status(401).send({ error: "Missing token" });
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
   try {
     const applied = await reapplyTargetViewport(sessionId, targetId);
     return reply.send({ ok: true, applied });
@@ -1740,10 +1841,8 @@ export async function handleNavigate(
 
   const { url, targetId } = request.body as { url: string; targetId: string };
   if (!url || !targetId) return reply.status(400).send({ error: "url and targetId required" });
-  const navBlocked = await leaseHolderBlocking(sessionId, targetId, leaseIdOf(request));
-  if (navBlocked) {
-    return reply.status(409).send({ error: "held", holderLabel: navBlocked.holderLabel });
-  }
+  const navBlocked = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (navBlocked) return reply.status(navBlocked.status).send(navBlocked.body);
 
   try {
     const result = await executeCdpCommand(sessionId, "Page.navigate", { url }, targetId);
@@ -1765,8 +1864,8 @@ export async function handleGoBack(
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
-  const blocked = await leaseHolderBlocking(sessionId, targetId, leaseIdOf(request));
-  if (blocked) return reply.status(409).send({ error: "held", holderLabel: blocked.holderLabel });
+  const blocked = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (blocked) return reply.status(blocked.status).send(blocked.body);
   try {
     // Page.goBack doesn't exist in CDP; use getNavigationHistory + navigateToHistoryEntry
     const history = await executeCdpCommand(sessionId, "Page.getNavigationHistory", {}, targetId);
@@ -1794,6 +1893,9 @@ export async function handleGoForward(
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
   try {
     // Page.goForward doesn't exist in CDP; use getNavigationHistory + navigateToHistoryEntry
     const history = await executeCdpCommand(sessionId, "Page.getNavigationHistory", {}, targetId);
@@ -1821,6 +1923,9 @@ export async function handleReload(
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
+  const wg = await guardWrite(sessionId, targetId, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
   try {
     await executePageCommandWhenReady(sessionId, "Page.reload", {}, targetId);
     logSessionEvent(sessionId, "reload", request.ip, request.url, 200, { targetId }, getHttpSource(request));
@@ -1852,6 +1957,9 @@ export async function handleResizeSession(
   if (!token) return reply.status(401).send({ error: "Missing token" });
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const wg = await guardWrite(sessionId, undefined, leaseIdOf(request));
+  if (wg) return reply.status(wg.status).send(wg.body);
+
 
   const body = request.body as { width?: unknown; height?: unknown };
   const width = Math.floor(Number(body?.width));

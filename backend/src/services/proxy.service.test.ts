@@ -103,6 +103,15 @@ function setProxyPrismaMock(session: {
   const events: Array<Record<string, unknown>> = [];
   const updates: Array<Record<string, unknown>> = [];
   const prisma = {
+    $queryRaw: async () => [{ now: new Date() }],
+    // 没人接管：VNC 与其它写路径的 guard 会查这张表（fail-closed，缺表即拒连）
+    targetLease: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      create: async ({ data }: any) => data,
+      updateMany: async () => ({ count: 0 }),
+      deleteMany: async () => ({ count: 0 }),
+    },
     session: {
       findFirst: async (args?: { where?: { id?: string; userId?: string; user?: { isActive?: boolean } } }) => {
         if (!session) return null;
@@ -359,6 +368,15 @@ test("handleWebSocketUpgrade waits for an in-flight unpause instead of unpausing
   };
   const updates: Array<Record<string, unknown>> = [];
   const prisma = {
+    $queryRaw: async () => [{ now: new Date() }],
+    // 没人接管：VNC 与其它写路径的 guard 会查这张表（fail-closed，缺表即拒连）
+    targetLease: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      create: async ({ data }: any) => data,
+      updateMany: async () => ({ count: 0 }),
+      deleteMany: async () => ({ count: 0 }),
+    },
     session: {
       findFirst: async (args?: { where?: { user?: { isActive?: boolean } }; select?: Record<string, unknown> }) => {
         if (args?.where?.user?.isActive === true) {
@@ -632,4 +650,12 @@ test("handleWebSocketUpgrade proxies non-CDP websocket routes with rewritten ups
     proxyServer.ws = originalWs;
     config.IDLE_PAUSE_ENABLED = originalIdlePauseEnabled;
   }
+});
+
+test("sanitizeRequestPath 同时抹掉 token 与 leaseId（两者都是写权限凭证）", async () => {
+  const { sanitizeRequestPath } = await import("./proxy.service.js");
+  const out = sanitizeRequestPath("/ws/sessions/s1/pagecast?token=T0&targetId=P1&leaseId=deadbeef");
+  assert.ok(!out.includes("T0"), out);
+  assert.ok(!out.includes("deadbeef"), "leaseId 泄漏进事件日志就能被 agent 读到并冒充控制连接");
+  assert.ok(out.includes("targetId=P1"), "非敏感参数应保留，否则排障没线索");
 });

@@ -16,6 +16,7 @@ import { prisma } from "../db/client.js";
  */
 
 export const LEASE_TTL_MS = 45_000;        // renewed by heartbeat well inside this
+export const LEASE_TTL_SQL = "45 seconds";  // same TTL, computed by Postgres
 export const LEASE_RENEW_HINT_MS = 15_000; // suggested client heartbeat interval
 
 export type Lease = {
@@ -25,6 +26,12 @@ export type Lease = {
   holderLabel: string | null;
   expiresAt: Date;
 };
+
+/** Postgres' clock — the single source of truth for expiry across replicas. */
+async function dbNow(): Promise<Date> {
+  const rows = await prisma.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`;
+  return rows[0]?.now ?? new Date();
+}
 
 export type LeaseResult =
   | { ok: true; lease: Lease }
@@ -42,11 +49,16 @@ function toLease(row: {
 }
 
 /** Take the lease, or report who currently holds it. Expired leases are taken
- *  over silently — a holder that stops sending heartbeats has gone away. */
+ *  over silently — a holder that stops sending heartbeats has gone away.
+ *
+ *  All expiry arithmetic happens in Postgres. With several BM replicas each
+ *  judging expiry by its own clock, a few seconds of drift is enough for two of
+ *  them to believe they may write at the same time — which is precisely the
+ *  thing this lease exists to prevent. */
 export async function acquireLease(
   sessionId: string, targetId: string, holderKey: string, holderLabel: string | null
 ): Promise<LeaseResult> {
-  const now = new Date();
+  const now = await dbNow();
   const expiresAt = new Date(now.getTime() + LEASE_TTL_MS);
   const leaseId = randomBytes(16).toString("hex");
 
@@ -60,7 +72,10 @@ export async function acquireLease(
         data: { sessionId, targetId, leaseId, holderKey, holderLabel, expiresAt },
       });
       return { ok: true, lease: toLease(row) };
-    } catch {
+    } catch (err: any) {
+      // Only a unique-constraint collision means "someone beat us"; anything
+      // else (connection lost, permission) must not be reported as "held".
+      if (err?.code !== "P2002") throw err;
       // Lost the race on the unique index: fall through and report the winner.
       const winner = await prisma.targetLease.findUnique({
         where: { sessionId_targetId: { sessionId, targetId } },
@@ -94,9 +109,9 @@ export async function acquireLease(
 export async function renewLease(
   sessionId: string, targetId: string, leaseId: string
 ): Promise<LeaseResult> {
-  const expiresAt = new Date(Date.now() + LEASE_TTL_MS);
+  const expiresAt = new Date((await dbNow()).getTime() + LEASE_TTL_MS);
   const updated = await prisma.targetLease.updateMany({
-    where: { sessionId, targetId, leaseId, expiresAt: { gt: new Date() } },
+    where: { sessionId, targetId, leaseId, expiresAt: { gt: await dbNow() } },
     data: { expiresAt },
   });
   if (updated.count === 0) return { ok: false, reason: "stale" };
@@ -121,7 +136,7 @@ export async function currentLease(
   const row = await prisma.targetLease.findUnique({
     where: { sessionId_targetId: { sessionId, targetId } },
   });
-  if (!row || row.expiresAt <= new Date()) return null;
+  if (!row || row.expiresAt <= await dbNow()) return null;
   return toLease(row);
 }
 
@@ -131,7 +146,7 @@ export async function holdsLease(
   sessionId: string, targetId: string, leaseId: string
 ): Promise<boolean> {
   const row = await prisma.targetLease.findFirst({
-    where: { sessionId, targetId, leaseId, expiresAt: { gt: new Date() } },
+    where: { sessionId, targetId, leaseId, expiresAt: { gt: await dbNow() } },
     select: { id: true },
   });
   return row !== null;
@@ -145,4 +160,36 @@ export async function isLockedByOther(
   if (!live) return null;
   if (leaseId && live.leaseId === leaseId) return null;
   return live;
+}
+
+/** Any live lease in this session? Used for writes we cannot attribute to a
+ *  specific target (browser-level commands, non-flatten protocol nesting): if
+ *  anything is being driven by a user, an unattributable write is refused. */
+export async function anyLeaseHeld(sessionId: string): Promise<boolean> {
+  const row = await prisma.targetLease.findFirst({
+    where: { sessionId, expiresAt: { gt: await dbNow() } },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
+/** Drop leases for a target that no longer exists (closed tab, rebind after
+ *  resume). Without this, rows for dead targets accumulate forever. */
+export async function forgetTargetLeases(sessionId: string, targetId?: string): Promise<void> {
+  try {
+    const where = targetId ? { sessionId, targetId } : { sessionId };
+    await prisma.targetLease.deleteMany({ where });
+  } catch { /* cleanup is best-effort */ }
+}
+
+/** Periodic sweep of expired rows. Expiry is already enforced on read, so this
+ *  is purely about not growing the table forever. */
+export async function sweepExpiredLeases(): Promise<number> {
+  try {
+    const now = await dbNow();
+    const res = await prisma.targetLease.deleteMany({ where: { expiresAt: { lte: now } } });
+    return res.count;
+  } catch {
+    return 0;
+  }
 }

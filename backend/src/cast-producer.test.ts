@@ -290,6 +290,7 @@ test("缩放后仍按缩放后的布局判断是否装得下（不是按栏宽�
 // 读入站消息的那一刻变成控制通道（codex 评审点名的阻断项之一）。
 function leasePrisma(live: { leaseId: string } | null) {
   return {
+    $queryRaw: async () => [{ now: new Date() }],
     targetLease: {
       findFirst: async ({ where }: any) =>
         live && where.leaseId === live.leaseId ? { id: "x" } : null,
@@ -308,7 +309,8 @@ test("没有租约的 viewer：输入被服务端丢弃（不是靠 UI 自觉）
     await attachCastViewer(SESSION, TARGET, v as any);     // 不传 leaseId
     const before = created[0].sent.length;
     (v as any).emit("message", Buffer.from(JSON.stringify({
-      type: "mouseEvent", event: { type: "mousePressed", x: 10, y: 10, button: "left" },
+      type: "mouseEvent", revision: 1,
+      event: { type: "mousePressed", x: 10, y: 10, button: "left" },
     })));
     await new Promise((r) => setTimeout(r, 60));
     const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
@@ -323,7 +325,8 @@ test("持租约的连接：输入转成 CDP Input 命令", async () => {
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any, "L1");
     (v as any).emit("message", Buffer.from(JSON.stringify({
-      type: "mouseEvent", event: { type: "mousePressed", x: 12, y: 34, button: "left", clickCount: 1 },
+      type: "mouseEvent", revision: 1,   // 必填：省略即视为对不上当前布局
+      event: { type: "mousePressed", x: 12, y: 34, button: "left", clickCount: 1 },
     })));
     await new Promise((r) => setTimeout(r, 80));
     const click = created[0].sent.find((m) => m.method === "Input.dispatchMouseEvent");
@@ -347,5 +350,21 @@ test("revision 过旧的输入被丢弃（页面已重排，再点就点错地�
     await new Promise((r) => setTimeout(r, 60));
     const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
     assert.deepEqual(inputs, [], "对不上当前 revision 的输入必须丢弃");
+  } finally { teardown(); }
+});
+
+test("不带 revision 的输入被丢弃（可选校验等于没有校验）", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma({ leaseId: "L1" }));
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    const before = created[0].sent.length;
+    (v as any).emit("message", Buffer.from(JSON.stringify({
+      type: "mouseEvent", event: { type: "mousePressed", x: 5, y: 5, button: "left" },
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
+    assert.deepEqual(inputs, []);
   } finally { teardown(); }
 });

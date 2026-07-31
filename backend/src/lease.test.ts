@@ -19,6 +19,8 @@ function makePrisma() {
   let rows: any[] = [];
   let seq = 0;
   return {
+    // 过期判断统一走 DB 时钟（多副本各用本机时钟会出现"两个都以为自己能写"）
+    $queryRaw: async () => [{ now: new Date() }],
     _rows: () => rows,
     targetLease: {
       findUnique: async ({ where }: any) => {

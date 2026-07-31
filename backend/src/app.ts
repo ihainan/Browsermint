@@ -43,7 +43,13 @@ export interface CreateAppOptions {
 }
 
 export function redactTokenFromUrl(url: string): string {
-  return url.replace(/([?&])token=[^&]*/g, "$1[redacted]").replace(/[?&]$/, "");
+  // Both are credentials: the session token, and the lease id (which is the
+  // fencing token for write access). Request URLs land in session_events, and a
+  // session's own agent can read those.
+  return url
+    .replace(/([?&])token=[^&]*/g, "$1[redacted]")
+    .replace(/([?&])leaseId=[^&]*/g, "$1[redacted]")
+    .replace(/[?&]$/, "");
 }
 
 export async function createApp(options: CreateAppOptions = {}): Promise<FastifyInstance> {
