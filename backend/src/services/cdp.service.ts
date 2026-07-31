@@ -1369,6 +1369,68 @@ function producerSend(p: CastProducer, method: string, params: Record<string, un
 // queueing (the next frame supersedes it anyway).
 const VIEWER_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
 
+function producerRequest(
+  p: CastProducer, method: string, params: Record<string, unknown> = {}, timeoutMs = 5000
+): Promise<Record<string, any>> {
+  return new Promise((resolve, reject) => {
+    if (p.socket.readyState !== WebSocket.OPEN) return reject(new Error("producer socket closed"));
+    const id = p.cmdId++;
+    const timer = setTimeout(() => { p.socket.off("message", onMsg); reject(new Error(`${method} timeout`)); }, timeoutMs);
+    function onMsg(raw: WebSocket.RawData) {
+      let msg: Record<string, any>;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.id !== id) return;
+      clearTimeout(timer);
+      p.socket.off("message", onMsg);
+      if (msg.error) return reject(new Error(JSON.stringify(msg.error)));
+      resolve(msg.result ?? {});
+    }
+    p.socket.on("message", onMsg);
+    p.socket.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+// Sites with a fixed desktop layout (baidu.com, google.com) do not reflow: give
+// them a 794px viewport and they still lay out at 1250px, so the pane grows a
+// horizontal scrollbar and half the page is unreachable. Browsers solve this by
+// zooming to fit the width — do the same: widen the *layout* viewport to the
+// content width and let the screencast scale the frame back down to the pane.
+// Responsive sites never hit this path (their scrollWidth fits the viewport).
+async function fitViewportToContent(
+  p: CastProducer, sessionId: string, targetId: string,
+  want: { width: number; height: number; deviceScaleFactor: number }
+): Promise<void> {
+  let scrollWidth: number;
+  try {
+    const res = await producerRequest(p, "Runtime.evaluate", {
+      expression: "document.documentElement.scrollWidth",
+      returnByValue: true,
+    });
+    scrollWidth = Number(res?.result?.value);
+  } catch {
+    return;                     // 读不到就维持原样，画面仍在，只是可能有横向滚动
+  }
+  if (!Number.isFinite(scrollWidth)) return;
+  // 2% tolerance: sub-pixel rounding shouldn't trigger a re-layout.
+  if (scrollWidth <= want.width * 1.02) return;
+  const layoutWidth = Math.min(Math.round(scrollWidth), 3840);
+  const layoutHeight = Math.min(
+    Math.max(Math.round(want.height * (layoutWidth / want.width)), 240), 2160);
+  producerSend(p, "Emulation.setDeviceMetricsOverride", {
+    width: layoutWidth, height: layoutHeight,
+    deviceScaleFactor: want.deviceScaleFactor, mobile: false,
+    screenWidth: layoutWidth, screenHeight: layoutHeight, dontSetVisibleSize: false,
+  });
+  // maxWidth/maxHeight stay at the pane size: Chrome scales the frame down, so
+  // the viewer still receives pane-sized frames — full page, no scrollbar.
+  producerSend(p, "Page.stopScreencast");
+  producerSend(p, "Page.startScreencast", {
+    format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
+  });
+  console.info(`[cast] ${targetId} does not reflow (${scrollWidth}px content in ` +
+    `${want.width}px): zoomed to fit`);
+}
+
 function broadcastFrame(p: CastProducer, data: string): void {
   const payload = JSON.stringify({ data, url: p.url, title: p.title, favicon: null });
   for (const viewer of p.viewers) {
@@ -1410,6 +1472,13 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     }
     if (msg.method === "Page.frameNavigated" && msg.params?.frame?.parentId === undefined) {
       p.url = msg.params.frame.url ?? p.url;
+      // A different page may have a different minimum layout width.
+      const wantNow = targetViewports.get(targetKey(sessionId, targetId));
+      if (wantNow) {
+        setTimeout(() => {
+          if (!p.closed) fitViewportToContent(p, sessionId, targetId, wantNow).catch(() => {});
+        }, 1500);
+      }
       for (const viewer of p.viewers) {
         if (viewer.readyState === WebSocket.OPEN) {
           viewer.send(JSON.stringify({ type: "tabUpdate", url: p.url, title: p.title, favicon: null }));
@@ -1466,6 +1535,12 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // that Chrome treats as fully backgrounded stays silent). If no frame arrives
   // shortly, fall back to actually activating the tab — worse for a concurrently
   // working agent, but a viewer with no picture at all is worse still.
+  if (want) {
+    // Give the page a moment to lay out before measuring its content width.
+    setTimeout(() => {
+      if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
+    }, 1200);
+  }
   p.firstFrameTimer = setTimeout(() => {
     p.firstFrameTimer = null;
     if (p.closed || p.lastFrame) return;
@@ -1586,6 +1661,9 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
   });
+  setTimeout(() => {
+    if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
+  }, 800);
   return true;
 }
 

@@ -29,13 +29,16 @@ class FakeSocket extends EventEmitter {
     super();
     setImmediate(() => this.emit("open"));
   }
+  scrollWidth: number | null = null;      // 页面内容宽度（null = 不回答）
   send(raw: string) {
     const msg = JSON.parse(raw);
     this.sent.push(msg);
-    // Chrome replies to every command; setTargetViewport waits for it.
-    if (msg.id !== undefined) {
-      setImmediate(() => this.emit("message", Buffer.from(JSON.stringify({ id: msg.id, result: {} }))));
-    }
+    if (msg.id === undefined) return;
+    // Chrome replies to every command; setTargetViewport / fit measurement wait for it.
+    const result = (msg.method === "Runtime.evaluate" && this.scrollWidth !== null)
+      ? { result: { value: this.scrollWidth } }
+      : {};
+    setImmediate(() => this.emit("message", Buffer.from(JSON.stringify({ id: msg.id, result }))));
   }
   close() { this.readyState = 3; this.emit("close"); }
   terminate() { this.close(); }
@@ -56,7 +59,7 @@ class FakeViewer extends EventEmitter {
   close() { this.readyState = 3; this.emit("close"); }
 }
 
-function setup(opts: { sockets?: FakeSocket[] } = {}) {
+function setup(opts: { sockets?: FakeSocket[]; scrollWidth?: number } = {}) {
   const created: FakeSocket[] = [];
   resetCastTestHooks();
   setCdpServiceOverridesForTests({
@@ -69,7 +72,12 @@ function setup(opts: { sockets?: FakeSocket[] } = {}) {
   });
   setCastTestHooks({
     cdpBase: { sessionId: SESSION, base: "ws://fake" },
-    socketFactory: () => { const s = opts.sockets?.shift() ?? new FakeSocket(); created.push(s); return s as any; },
+    socketFactory: () => {
+      const s = opts.sockets?.shift() ?? new FakeSocket();
+      if (opts.scrollWidth !== undefined) s.scrollWidth = opts.scrollWidth;
+      created.push(s);
+      return s as any;
+    },
   });
   return created;
 }
@@ -189,4 +197,39 @@ test("pagecast与被反代的cast是两条路由，互不影响", () => {
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/cast?token=T")?.wsType, "cast");
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/pagecast?token=T")?.wsType, "pagecast");
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/bogus?token=T"), null);
+});
+
+// 这一条是真机漏测补回来的：早先的验收只看"画面尺寸 == 栏宽"和"有像素"，而固定宽度
+// 布局的站点（百度、Google 的 PC 首页）在窄视口下**不重排**——两项判据照样全绿，实际
+// 却是内容横向溢出、右半边够不着。判据必须落在"内容宽度 vs 视口"上。
+test("不重排的站点：内容超出视口时缩放适配（而不是留一条横向滚动条）", async () => {
+  const created = setup({ scrollWidth: 1250 });   // 视口给 735，页面仍要 1250（百度实测值）
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估
+
+    const producerSock = created.at(-1)!;
+    const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.equal(metrics.at(-1)!.params.width, 1250, "布局视口应放宽到内容宽度");
+    // 帧仍按栏宽输出：Chrome 等比缩小，viewer 拿到的是完整页面而不是被裁的一半
+    const casts = producerSock.sent.filter((m) => m.method === "Page.startScreencast");
+    assert.equal(casts.at(-1)!.params.maxWidth, 735);
+  } finally { teardown(); }
+});
+
+test("响应式站点不触发缩放（内容宽度本来就装得下）", async () => {
+  const created = setup({ scrollWidth: 735 });    // 页面老实按视口重排
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    await new Promise((r) => setTimeout(r, 1600));
+
+    const producerSock = created.at(-1)!;
+    const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.ok(metrics.every((m) => m.params.width === 735),
+      "响应式站点不该被放宽布局视口（那会白白缩小内容）");
+  } finally { teardown(); }
 });
