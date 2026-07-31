@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, attachCastViewer, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
 import { Prisma } from "@prisma/client";
@@ -1121,11 +1121,11 @@ async function ensureSessionRunning(sessionId: string): Promise<string | null> {
 // Handles the HTTP upgrade event from Fastify's underlying server.
 // Matches: /ws/sessions/:id/(cast|logs|pageId|cdp[/subpath])?token=xxx
 
-const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|logs|pageId|cdp|vnc)(\/[^?]*)?/;
+const WS_PATH_REGEX = /^\/ws\/sessions\/([^/?]+)\/(cast|pagecast|logs|pageId|cdp|vnc)(\/[^?]*)?/;
 
 export type SessionWebSocketPath = {
   sessionId: string;
-  wsType: "cast" | "logs" | "pageId" | "cdp" | "vnc";
+  wsType: "cast" | "pagecast" | "logs" | "pageId" | "cdp" | "vnc";
   wsSubPath: string;
   token: string | null;
 };
@@ -1145,6 +1145,10 @@ export function parseSessionWebSocketPath(url: string): SessionWebSocketPath | n
     token: qs.get("token"),
   };
 }
+
+// One shared server for viewer sockets we terminate ourselves (noServer: the
+// upgrade is handed to us by Fastify's http server).
+const pagecastWss = new WebSocketServer({ noServer: true });
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,
@@ -1285,6 +1289,32 @@ export async function handleWebSocketUpgrade(
     // decrementWsCount is called inside the bridge on agent WebSocket close.
     const chromeWsUrl = `ws://${cdpBase.host}${cdpPath}`;
     createCdpBridge(sessionId, socket, head, request, chromeWsUrl, () => decrementWsCount(sessionId));
+    return;
+  } else if (wsType === "pagecast") {
+    // Our own screencast: terminated here, not proxied. The producer sets the
+    // viewport and starts the stream on one and the same CDP session, which is
+    // what makes the page actually reflow to the viewer's width (proxying
+    // Steel's cast cannot: it owns its session's device metrics).
+    const targetId = qs.get("targetId") ?? qs.get("pageId");
+    if (!targetId) {
+      console.warn("[ws-proxy] rejecting pagecast: missing targetId", { sessionId });
+      socket.destroy();
+      return;
+    }
+    prisma.session.update({
+      where: { id: sessionId },
+      data: { lastActiveAt: new Date() },
+    }).catch(() => {});
+    logSessionEvent(sessionId, "ws_pagecast", getIncomingMessageIp(request), url, 101,
+      { targetId }, getWebSocketSource(request));
+    pagecastWss.handleUpgrade(request, socket, head, (viewer) => {
+      incrementWsCount(sessionId);
+      viewer.once("close", () => decrementWsCount(sessionId));
+      attachCastViewer(sessionId, targetId, viewer).catch((err) => {
+        console.warn(`[cast] failed to attach viewer for ${targetId}:`, err);
+        try { viewer.close(); } catch { /* already gone */ }
+      });
+    });
     return;
   } else if (wsType === "vnc") {
     // Forward to websockify (port 6080) which bridges the noVNC WebSocket client to

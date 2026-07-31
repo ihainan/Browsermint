@@ -568,6 +568,7 @@ type CdpServiceOverrides = Partial<{
     height: number,
     deviceScaleFactor?: number
   ) => Promise<void>;
+  attachCastViewer: (sessionId: string, targetId: string, viewer: WebSocket) => Promise<void>;
 }>;
 
 let cdpServiceOverrides: CdpServiceOverrides = {};
@@ -1240,6 +1241,9 @@ export async function setTargetViewport(
     throw new Error(JSON.stringify(resp.error));
   }
   console.info(`[cdp] viewport ${width}x${height} applied to target ${targetId}`);
+  // If we're already streaming this target, re-assert on the producer's session
+  // (that's the one the compositor listens to) and restart the stream.
+  await applyViewportToProducer(sessionId, targetId);
 }
 
 /** Re-assert the remembered viewport. Steel's cast handler resets device metrics
@@ -1249,6 +1253,168 @@ export async function reapplyTargetViewport(sessionId: string, targetId: string)
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!want) return false;
   await setTargetViewport(sessionId, targetId, want.width, want.height, want.deviceScaleFactor);
+  return true;
+}
+
+// ── Own screencast producer (one per target, fan-out to many viewers) ──────
+// Why we don't just proxy Steel's /v1/sessions/cast: it starts the screencast in
+// *its own* CDP session, and the compositor honours that session's device
+// metrics. Anything we set from a second connection changes what JS on the page
+// reports but not what gets rendered — measured. Owning the producer means the
+// same session sets the viewport and starts the stream, so the page actually
+// reflows to the pane width.
+type CastProducer = {
+  socket: WebSocket;
+  viewers: Set<WebSocket>;
+  lastFrame: string | null;      // most recent jpeg, so a new viewer paints immediately
+  url: string;
+  title: string;
+  cmdId: number;
+  stopTimer: NodeJS.Timeout | null;
+  closed: boolean;
+};
+
+const producers = new Map<string, CastProducer>();
+// Frame encoding: Chrome already hands us a base64 jpeg, so the producer only
+// acks and fans out — no image work on our side.
+const CAST_QUALITY = 70;
+// Keep the producer alive briefly after the last viewer leaves: switching tabs
+// in the workspace pane disconnects and reconnects within a second, and tearing
+// the stream down each time costs a visible black flash.
+const PRODUCER_LINGER_MS = 5000;
+
+function producerSend(p: CastProducer, method: string, params: Record<string, unknown> = {}): void {
+  if (p.socket.readyState !== WebSocket.OPEN) return;
+  p.socket.send(JSON.stringify({ id: p.cmdId++, method, params }));
+}
+
+function broadcastFrame(p: CastProducer, data: string): void {
+  const payload = JSON.stringify({ data, url: p.url, title: p.title, favicon: null });
+  for (const viewer of p.viewers) {
+    if (viewer.readyState === WebSocket.OPEN) viewer.send(payload);
+  }
+}
+
+async function createProducer(sessionId: string, targetId: string): Promise<CastProducer> {
+  const base = sessionCdpBases.get(sessionId);
+  if (!base) throw new Error(`No CDP base for session ${sessionId}`);
+  const socket = new WebSocket(`${base}/devtools/page/${targetId}`);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("cast socket timeout")), 10000);
+    socket.once("open", () => { clearTimeout(timer); resolve(); });
+    socket.once("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+
+  const p: CastProducer = {
+    socket, viewers: new Set(), lastFrame: null,
+    url: "", title: "", cmdId: 1, stopTimer: null, closed: false,
+  };
+
+  socket.on("message", (raw: WebSocket.RawData) => {
+    let msg: Record<string, any>;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.method === "Page.screencastFrame") {
+      const data = msg.params?.data as string | undefined;
+      const ackId = msg.params?.sessionId;
+      // Ack first: Chrome stalls the stream until the previous frame is acked.
+      if (ackId !== undefined) producerSend(p, "Page.screencastFrameAck", { sessionId: ackId });
+      if (data) { p.lastFrame = data; broadcastFrame(p, data); }
+      return;
+    }
+    if (msg.method === "Page.frameNavigated" && msg.params?.frame?.parentId === undefined) {
+      p.url = msg.params.frame.url ?? p.url;
+      for (const viewer of p.viewers) {
+        if (viewer.readyState === WebSocket.OPEN) {
+          viewer.send(JSON.stringify({ type: "tabUpdate", url: p.url, title: p.title, favicon: null }));
+        }
+      }
+    }
+  });
+
+  socket.on("close", () => {
+    p.closed = true;
+    producers.delete(targetKey(sessionId, targetId));
+    // The page went away (closed tab, crashed renderer): tell viewers so they
+    // stop waiting for frames that will never come.
+    for (const viewer of p.viewers) {
+      if (viewer.readyState === WebSocket.OPEN) {
+        viewer.send(JSON.stringify({ type: "targetClosed", pageId: targetId }));
+        viewer.close();
+      }
+    }
+    p.viewers.clear();
+  });
+  socket.on("error", () => { /* surfaced via close */ });
+
+  producers.set(targetKey(sessionId, targetId), p);
+
+  // Order matters: viewport first, then start the stream — the frames must be
+  // rendered at the size we asked for, not resized after the fact.
+  const want = targetViewports.get(targetKey(sessionId, targetId));
+  producerSend(p, "Page.enable");
+  if (want) {
+    producerSend(p, "Emulation.setDeviceMetricsOverride", {
+      width: want.width, height: want.height, deviceScaleFactor: want.deviceScaleFactor,
+      mobile: false, screenWidth: want.width, screenHeight: want.height,
+      dontSetVisibleSize: false,
+    });
+  }
+  producerSend(p, "Page.startScreencast", {
+    format: "jpeg", quality: CAST_QUALITY,
+    ...(want ? { maxWidth: want.width, maxHeight: want.height } : {}),
+  });
+  console.info(`[cast] producer started for ${targetId}` + (want ? ` @${want.width}x${want.height}` : ""));
+  return p;
+}
+
+/** Attach a viewer socket to this target's stream, starting the producer if needed. */
+export async function attachCastViewer(
+  sessionId: string, targetId: string, viewer: WebSocket
+): Promise<void> {
+  if (cdpServiceOverrides.attachCastViewer) {
+    return cdpServiceOverrides.attachCastViewer(sessionId, targetId, viewer);
+  }
+  const key = targetKey(sessionId, targetId);
+  let p = producers.get(key);
+  if (!p || p.closed || p.socket.readyState !== WebSocket.OPEN) {
+    p = await createProducer(sessionId, targetId);
+  }
+  if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
+  p.viewers.add(viewer);
+  // Paint something immediately instead of waiting for the next frame.
+  if (p.lastFrame && viewer.readyState === WebSocket.OPEN) {
+    viewer.send(JSON.stringify({ data: p.lastFrame, url: p.url, title: p.title, favicon: null }));
+  }
+  const detach = () => {
+    p!.viewers.delete(viewer);
+    if (p!.viewers.size > 0 || p!.closed) return;
+    p!.stopTimer = setTimeout(() => {
+      if (p!.viewers.size > 0 || p!.closed) return;
+      producerSend(p!, "Page.stopScreencast");
+      try { p!.socket.close(); } catch { /* already gone */ }
+      producers.delete(key);
+      console.info(`[cast] producer stopped for ${targetId} (no viewers)`);
+    }, PRODUCER_LINGER_MS);
+  };
+  viewer.on("close", detach);
+  viewer.on("error", detach);
+}
+
+/** Re-assert the viewport on the producer's own session and restart the stream
+ *  so subsequent frames are rendered at the new size. */
+export async function applyViewportToProducer(sessionId: string, targetId: string): Promise<boolean> {
+  const p = producers.get(targetKey(sessionId, targetId));
+  const want = targetViewports.get(targetKey(sessionId, targetId));
+  if (!p || p.closed || !want) return false;
+  producerSend(p, "Emulation.setDeviceMetricsOverride", {
+    width: want.width, height: want.height, deviceScaleFactor: want.deviceScaleFactor,
+    mobile: false, screenWidth: want.width, screenHeight: want.height,
+    dontSetVisibleSize: false,
+  });
+  producerSend(p, "Page.stopScreencast");
+  producerSend(p, "Page.startScreencast", {
+    format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
+  });
   return true;
 }
 
