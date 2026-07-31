@@ -237,3 +237,50 @@ test("响应式站点不触发缩放（哪怕 DPR>1 也不能放宽，否则字�
       "响应式站点不该被放宽布局视口（那会把正文字号缩掉一半）");
   } finally { teardown(); }
 });
+
+// 缩放档位：语义对齐浏览器 Ctrl +/− —— 缩小 = 布局更宽 = 内容显小但帧像素更多。
+test("缩放 50%：布局按栏宽/zoom 放宽，帧上限跟着放宽", async () => {
+  const created = setup({ scrollWidth: 700 });    // 页面本身装得下，不触发 fit
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 0.5);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    await new Promise((r) => setTimeout(r, 1600));
+
+    const sock = created.at(-1)!;
+    const metrics = sock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.equal(metrics.at(-1)!.params.width, 1470, "50% → 布局 = 735/0.5");
+    const casts = sock.sent.filter((m) => m.method === "Page.startScreencast");
+    assert.equal(casts.at(-1)!.params.maxWidth, 1470, "帧上限不能还按栏宽，否则又缩回去");
+  } finally { teardown(); }
+});
+
+test("缩放 150%：布局收窄，内容显大（代价是像素更少）", async () => {
+  const created = setup({ scrollWidth: 400 });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 1.5);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    await new Promise((r) => setTimeout(r, 1600));
+
+    const metrics = created.at(-1)!.sent
+      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.equal(metrics.at(-1)!.params.width, 490, "150% → 布局 = 735/1.5");
+  } finally { teardown(); }
+});
+
+test("缩放后仍按缩放后的布局判断是否装得下（不是按栏宽）", async () => {
+  const created = setup({ scrollWidth: 1200 });   // 内容 1200
+  try {
+    // 50% → 布局 1470 已经装得下 1200，不该再放宽
+    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 0.5);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    await new Promise((r) => setTimeout(r, 1600));
+
+    const metrics = created.at(-1)!.sent
+      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.ok(metrics.every((m) => m.params.width === 1470),
+      "布局已够宽就不该二次放宽");
+  } finally { teardown(); }
+});

@@ -627,12 +627,12 @@ test("driving REST endpoints auto-resume a paused session", async () => {
 test("per-target viewport goes through the persistent-session path", async () => {
   // The viewport must NOT go through executeCdpCommand: that attaches a throwaway
   // flat session, and Chrome drops the emulation override with it.
-  const viewports: Array<{ targetId: string; width: number; height: number; dsf?: number }> = [];
+  const viewports: Array<{ targetId: string; width: number; height: number; dsf?: number; zoom?: number }> = [];
   const cdpCalls: string[] = [];
   const { app } = await makeApp({
     executeCdpCommand: async (_sessionId, method) => { cdpCalls.push(method); return {}; },
-    setTargetViewport: async (_sessionId, targetId, width, height, dsf) => {
-      viewports.push({ targetId, width, height, dsf });
+    setTargetViewport: async (_sessionId, targetId, width, height, dsf, zoom) => {
+      viewports.push({ targetId, width, height, dsf, zoom });
     },
   });
   const token = sessionToken();
@@ -644,8 +644,8 @@ test("per-target viewport goes through the persistent-session path", async () =>
     });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { ok: true, width: 760, height: 900, deviceScaleFactor: 1 });
-    assert.deepEqual(viewports, [{ targetId: "page-1", width: 760, height: 900, dsf: 1 }]);
+    assert.deepEqual(res.json(), { ok: true, width: 760, height: 900, deviceScaleFactor: 1, zoom: 1 });
+    assert.deepEqual(viewports, [{ targetId: "page-1", width: 760, height: 900, dsf: 1, zoom: 1 }]);
     assert.deepEqual(cdpCalls, []);
   } finally {
     await closeApp(app);

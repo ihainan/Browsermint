@@ -566,7 +566,8 @@ type CdpServiceOverrides = Partial<{
     targetId: string,
     width: number,
     height: number,
-    deviceScaleFactor?: number
+    deviceScaleFactor?: number,
+    zoom?: number
   ) => Promise<void>;
   attachCastViewer: (sessionId: string, targetId: string, viewer: WebSocket) => Promise<void>;
 }>;
@@ -1154,7 +1155,19 @@ export async function openSavedTabs(sessionId: string, urls: string[]): Promise<
 //     becomes 735 and `max-width` media queries flip. That is the one that makes
 //     the page actually reflow, so this is what we hold open per target.
 const targetViewportSockets = new Map<string, WebSocket>();          // `${sessionId}:${targetId}`
-const targetViewports = new Map<string, { width: number; height: number; deviceScaleFactor: number }>();
+// width/height 是**栏**的 CSS 尺寸；zoom 是用户选的缩放（1 = 100%）。布局视口 =
+// 栏宽 / zoom：缩小(zoom<1) → 布局更宽 → 内容显小但帧像素更多（HiDPI 上更锐利），
+// 与浏览器 Ctrl +/− 的语义一致。
+type ViewportWant = { width: number; height: number; deviceScaleFactor: number; zoom: number };
+const targetViewports = new Map<string, ViewportWant>();
+
+function layoutSize(want: ViewportWant): { width: number; height: number } {
+  const z = want.zoom > 0 ? want.zoom : 1;
+  return {
+    width: Math.min(Math.max(Math.round(want.width / z), 320), 3840),
+    height: Math.min(Math.max(Math.round(want.height / z), 240), 2160),
+  };
+}
 const sessionCdpBases = new Map<string, string>();                    // sessionId -> ws://host:9223
 
 function targetKey(sessionId: string, targetId: string): string {
@@ -1271,15 +1284,18 @@ export async function setTargetViewport(
   targetId: string,
   width: number,
   height: number,
-  deviceScaleFactor = 1
+  deviceScaleFactor = 1,
+  zoom = 1
 ): Promise<void> {
   if (cdpServiceOverrides.setTargetViewport) {
-    return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor);
+    return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor, zoom);
   }
   // Open first: remembering a viewport for a target that doesn't exist would
   // leave an entry nothing ever cleans up.
   const sock = await openViewportSocket(sessionId, targetId);
-  targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
+  const want: ViewportWant = { width, height, deviceScaleFactor, zoom };
+  targetViewports.set(targetKey(sessionId, targetId), want);
+  const layout = layoutSize(want);
   const id = viewportCmdId++;
   // Wait for the reply: a silent send hides protocol errors, and "the viewport
   // didn't change but every HTTP call returned 200" is exactly the kind of
@@ -1300,8 +1316,8 @@ export async function setTargetViewport(
     id,
     method: "Emulation.setDeviceMetricsOverride",
     params: {
-      width, height, deviceScaleFactor, mobile: false,
-      screenWidth: width, screenHeight: height, dontSetVisibleSize: false,
+      width: layout.width, height: layout.height, deviceScaleFactor, mobile: false,
+      screenWidth: layout.width, screenHeight: layout.height, dontSetVisibleSize: false,
     },
   }));
   const resp = await reply;
@@ -1309,7 +1325,8 @@ export async function setTargetViewport(
     console.warn(`[cdp] viewport ${width}x${height} rejected for ${targetId}:`, JSON.stringify(resp.error));
     throw new Error(JSON.stringify(resp.error));
   }
-  console.info(`[cdp] viewport ${width}x${height} applied to target ${targetId}`);
+  console.info(`[cdp] viewport ${layout.width}x${layout.height} ` +
+    `(pane ${width}x${height} @${Math.round(zoom * 100)}%) applied to target ${targetId}`);
   // If we're already streaming this target, re-assert on the producer's session
   // (that's the one the compositor listens to) and restart the stream.
   await applyViewportToProducer(sessionId, targetId);
@@ -1375,8 +1392,9 @@ const VIEWER_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
 // deviceScaleFactor makes no difference (dsf=1 and dsf=2 produce byte-identical
 // frames) and neither does setPageScaleFactor. So the only lever on sharpness is
 // the layout width itself — see fitViewportToContent.
-function castCaps(want: { width: number; height: number; deviceScaleFactor: number }) {
-  return { maxWidth: want.width, maxHeight: want.height };
+function castCaps(want: ViewportWant) {
+  const layout = layoutSize(want);
+  return { maxWidth: layout.width, maxHeight: layout.height };
 }
 
 function producerRequest(
@@ -1407,8 +1425,7 @@ function producerRequest(
 // content width and let the screencast scale the frame back down to the pane.
 // Responsive sites never hit this path (their scrollWidth fits the viewport).
 async function fitViewportToContent(
-  p: CastProducer, sessionId: string, targetId: string,
-  want: { width: number; height: number; deviceScaleFactor: number }
+  p: CastProducer, sessionId: string, targetId: string, want: ViewportWant
 ): Promise<void> {
   let scrollWidth: number;
   try {
@@ -1426,14 +1443,15 @@ async function fitViewportToContent(
   // this condition (as a first cut did) widens *every* page to width*dpr, which
   // halves the apparent text size on responsive sites — they are supposed to lay
   // out at the pane width, that is the whole point of the feature.
-  if (scrollWidth <= want.width * 1.02) return;
+  const base = layoutSize(want);
+  if (scrollWidth <= base.width * 1.02) return;
   // This page is going to be scaled down regardless, so render it wide enough
   // that the frame carries at least as many pixels as the pane has physical
   // ones: a 1250px frame shown in 1470 physical pixels is upscaled for free.
   const sharpWidth = Math.round(want.width * (want.deviceScaleFactor || 1));
   const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
   const layoutHeight = Math.min(
-    Math.max(Math.round(want.height * (layoutWidth / want.width)), 240), 2160);
+    Math.max(Math.round(base.height * (layoutWidth / base.width)), 240), 2160);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutWidth, height: layoutHeight,
     deviceScaleFactor: want.deviceScaleFactor, mobile: false,
@@ -1447,8 +1465,8 @@ async function fitViewportToContent(
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY, maxWidth: layoutWidth, maxHeight: layoutHeight,
   });
-  console.info(`[cast] ${targetId}: layout ${layoutWidth}px ` +
-    `(content ${scrollWidth}px, pane ${want.width}px @${want.deviceScaleFactor}x), zoomed to fit`);
+  console.info(`[cast] ${targetId}: layout ${layoutWidth}px (content ${scrollWidth}px, ` +
+    `pane ${want.width}px @${Math.round(want.zoom * 100)}% @${want.deviceScaleFactor}x), zoomed to fit`);
 }
 
 function broadcastFrame(p: CastProducer, data: string): void {
@@ -1532,6 +1550,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // Order matters: viewport first, then start the stream — the frames must be
   // rendered at the size we asked for, not resized after the fact.
   const want = targetViewports.get(targetKey(sessionId, targetId));
+  const layout = want ? layoutSize(want) : null;
   producerSend(p, "Page.enable");
   // Chrome only emits screencast frames for a page it considers active; a
   // background tab streams nothing and the viewer sits on a blank canvas.
@@ -1539,16 +1558,16 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // frontmost — bringToFront would yank the foreground away from whatever the
   // agent is driving in another tab of the same window.
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
-  if (want) {
+  if (want && layout) {
     producerSend(p, "Emulation.setDeviceMetricsOverride", {
-      width: want.width, height: want.height, deviceScaleFactor: want.deviceScaleFactor,
-      mobile: false, screenWidth: want.width, screenHeight: want.height,
+      width: layout.width, height: layout.height, deviceScaleFactor: want.deviceScaleFactor,
+      mobile: false, screenWidth: layout.width, screenHeight: layout.height,
       dontSetVisibleSize: false,
     });
   }
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY,
-    ...(want ? { maxWidth: want.width, maxHeight: want.height } : {}),
+    ...(want ? castCaps(want) : {}),
   });
   // setWebLifecycleState is the polite way to make Chrome consider this page
   // active, but it is not sufficient in every state we've observed (a target
@@ -1671,9 +1690,10 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   const p = producers.get(targetKey(sessionId, targetId));
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!p || p.closed || !want) return false;
+  const layoutNow = layoutSize(want);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
-    width: want.width, height: want.height, deviceScaleFactor: want.deviceScaleFactor,
-    mobile: false, screenWidth: want.width, screenHeight: want.height,
+    width: layoutNow.width, height: layoutNow.height, deviceScaleFactor: want.deviceScaleFactor,
+    mobile: false, screenWidth: layoutNow.width, screenHeight: layoutNow.height,
     dontSetVisibleSize: false,
   });
   producerSend(p, "Page.stopScreencast");

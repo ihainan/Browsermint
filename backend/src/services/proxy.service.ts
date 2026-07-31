@@ -1501,10 +1501,13 @@ export async function handleSetTargetViewport(
   const context = await getSessionProxyContext(sessionId, token, { wake: true });
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
-  const body = request.body as { width?: unknown; height?: unknown; deviceScaleFactor?: unknown };
+  const body = request.body as {
+    width?: unknown; height?: unknown; deviceScaleFactor?: unknown; zoom?: unknown;
+  };
   const width = Math.floor(Number(body?.width));
   const height = Math.floor(Number(body?.height));
   const dsf = body?.deviceScaleFactor === undefined ? 1 : Number(body.deviceScaleFactor);
+  const zoom = body?.zoom === undefined ? 1 : Number(body.zoom);
   if (!Number.isFinite(width) || !Number.isFinite(height) ||
       width < 320 || height < 240 || width > 3840 || height > 2160) {
     return reply.status(400).send({ error: "width/height out of range (320x240..3840x2160)" });
@@ -1512,15 +1515,18 @@ export async function handleSetTargetViewport(
   if (!Number.isFinite(dsf) || dsf < 0.5 || dsf > 4) {
     return reply.status(400).send({ error: "deviceScaleFactor out of range (0.5..4)" });
   }
+  if (!Number.isFinite(zoom) || zoom < 0.25 || zoom > 3) {
+    return reply.status(400).send({ error: "zoom out of range (0.25..3)" });
+  }
 
   try {
     // Persistent flat session: an override dies with the session that set it, so
     // a fire-and-forget attach (what executeCdpCommand does) would be undone the
     // instant the call returns.
-    await setTargetViewport(sessionId, targetId, width, height, dsf);
+    await setTargetViewport(sessionId, targetId, width, height, dsf, zoom);
     logSessionEvent(sessionId, "target_viewport", request.ip, request.url, 200,
-      { targetId, width, height, deviceScaleFactor: dsf }, getHttpSource(request));
-    return reply.send({ ok: true, width, height, deviceScaleFactor: dsf });
+      { targetId, width, height, deviceScaleFactor: dsf, zoom }, getHttpSource(request));
+    return reply.send({ ok: true, width, height, deviceScaleFactor: dsf, zoom });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
   }
