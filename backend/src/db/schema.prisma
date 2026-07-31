@@ -29,6 +29,7 @@ model Session {
   containerName  String?        @db.VarChar(128)
   internalApiUrl String?        @db.VarChar(256)
   savedTabs        Json?          // Restored on resume. Legacy: string[]; now [{label?, url}]
+  targetLeases     TargetLease[]
   // Stable external page identity (platform page_id) → current CDP targetId.
   // CDP target ids do not survive a pause (the pod, and with it Chrome, is gone),
   // so embedders that track pages by their own id need this mapping to rebind.
@@ -45,6 +46,31 @@ model Session {
 
   @@index([userId, deletedAt])
   @@index([containerId])
+}
+
+/// Single-writer lease over one page target.
+///
+/// The arbiter has to live here, not in the embedding platform: an agent holds
+/// its own BM token and can drive CDP directly, so "the platform sees no running
+/// turn" is a UX hint, never a boundary. Everything that writes to a target —
+/// user input, the agent's CDP bridge, REST navigate/viewport — funnels through
+/// this process, so this is the only place that can actually arbitrate.
+model TargetLease {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionId    String   @db.Uuid
+  session      Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  targetId     String   @db.VarChar(128)
+  /// Random fencing token. Renew/release/control all carry it, so a stale window
+  /// that wakes up after its lease expired cannot keep writing.
+  leaseId      String   @db.VarChar(64)
+  /// Who holds it, for the "someone else is driving" notice in other windows.
+  holderLabel  String?  @db.VarChar(120)
+  holderKey    String   @db.VarChar(128)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@unique([sessionId, targetId])
+  @@index([expiresAt])
 }
 
 model SessionEvent {

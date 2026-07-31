@@ -30,6 +30,10 @@ import {
   handleSetTargetLabel,
   handleSetTargetViewport,
   handleReapplyTargetViewport,
+  handleAcquireLease,
+  handleRenewLease,
+  handleReleaseLease,
+  handleGetLease,
   handleGetTargetLabels,
 } from "./services/proxy.service.js";
 
@@ -169,6 +173,22 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.post("/api/sessions/:id/targets/:targetId/viewport/reapply", {
     handler: async (request, reply) =>
       handleReapplyTargetViewport(request as Parameters<typeof handleReapplyTargetViewport>[0], reply),
+  });
+  server.post("/api/sessions/:id/targets/:targetId/lease", {
+    handler: async (request, reply) =>
+      handleAcquireLease(request as Parameters<typeof handleAcquireLease>[0], reply),
+  });
+  server.post("/api/sessions/:id/targets/:targetId/lease/renew", {
+    handler: async (request, reply) =>
+      handleRenewLease(request as Parameters<typeof handleRenewLease>[0], reply),
+  });
+  server.post("/api/sessions/:id/targets/:targetId/lease/release", {
+    handler: async (request, reply) =>
+      handleReleaseLease(request as Parameters<typeof handleReleaseLease>[0], reply),
+  });
+  server.get("/api/sessions/:id/targets/:targetId/lease", {
+    handler: async (request, reply) =>
+      handleGetLease(request as Parameters<typeof handleGetLease>[0], reply),
   });
   server.post("/api/sessions/:id/navigate", {
     handler: async (request, reply) =>

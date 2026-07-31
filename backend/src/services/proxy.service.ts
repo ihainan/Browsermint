@@ -7,6 +7,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
+import { acquireLease, renewLease, releaseLease, currentLease, isLockedByOther, LEASE_RENEW_HINT_MS } from "./lease.service.js";
 import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, attachCastViewer, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
@@ -636,6 +637,28 @@ export async function handleDevtoolsTargetProxy(
 const BRIDGE_CMD_OFFSET = 0x70000000;
 let bridgeCmdCounter = 0;
 
+// Commands that can change the page. During a user takeover these are refused
+// for the leased target; reads (screenshot, DOM query, navigation history) still
+// go through so the agent can observe rather than being told the browser broke.
+//
+// Runtime.evaluate counts as a write: it can do anything to the document.
+const CDP_WRITE_PREFIXES = [
+  "Input.", "Emulation.", "Storage.clear", "Browser.setWindowBounds",
+];
+const CDP_WRITE_METHODS = new Set([
+  "Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Page.close",
+  "Page.setDeviceMetricsOverride", "Page.bringToFront", "Page.setDocumentContent",
+  "Page.handleJavaScriptDialog", "Page.startScreencast", "Page.stopScreencast",
+  "Runtime.evaluate", "Runtime.callFunctionOn", "Target.closeTarget",
+  "Target.activateTarget", "DOM.setAttributeValue", "DOM.setOuterHTML",
+  "DOM.focus", "DOM.setFileInputFiles",
+]);
+
+function isWriteCommand(method: string): boolean {
+  if (CDP_WRITE_METHODS.has(method)) return true;
+  return CDP_WRITE_PREFIXES.some((p) => method.startsWith(p));
+}
+
 function createCdpBridge(
   bsSessionId: string,
   socket: Duplex,
@@ -717,6 +740,9 @@ function createCdpBridge(
       });
     }
 
+    const pendingAttachTargets = new Map<number, string>();
+    const agentSessionTargets = new Map<string, string>();
+
     chromeWs.on("open", () => {
       // Drain any messages the agent sent before Chrome WS was ready.
       for (const { data, isBinary } of pendingAgentMessages) {
@@ -725,21 +751,59 @@ function createCdpBridge(
       pendingAgentMessages.length = 0;
     });
 
-    agentWs.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
-      const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      // Track agent's outgoing commands so we can interpret Chrome's responses.
-      try {
-        const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
-        if (typeof msg.id === "number" && typeof msg.method === "string") {
-          pendingAgentCmds.set(msg.id, msg.method);
-        }
-      } catch { /* non-JSON is fine to forward as-is */ }
+    const forwardToChrome = (data: WebSocket.RawData, isBinary: boolean) => {
       if (chromeWs.readyState === WebSocket.OPEN) {
         chromeWs.send(data, { binary: isBinary });
       } else {
         // Chrome WS not yet open — buffer and replay once it opens.
         pendingAgentMessages.push({ data, isBinary });
       }
+    };
+
+    agentWs.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
+      const raw = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      let msg: Record<string, unknown> | null = null;
+      // Track agent's outgoing commands so we can interpret Chrome's responses.
+      try {
+        msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (typeof msg.id === "number" && typeof msg.method === "string") {
+          pendingAgentCmds.set(msg.id, msg.method);
+          // Remember which target each flat session belongs to, so a write can be
+          // matched against the lease on *that* target rather than all of them.
+          if (msg.method === "Target.attachToTarget") {
+            const tid = (msg.params as Record<string, unknown> | undefined)?.targetId;
+            if (typeof tid === "string") pendingAttachTargets.set(msg.id, tid);
+          }
+        }
+      } catch { /* non-JSON is fine to forward as-is */ }
+
+      const method = typeof msg?.method === "string" ? msg.method : null;
+      const cdpSessionId = typeof msg?.sessionId === "string" ? msg.sessionId : null;
+      const targetId = cdpSessionId ? agentSessionTargets.get(cdpSessionId) : undefined;
+
+      if (method && isWriteCommand(method) && targetId) {
+        // Arbitration point. The agent has its own token and could reach CDP
+        // directly, so this — not the platform — is where a takeover is enforced.
+        isLockedByOther(bsSessionId, targetId, null)
+          .then((holder) => {
+            if (!holder) return forwardToChrome(data, isBinary);
+            if (typeof msg?.id === "number" && agentWs.readyState === WebSocket.OPEN) {
+              agentWs.send(JSON.stringify({
+                id: msg.id,
+                error: {
+                  code: -32000,
+                  message: "browsermint: target is being controlled by a user; " +
+                    "retry after the takeover ends (re-observe the page first)",
+                },
+              }));
+            }
+            logSessionEvent(bsSessionId, "agent_write_refused", "", method, 409,
+              { targetId, holder: holder.holderLabel }, "cdp");
+          })
+          .catch(() => forwardToChrome(data, isBinary));   // 仲裁失败不阻断 agent
+        return;
+      }
+      forwardToChrome(data, isBinary);
     });
 
     chromeWs.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
@@ -762,14 +826,24 @@ function createCdpBridge(
           pendingAgentCmds.delete(msg.id);
           if (method === "Target.attachToTarget") {
             const pgSessionId = (msg.result as Record<string, unknown> | undefined)?.sessionId as string | undefined;
-            if (pgSessionId) injectIntoSession(pgSessionId);
+            if (pgSessionId) {
+              injectIntoSession(pgSessionId);
+              const tid = pendingAttachTargets.get(msg.id as number);
+              if (tid) agentSessionTargets.set(pgSessionId, tid);
+            }
           }
+          pendingAttachTargets.delete(msg.id as number);
         }
 
         // Detect page sessions from auto-attach (if agent called Target.setAutoAttach).
         if (msg.method === "Target.attachedToTarget") {
-          const pgSessionId = (msg.params as Record<string, unknown> | undefined)?.sessionId as string | undefined;
-          if (pgSessionId) injectIntoSession(pgSessionId);
+          const p = msg.params as Record<string, unknown> | undefined;
+          const pgSessionId = p?.sessionId as string | undefined;
+          if (pgSessionId) {
+            injectIntoSession(pgSessionId);
+            const info = p?.targetInfo as Record<string, unknown> | undefined;
+            if (typeof info?.targetId === "string") agentSessionTargets.set(pgSessionId, info.targetId);
+          }
         }
 
         // Handle captcha solve requests from our injected script running in the
@@ -1307,10 +1381,13 @@ export async function handleWebSocketUpgrade(
     }).catch(() => {});
     logSessionEvent(sessionId, "ws_pagecast", getIncomingMessageIp(request), url, 101,
       { targetId }, getWebSocketSource(request));
+    // A lease id on the cast URL turns this connection into a control channel;
+    // without one it stays a strict observer (input dropped server-side).
+    const leaseId = qs.get("leaseId") ?? undefined;
     pagecastWss.handleUpgrade(request, socket, head, (viewer) => {
       incrementWsCount(sessionId);
       viewer.once("close", () => decrementWsCount(sessionId));
-      attachCastViewer(sessionId, targetId, viewer).catch((err) => {
+      attachCastViewer(sessionId, targetId, viewer, leaseId).catch((err) => {
         console.warn(`[cast] failed to attach viewer for ${targetId}:`, err);
         try { viewer.close(); } catch { /* already gone */ }
       });
@@ -1488,6 +1565,105 @@ export async function handleActivateTarget(
   }
 }
 
+// A lease lookup that cannot run must not take the endpoint down with it: an
+// arbitration outage degrades to previous behaviour (allow) rather than 500.
+// The CDP bridge does the same — refusing everything would strand the agent.
+async function leaseHolderBlocking(
+  sessionId: string, targetId: string, leaseId: string | null
+) {
+  try {
+    return await isLockedByOther(sessionId, targetId, leaseId);
+  } catch (err) {
+    console.warn(`[lease] arbitration unavailable for ${targetId}:`, err);
+    return null;
+  }
+}
+
+// Callers that hold the lease pass it along so their own writes aren't refused.
+function leaseIdOf(request: { body?: unknown; query?: unknown }): string | null {
+  const b = request.body as Record<string, unknown> | undefined;
+  const q = request.query as Record<string, unknown> | undefined;
+  const v = (b?.leaseId ?? q?.leaseId);
+  return typeof v === "string" && v ? v : null;
+}
+
+// ── Takeover lease ─────────────────────────────────────────────────────────
+export async function handleAcquireLease(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string }; Body: { holderKey?: string; holderLabel?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const holderKey = String((request.body as any)?.holderKey ?? "").slice(0, 128);
+  const holderLabel = (request.body as any)?.holderLabel
+    ? String((request.body as any).holderLabel).slice(0, 120) : null;
+  if (!holderKey) return reply.status(400).send({ error: "holderKey required" });
+
+  const res = await acquireLease(sessionId, targetId, holderKey, holderLabel);
+  if (!res.ok) {
+    if (res.reason === "held") {
+      return reply.status(409).send({
+        error: "held", holderLabel: res.holderLabel, expiresAt: res.expiresAt,
+      });
+    }
+    return reply.status(409).send({ error: "stale" });
+  }
+  logSessionEvent(sessionId, "lease_acquire", request.ip, request.url, 200,
+    { targetId }, getHttpSource(request));
+  return reply.send({
+    ok: true, leaseId: res.lease.leaseId, expiresAt: res.lease.expiresAt,
+    renewAfterMs: LEASE_RENEW_HINT_MS,
+  });
+}
+
+export async function handleRenewLease(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string }; Body: { leaseId?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const leaseId = String((request.body as any)?.leaseId ?? "");
+  const res = await renewLease(sessionId, targetId, leaseId);
+  if (!res.ok) return reply.status(409).send({ error: "stale" });
+  return reply.send({ ok: true, expiresAt: res.lease.expiresAt, renewAfterMs: LEASE_RENEW_HINT_MS });
+}
+
+export async function handleReleaseLease(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string }; Body: { leaseId?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+  await releaseLease(sessionId, targetId, String((request.body as any)?.leaseId ?? ""));
+  logSessionEvent(sessionId, "lease_release", request.ip, request.url, 200,
+    { targetId }, getHttpSource(request));
+  return reply.send({ ok: true });
+}
+
+export async function handleGetLease(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+  const lease = await currentLease(sessionId, targetId);
+  return reply.send({ held: !!lease, holderLabel: lease?.holderLabel ?? null,
+                      expiresAt: lease?.expiresAt ?? null });
+}
+
 export async function handleSetTargetViewport(
   request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string }; Body: { width: number; height: number; deviceScaleFactor?: number } }>,
   reply: FastifyReply
@@ -1564,6 +1740,10 @@ export async function handleNavigate(
 
   const { url, targetId } = request.body as { url: string; targetId: string };
   if (!url || !targetId) return reply.status(400).send({ error: "url and targetId required" });
+  const navBlocked = await leaseHolderBlocking(sessionId, targetId, leaseIdOf(request));
+  if (navBlocked) {
+    return reply.status(409).send({ error: "held", holderLabel: navBlocked.holderLabel });
+  }
 
   try {
     const result = await executeCdpCommand(sessionId, "Page.navigate", { url }, targetId);
@@ -1585,6 +1765,8 @@ export async function handleGoBack(
   if (!context) return reply.status(401).send({ error: "Invalid token" });
 
   const { targetId } = request.body as { targetId: string };
+  const blocked = await leaseHolderBlocking(sessionId, targetId, leaseIdOf(request));
+  if (blocked) return reply.status(409).send({ error: "held", holderLabel: blocked.holderLabel });
   try {
     // Page.goBack doesn't exist in CDP; use getNavigationHistory + navigateToHistoryEntry
     const history = await executeCdpCommand(sessionId, "Page.getNavigationHistory", {}, targetId);

@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { config } from "../config.js";
+import { holdsLease } from "./lease.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { prisma } from "../db/client.js";
 
@@ -569,7 +570,9 @@ type CdpServiceOverrides = Partial<{
     deviceScaleFactor?: number,
     zoom?: number
   ) => Promise<void>;
-  attachCastViewer: (sessionId: string, targetId: string, viewer: WebSocket) => Promise<void>;
+  attachCastViewer: (
+    sessionId: string, targetId: string, viewer: WebSocket, leaseId?: string
+  ) => Promise<void>;
 }>;
 
 let cdpServiceOverrides: CdpServiceOverrides = {};
@@ -1359,6 +1362,17 @@ type CastProducer = {
   stopTimer: NodeJS.Timeout | null;
   firstFrameTimer: NodeJS.Timeout | null;
   closed: boolean;
+  /// Bumped whenever the layout viewport changes. Input carries the revision it
+  /// was aimed at; anything older is dropped, because a click computed against a
+  /// stale frame lands somewhere else after the page re-laid out.
+  viewportRevision: number;
+  /// Password field focused → stop shipping frames entirely. A rendered password
+  /// is dots, but the surrounding page (and typing feedback) still leaks.
+  masked: boolean;
+  /// Mouse buttons / keys currently held by the controller, so a disconnect can
+  /// synthesise the matching release instead of leaving the page stuck.
+  heldButtons: Set<string>;
+  heldKeys: Set<number>;
 };
 
 const producers = new Map<string, CastProducer>();
@@ -1452,6 +1466,7 @@ async function fitViewportToContent(
   const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
   const layoutHeight = Math.min(
     Math.max(Math.round(base.height * (layoutWidth / base.width)), 240), 2160);
+  p.viewportRevision += 1;
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutWidth, height: layoutHeight,
     deviceScaleFactor: want.deviceScaleFactor, mobile: false,
@@ -1470,7 +1485,11 @@ async function fitViewportToContent(
 }
 
 function broadcastFrame(p: CastProducer, data: string): void {
-  const payload = JSON.stringify({ data, url: p.url, title: p.title, favicon: null });
+  if (p.masked) return;   // password field focused: ship nothing at all
+  const payload = JSON.stringify({
+    data, url: p.url, title: p.title, favicon: null,
+    revision: p.viewportRevision,
+  });
   for (const viewer of p.viewers) {
     if (viewer.readyState !== WebSocket.OPEN) continue;
     if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) continue;
@@ -1491,6 +1510,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   const p: CastProducer = {
     socket, viewers: new Set(), lastFrame: null,
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
+    viewportRevision: 1, masked: false, heldButtons: new Set(), heldKeys: new Set(),
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1505,6 +1525,21 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
         p.lastFrame = data;
         broadcastFrame(p, data);
+      }
+      return;
+    }
+    if (msg.method === "Runtime.bindingCalled"
+        && msg.params?.name === "__browsermint_password_focus") {
+      const on = msg.params?.payload === "1";
+      if (on !== p.masked) {
+        p.masked = on;
+        for (const viewer of p.viewers) {
+          if (viewer.readyState === WebSocket.OPEN) {
+            viewer.send(JSON.stringify({ type: "masked", masked: on }));
+          }
+        }
+        if (on) p.lastFrame = null;   // don't let a new viewer paint the old frame
+        console.info(`[cast] ${targetId}: password field ${on ? "focused — masking" : "left — unmasked"}`);
       }
       return;
     }
@@ -1552,6 +1587,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   const want = targetViewports.get(targetKey(sessionId, targetId));
   const layout = want ? layoutSize(want) : null;
   producerSend(p, "Page.enable");
+  installPasswordWatch(p);
   // Chrome only emits screencast frames for a page it considers active; a
   // background tab streams nothing and the viewer sits on a blank canvas.
   // setWebLifecycleState marks *this page* active without changing which tab is
@@ -1628,12 +1664,92 @@ async function assertPageTarget(sessionId: string, targetId: string): Promise<vo
   if (hit.type !== "page") throw new Error(`target ${targetId} is ${hit.type}, not a page`);
 }
 
+// Page script that reports focus entering/leaving a password field. CDP has no
+// "focus is on a password input" event, so we watch focusin/focusout in the page
+// and report through a binding — the same mechanism the stealth injection uses.
+// Caveat worth stating plainly: this reliably covers native input[type=password]
+// only. Custom widgets and "show password" toggles are not covered, and the
+// agent's own CDP can still read the DOM — so masking is defence in depth, not a
+// guarantee. Real secrecy also requires the agent to be fenced off (it is,
+// during a takeover).
+const PASSWORD_WATCH_SCRIPT = `(() => {
+  if (window.__bm_pw_watch) return; window.__bm_pw_watch = true;
+  const isPw = (el) => !!el && el.tagName === 'INPUT' && el.type === 'password';
+  const report = (on) => { try { window.__browsermint_password_focus(on ? '1' : '0'); } catch (e) {} };
+  document.addEventListener('focusin', (e) => { if (isPw(e.target)) report(true); }, true);
+  document.addEventListener('focusout', (e) => { if (isPw(e.target)) report(false); }, true);
+  if (isPw(document.activeElement)) report(true);
+})()`;
+
+function installPasswordWatch(p: CastProducer): void {
+  producerSend(p, "Runtime.enable");
+  producerSend(p, "Runtime.addBinding", { name: "__browsermint_password_focus" });
+  producerSend(p, "Page.addScriptToEvaluateOnNewDocument", { source: PASSWORD_WATCH_SCRIPT });
+  producerSend(p, "Runtime.evaluate", { expression: PASSWORD_WATCH_SCRIPT });
+}
+
+/** Dispatch one viewer input event onto the page. Coordinates arrive in remote
+ *  CSS-viewport space (the viewer maps from its canvas), which is exactly what
+ *  Input.* expects — no scaling here on purpose. */
+function dispatchInput(p: CastProducer, msg: Record<string, any>): void {
+  const ev = msg?.event;
+  if (!ev || typeof ev !== "object") return;
+  if (msg.type === "mouseEvent") {
+    const button = typeof ev.button === "string" ? ev.button : "none";
+    if (ev.type === "mousePressed") p.heldButtons.add(button);
+    if (ev.type === "mouseReleased") p.heldButtons.delete(button);
+    producerSend(p, "Input.dispatchMouseEvent", {
+      type: ev.type, x: Number(ev.x) || 0, y: Number(ev.y) || 0,
+      button, buttons: Number(ev.buttons) || 0,
+      clickCount: Number(ev.clickCount) || (ev.type === "mouseMoved" ? 0 : 1),
+      modifiers: Number(ev.modifiers) || 0,
+      ...(ev.deltaX !== undefined ? { deltaX: Number(ev.deltaX) || 0 } : {}),
+      ...(ev.deltaY !== undefined ? { deltaY: Number(ev.deltaY) || 0 } : {}),
+    });
+    return;
+  }
+  if (msg.type === "keyEvent") {
+    const code = Number(ev.windowsVirtualKeyCode) || 0;
+    if (ev.type === "keyDown" && code) p.heldKeys.add(code);
+    if (ev.type === "keyUp" && code) p.heldKeys.delete(code);
+    producerSend(p, "Input.dispatchKeyEvent", {
+      type: ev.type, key: ev.key, code: ev.code,
+      text: ev.text, unmodifiedText: ev.unmodifiedText,
+      windowsVirtualKeyCode: code, nativeVirtualKeyCode: code,
+      modifiers: Number(ev.modifiers) || 0,
+      autoRepeat: !!ev.autoRepeat, isKeypad: false, isSystemKey: false,
+    });
+    return;
+  }
+  if (msg.type === "insertText" && typeof msg.text === "string") {
+    // Covers IME-committed text and paste without needing composition sync.
+    producerSend(p, "Input.insertText", { text: msg.text.slice(0, 4096) });
+  }
+}
+
+/** Let go of whatever the controller was holding. Without this a lease that ends
+ *  mid-drag leaves the page with a stuck button and a pressed modifier. */
+function releaseHeldInput(p: CastProducer): void {
+  for (const button of p.heldButtons) {
+    producerSend(p, "Input.dispatchMouseEvent", {
+      type: "mouseReleased", x: 0, y: 0, button, buttons: 0, clickCount: 1,
+    });
+  }
+  p.heldButtons.clear();
+  for (const code of p.heldKeys) {
+    producerSend(p, "Input.dispatchKeyEvent", {
+      type: "keyUp", windowsVirtualKeyCode: code, nativeVirtualKeyCode: code,
+    });
+  }
+  p.heldKeys.clear();
+}
+
 /** Attach a viewer socket to this target's stream, starting the producer if needed. */
 export async function attachCastViewer(
-  sessionId: string, targetId: string, viewer: WebSocket
+  sessionId: string, targetId: string, viewer: WebSocket, leaseId?: string
 ): Promise<void> {
   if (cdpServiceOverrides.attachCastViewer) {
-    return cdpServiceOverrides.attachCastViewer(sessionId, targetId, viewer);
+    return cdpServiceOverrides.attachCastViewer(sessionId, targetId, viewer, leaseId);
   }
   const key = targetKey(sessionId, targetId);
   // Track disconnects that happen *while* we're still setting the producer up.
@@ -1672,6 +1788,25 @@ export async function attachCastViewer(
       data: producer.lastFrame, url: producer.url, title: producer.title, favicon: null,
     }));
   }
+  // Input is accepted only from a connection that carries a live lease. Viewers
+  // without one are strictly observers: their messages are dropped, not merely
+  // ignored by the UI. (Before this, any cast connection would have become a
+  // control channel the moment the producer started reading input.)
+  if (leaseId) {
+    viewer.on("message", (raw: WebSocket.RawData) => {
+      if (producer.closed) return;
+      let msg: Record<string, any>;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg?.revision !== undefined && msg.revision !== producer.viewportRevision) {
+        return;   // aimed at a layout that no longer exists — dropping beats mis-clicking
+      }
+      holdsLease(sessionId, targetId, leaseId).then((ok) => {
+        if (ok && !producer.closed) dispatchInput(producer, msg);
+      }).catch(() => { /* arbitration unavailable: refuse the input */ });
+    });
+    viewer.once("close", () => releaseHeldInput(producer));
+  }
+
   const detach = () => {
     producer.viewers.delete(viewer);
     if (producer.viewers.size > 0 || producer.closed) return;
@@ -1691,6 +1826,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!p || p.closed || !want) return false;
   const layoutNow = layoutSize(want);
+  p.viewportRevision += 1;
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutNow.width, height: layoutNow.height, deviceScaleFactor: want.deviceScaleFactor,
     mobile: false, screenWidth: layoutNow.width, screenHeight: layoutNow.height,

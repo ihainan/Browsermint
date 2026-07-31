@@ -15,6 +15,7 @@ const {
   setCastTestHooks, resetCastTestHooks, setCdpServiceOverridesForTests,
   resetCdpServiceOverridesForTests,
 } = await import("./services/cdp.service.js");
+const { setPrismaForTests } = await import("./db/client.js");
 
 const SESSION = "sess-1";
 const TARGET = "page-1";
@@ -282,5 +283,69 @@ test("缩放后仍按缩放后的布局判断是否装得下（不是按栏宽�
       .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
     assert.ok(metrics.every((m) => m.params.width === 1470),
       "布局已够宽就不该二次放宽");
+  } finally { teardown(); }
+});
+
+// 控制通道：只有带**有效租约**的连接能写。否则任何 cast 连接都会在 producer 开始
+// 读入站消息的那一刻变成控制通道（codex 评审点名的阻断项之一）。
+function leasePrisma(live: { leaseId: string } | null) {
+  return {
+    targetLease: {
+      findFirst: async ({ where }: any) =>
+        live && where.leaseId === live.leaseId ? { id: "x" } : null,
+      findUnique: async () => (live ? { ...live, expiresAt: new Date(Date.now() + 60000) } : null),
+      create: async () => ({}), updateMany: async () => ({ count: 0 }),
+      deleteMany: async () => ({ count: 0 }),
+    },
+  } as any;
+}
+
+test("没有租约的 viewer：输入被服务端丢弃（不是靠 UI 自觉）", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma(null));
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);     // 不传 leaseId
+    const before = created[0].sent.length;
+    (v as any).emit("message", Buffer.from(JSON.stringify({
+      type: "mouseEvent", event: { type: "mousePressed", x: 10, y: 10, button: "left" },
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
+    assert.deepEqual(inputs, [], "只读连接不得产生任何 Input 命令");
+  } finally { teardown(); }
+});
+
+test("持租约的连接：输入转成 CDP Input 命令", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma({ leaseId: "L1" }));
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    (v as any).emit("message", Buffer.from(JSON.stringify({
+      type: "mouseEvent", event: { type: "mousePressed", x: 12, y: 34, button: "left", clickCount: 1 },
+    })));
+    await new Promise((r) => setTimeout(r, 80));
+    const click = created[0].sent.find((m) => m.method === "Input.dispatchMouseEvent");
+    assert.ok(click, "应转发为 Input.dispatchMouseEvent");
+    assert.equal(click!.params.x, 12);
+    assert.equal(click!.params.y, 34);
+  } finally { teardown(); }
+});
+
+test("revision 过旧的输入被丢弃（页面已重排，再点就点错地方）", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma({ leaseId: "L1" }));
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    const before = created[0].sent.length;
+    (v as any).emit("message", Buffer.from(JSON.stringify({
+      type: "mouseEvent", revision: 999,
+      event: { type: "mousePressed", x: 1, y: 1, button: "left" },
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
+    assert.deepEqual(inputs, [], "对不上当前 revision 的输入必须丢弃");
   } finally { teardown(); }
 });
