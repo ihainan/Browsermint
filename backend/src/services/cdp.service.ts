@@ -1351,7 +1351,9 @@ const producers = new Map<string, CastProducer>();
 const producersStarting = new Map<string, Promise<CastProducer>>();
 // Frame encoding: Chrome already hands us a base64 jpeg, so the producer only
 // acks and fans out — no image work on our side.
-const CAST_QUALITY = 70;
+// 70 was visibly soft on text; screencast frames are re-encoded per frame, so a
+// higher quality costs bandwidth but not latency.
+const CAST_QUALITY = 82;
 // Keep the producer alive briefly after the last viewer leaves: switching tabs
 // in the workspace pane disconnects and reconnects within a second, and tearing
 // the stream down each time costs a visible black flash.
@@ -1368,6 +1370,18 @@ function producerSend(p: CastProducer, method: string, params: Record<string, un
 // worthless once stale, so skip this frame for anyone already behind instead of
 // queueing (the next frame supersedes it anyway).
 const VIEWER_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
+
+// Frames must be capped in *physical* pixels, not CSS pixels: a HiDPI viewer
+// paints a 735-CSS-px pane with 1470 device pixels, so shipping a 735px-wide
+// frame means the browser upscales it 2× — visibly soft text. deviceScaleFactor
+// is what the viewer reported, already clamped there.
+function castCaps(want: { width: number; height: number; deviceScaleFactor: number }) {
+  const scale = want.deviceScaleFactor || 1;
+  return {
+    maxWidth: Math.round(want.width * scale),
+    maxHeight: Math.round(want.height * scale),
+  };
+}
 
 function producerRequest(
   p: CastProducer, method: string, params: Record<string, unknown> = {}, timeoutMs = 5000
@@ -1424,9 +1438,7 @@ async function fitViewportToContent(
   // maxWidth/maxHeight stay at the pane size: Chrome scales the frame down, so
   // the viewer still receives pane-sized frames — full page, no scrollbar.
   producerSend(p, "Page.stopScreencast");
-  producerSend(p, "Page.startScreencast", {
-    format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
-  });
+  producerSend(p, "Page.startScreencast", { format: "jpeg", quality: CAST_QUALITY, ...castCaps(want) });
   console.info(`[cast] ${targetId} does not reflow (${scrollWidth}px content in ` +
     `${want.width}px): zoomed to fit`);
 }
@@ -1550,7 +1562,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         if (p.closed) return;
         producerSend(p, "Page.startScreencast", {
           format: "jpeg", quality: CAST_QUALITY,
-          ...(want ? { maxWidth: want.width, maxHeight: want.height } : {}),
+          ...(want ? castCaps(want) : {}),
         });
       })
       .catch((err) => console.warn(`[cast] activate fallback failed for ${targetId}:`, err));
@@ -1658,9 +1670,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   });
   producerSend(p, "Page.stopScreencast");
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
-  producerSend(p, "Page.startScreencast", {
-    format: "jpeg", quality: CAST_QUALITY, maxWidth: want.width, maxHeight: want.height,
-  });
+  producerSend(p, "Page.startScreencast", { format: "jpeg", quality: CAST_QUALITY, ...castCaps(want) });
   setTimeout(() => {
     if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
   }, 800);
