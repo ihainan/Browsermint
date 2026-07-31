@@ -29,6 +29,7 @@ import {
   handleWebSocketUpgrade,
   handleSetTargetLabel,
   handleSetTargetViewport,
+  handleReapplyTargetViewport,
   handleGetTargetLabels,
 } from "./services/proxy.service.js";
 
@@ -164,6 +165,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.post("/api/sessions/:id/targets/:targetId/viewport", {
     handler: async (request, reply) =>
       handleSetTargetViewport(request as Parameters<typeof handleSetTargetViewport>[0], reply),
+  });
+  server.post("/api/sessions/:id/targets/:targetId/viewport/reapply", {
+    handler: async (request, reply) =>
+      handleReapplyTargetViewport(request as Parameters<typeof handleReapplyTargetViewport>[0], reply),
   });
   server.post("/api/sessions/:id/navigate", {
     handler: async (request, reply) =>

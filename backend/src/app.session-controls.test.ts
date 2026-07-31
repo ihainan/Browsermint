@@ -91,7 +91,16 @@ type ExecuteCdpCommandOverride = (
   targetId?: string
 ) => Promise<Record<string, unknown>>;
 
-async function makeApp(options: { userActive?: boolean; sessionStatus?: string; executeCdpCommand?: ExecuteCdpCommandOverride } = {}) {
+type SetTargetViewportOverride = (
+  sessionId: string, targetId: string, width: number, height: number, deviceScaleFactor?: number
+) => Promise<void>;
+
+async function makeApp(options: {
+  userActive?: boolean;
+  sessionStatus?: string;
+  executeCdpCommand?: ExecuteCdpCommandOverride;
+  setTargetViewport?: SetTargetViewportOverride;
+} = {}) {
   const prisma = makePrismaMock(options);
   const calls: Array<{ sessionId: string; method: string; params: Record<string, unknown>; targetId?: string }> = [];
   const dockerCalls: Array<{ containerId: string; text: string }> = [];
@@ -115,6 +124,7 @@ async function makeApp(options: { userActive?: boolean; sessionStatus?: string; 
   };
   setCdpServiceOverridesForTests({
     executeCdpCommand: options.executeCdpCommand ?? defaultExecuteCdpCommand,
+    ...(options.setTargetViewport ? { setTargetViewport: options.setTargetViewport } : {}),
   });
   setDriverOverridesForTests({
     setClipboard: async (_sessionId, containerId, text) => {
@@ -614,12 +624,15 @@ test("driving REST endpoints auto-resume a paused session", async () => {
   }
 });
 
-test("per-target viewport override targets only that page (not the shared display)", async () => {
-  const calls: Array<{ method: string; params: Record<string, unknown>; targetId?: string }> = [];
+test("per-target viewport goes through the persistent-session path", async () => {
+  // The viewport must NOT go through executeCdpCommand: that attaches a throwaway
+  // flat session, and Chrome drops the emulation override with it.
+  const viewports: Array<{ targetId: string; width: number; height: number; dsf?: number }> = [];
+  const cdpCalls: string[] = [];
   const { app } = await makeApp({
-    executeCdpCommand: async (_sessionId, method, params = {}, targetId) => {
-      calls.push({ method, params, targetId });
-      return {};
+    executeCdpCommand: async (_sessionId, method) => { cdpCalls.push(method); return {}; },
+    setTargetViewport: async (_sessionId, targetId, width, height, dsf) => {
+      viewports.push({ targetId, width, height, dsf });
     },
   });
   const token = sessionToken();
@@ -632,12 +645,8 @@ test("per-target viewport override targets only that page (not the shared displa
 
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.json(), { ok: true, width: 760, height: 900, deviceScaleFactor: 1 });
-    // 必须走 flat session 只作用于 page-1；用 /resize 那条路会改整个 session 的显示
-    assert.deepEqual(calls, [{
-      method: "Emulation.setDeviceMetricsOverride",
-      params: { width: 760, height: 900, deviceScaleFactor: 1, mobile: false },
-      targetId: "page-1",
-    }]);
+    assert.deepEqual(viewports, [{ targetId: "page-1", width: 760, height: 900, dsf: 1 }]);
+    assert.deepEqual(cdpCalls, []);
   } finally {
     await closeApp(app);
   }
@@ -647,6 +656,7 @@ test("per-target viewport rejects out-of-range sizes before touching CDP", async
   const calls: string[] = [];
   const { app } = await makeApp({
     executeCdpCommand: async (_sessionId, method) => { calls.push(method); return {}; },
+    setTargetViewport: async () => { calls.push("setTargetViewport"); },
   });
   const token = sessionToken();
   try {

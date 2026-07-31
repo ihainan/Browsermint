@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
 import { Prisma } from "@prisma/client";
@@ -1484,12 +1484,33 @@ export async function handleSetTargetViewport(
   }
 
   try {
-    await executeCdpCommand(sessionId, "Emulation.setDeviceMetricsOverride", {
-      width, height, deviceScaleFactor: dsf, mobile: false,
-    }, targetId);
+    // Persistent flat session: an override dies with the session that set it, so
+    // a fire-and-forget attach (what executeCdpCommand does) would be undone the
+    // instant the call returns.
+    await setTargetViewport(sessionId, targetId, width, height, dsf);
     logSessionEvent(sessionId, "target_viewport", request.ip, request.url, 200,
       { targetId, width, height, deviceScaleFactor: dsf }, getHttpSource(request));
     return reply.send({ ok: true, width, height, deviceScaleFactor: dsf });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
+export async function handleReapplyTargetViewport(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  // Steel's cast handler re-sets device metrics from session.dimensions every
+  // time a viewer connects, clobbering our override. Viewers call this right
+  // after their stream starts to re-assert the viewport they asked for.
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+  try {
+    const applied = await reapplyTargetViewport(sessionId, targetId);
+    return reply.send({ ok: true, applied });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
   }

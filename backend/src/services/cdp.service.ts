@@ -561,6 +561,13 @@ type CdpServiceOverrides = Partial<{
     params?: Record<string, unknown>,
     targetId?: string
   ) => Promise<Record<string, unknown>>;
+  setTargetViewport: (
+    sessionId: string,
+    targetId: string,
+    width: number,
+    height: number,
+    deviceScaleFactor?: number
+  ) => Promise<void>;
 }>;
 
 let cdpServiceOverrides: CdpServiceOverrides = {};
@@ -747,6 +754,9 @@ export async function initCdpSession(
 
   ws.on("close", () => {
     activeSessions.delete(sessionId);
+    // Flat session ids die with the connection; drop them so the next viewport
+    // call re-attaches instead of talking to a session that no longer exists.
+    forgetTargetViewport(sessionId);
   });
 
   // Handle incoming events (auto-attach notifications for new pages)
@@ -1129,6 +1139,87 @@ export async function openSavedTabs(sessionId: string, urls: string[]): Promise<
   }
 }
 
+// ── Per-target viewport (persistent flat sessions) ─────────────────────────
+// Emulation overrides are owned by the CDP session that set them: Chrome drops
+// them the moment that session goes away. executeCdpCommand attaches a fresh
+// flat session per call, so a viewport set through it never survives the call —
+// which is exactly why "set the viewport" looked like a no-op from the outside.
+// Keeping one long-lived flat session per target is what makes it stick.
+const targetSessions = new Map<string, string>();   // `${sessionId}:${targetId}` -> flat sessionId
+// The desired viewport per target. Re-applied after Steel's cast handler resets
+// device metrics on every viewer connect, and after a CDP reconnect.
+const targetViewports = new Map<string, { width: number; height: number; deviceScaleFactor: number }>();
+
+function targetKey(sessionId: string, targetId: string): string {
+  return `${sessionId}:${targetId}`;
+}
+
+export function forgetTargetViewport(sessionId: string, targetId?: string): void {
+  if (targetId) {
+    targetSessions.delete(targetKey(sessionId, targetId));
+    targetViewports.delete(targetKey(sessionId, targetId));
+    return;
+  }
+  const prefix = `${sessionId}:`;
+  for (const k of [...targetSessions.keys()]) if (k.startsWith(prefix)) targetSessions.delete(k);
+  for (const k of [...targetViewports.keys()]) if (k.startsWith(prefix)) targetViewports.delete(k);
+}
+
+async function attachPersistent(
+  ws: WebSocket, sessionId: string, targetId: string, reattach = false
+): Promise<string> {
+  const key = targetKey(sessionId, targetId);
+  const cached = targetSessions.get(key);
+  if (cached && !reattach) return cached;
+  const attachId = sendCmd(ws, "Target.attachToTarget", { targetId, flatten: true });
+  const resp = await waitForResponse(ws, attachId, 8000);
+  const flat = (resp.result as Record<string, unknown> | undefined)?.sessionId as string | undefined;
+  if (!flat) throw new Error(`Failed to attach to target ${targetId}`);
+  targetSessions.set(key, flat);
+  return flat;
+}
+
+export async function setTargetViewport(
+  sessionId: string,
+  targetId: string,
+  width: number,
+  height: number,
+  deviceScaleFactor = 1
+): Promise<void> {
+  if (cdpServiceOverrides.setTargetViewport) {
+    return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor);
+  }
+  const ws = activeSessions.get(sessionId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    throw new Error(`No active CDP session for session ${sessionId}`);
+  }
+  targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
+  const params = {
+    width, height, deviceScaleFactor, mobile: false,
+    screenWidth: width, screenHeight: height,
+    dontSetVisibleSize: false,
+  };
+  for (const reattach of [false, true]) {
+    const flat = await attachPersistent(ws, sessionId, targetId, reattach);
+    const cmdId = sendCmd(ws, "Emulation.setDeviceMetricsOverride", params, flat);
+    const resp = await waitForResponse(ws, cmdId, 8000);
+    if (!resp.error) return;
+    // A stale flat session (target navigated cross-process, browser reconnected)
+    // fails here; re-attach once and retry before giving up.
+    if (reattach) throw new Error(JSON.stringify(resp.error));
+    targetSessions.delete(targetKey(sessionId, targetId));
+  }
+}
+
+/** Re-apply the remembered viewport (Steel's cast handler resets device metrics
+ *  on every viewer connect, so callers re-assert after a stream starts). */
+export async function reapplyTargetViewport(sessionId: string, targetId: string): Promise<boolean> {
+  const want = targetViewports.get(targetKey(sessionId, targetId));
+  if (!want) return false;
+  await setTargetViewport(sessionId, targetId, want.width, want.height, want.deviceScaleFactor);
+  return true;
+}
+
 export function cleanupCdpSession(sessionId: string): void {
   if (cdpServiceOverrides.cleanupCdpSession) {
     return cdpServiceOverrides.cleanupCdpSession(sessionId);
@@ -1139,6 +1230,7 @@ export function cleanupCdpSession(sessionId: string): void {
     activeSessions.delete(sessionId);
   }
   sessionUserAgents.delete(sessionId);
+  forgetTargetViewport(sessionId);
 }
 
 export async function executeCdpCommand(
