@@ -1210,14 +1210,36 @@ export async function setTargetViewport(
   }
   targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
   const sock = await openViewportSocket(sessionId, targetId);
+  const id = viewportCmdId++;
+  // Wait for the reply: a silent send hides protocol errors, and "the viewport
+  // didn't change but every HTTP call returned 200" is exactly the kind of
+  // failure that costs hours to track down.
+  const reply = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timer = setTimeout(() => { sock.off("message", onMsg); reject(new Error("viewport command timeout")); }, 8000);
+    function onMsg(raw: WebSocket.RawData) {
+      let msg: Record<string, unknown>;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.id !== id) return;
+      clearTimeout(timer);
+      sock.off("message", onMsg);
+      resolve(msg);
+    }
+    sock.on("message", onMsg);
+  });
   sock.send(JSON.stringify({
-    id: viewportCmdId++,
+    id,
     method: "Emulation.setDeviceMetricsOverride",
     params: {
       width, height, deviceScaleFactor, mobile: false,
       screenWidth: width, screenHeight: height, dontSetVisibleSize: false,
     },
   }));
+  const resp = await reply;
+  if (resp.error) {
+    console.warn(`[cdp] viewport ${width}x${height} rejected for ${targetId}:`, JSON.stringify(resp.error));
+    throw new Error(JSON.stringify(resp.error));
+  }
+  console.info(`[cdp] viewport ${width}x${height} applied to target ${targetId}`);
 }
 
 /** Re-assert the remembered viewport. Steel's cast handler resets device metrics
