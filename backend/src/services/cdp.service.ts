@@ -1161,31 +1161,97 @@ function targetKey(sessionId: string, targetId: string): string {
   return `${sessionId}:${targetId}`;
 }
 
+/** Single teardown path for everything we hold per target: viewport socket,
+ *  remembered viewport, producer + its viewers/timer, and any in-flight setup.
+ *  Anything that forgets one of these in isolation leaks the others. */
 export function forgetTargetViewport(sessionId: string, targetId?: string): void {
   const drop = (k: string) => {
     const sock = targetViewportSockets.get(k);
     if (sock) { try { sock.terminate(); } catch { /* already gone */ } }
     targetViewportSockets.delete(k);
     targetViewports.delete(k);
+    viewportSocketsOpening.delete(k);
+    producersStarting.delete(k);
+    const producer = producers.get(k);
+    if (producer) {
+      producer.closed = true;
+      if (producer.stopTimer) clearTimeout(producer.stopTimer);
+      producer.lastFrame = null;
+      for (const viewer of producer.viewers) {
+        try { viewer.close(); } catch { /* already gone */ }
+      }
+      producer.viewers.clear();
+      try { producer.socket.close(); } catch { /* already gone */ }
+      producers.delete(k);
+    }
   };
   if (targetId) return drop(targetKey(sessionId, targetId));
   const prefix = `${sessionId}:`;
-  for (const k of [...targetViewportSockets.keys()]) if (k.startsWith(prefix)) drop(k);
-  for (const k of [...targetViewports.keys()]) if (k.startsWith(prefix)) drop(k);
+  const keys = new Set([
+    ...targetViewportSockets.keys(), ...targetViewports.keys(), ...producers.keys(),
+  ]);
+  for (const k of keys) if (k.startsWith(prefix)) drop(k);
   sessionCdpBases.delete(sessionId);
 }
+
+// Test seam: the producer opens a raw devtools socket, which unit tests cannot
+// reach. Injecting the factory (and the CDP base) lets tests drive the real
+// concurrency/lifecycle code with a fake socket instead of asserting on mocks.
+type CastSocketFactory = (url: string) => WebSocket;
+let castSocketFactory: CastSocketFactory = (url) => new WebSocket(url);
+
+export function setCastTestHooks(hooks: {
+  socketFactory?: CastSocketFactory;
+  cdpBase?: { sessionId: string; base: string };
+}): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("setCastTestHooks can only be used when NODE_ENV=test");
+  }
+  if (hooks.socketFactory) castSocketFactory = hooks.socketFactory;
+  if (hooks.cdpBase) sessionCdpBases.set(hooks.cdpBase.sessionId, hooks.cdpBase.base);
+}
+
+export function resetCastTestHooks(): void {
+  castSocketFactory = (url) => new WebSocket(url);
+  producers.clear();
+  producersStarting.clear();
+  targetViewports.clear();
+  targetViewportSockets.clear();
+  viewportSocketsOpening.clear();
+  sessionCdpBases.clear();
+}
+
+const viewportSocketsOpening = new Map<string, Promise<WebSocket>>();
 
 async function openViewportSocket(sessionId: string, targetId: string): Promise<WebSocket> {
   const key = targetKey(sessionId, targetId);
   const existing = targetViewportSockets.get(key);
   if (existing && existing.readyState === WebSocket.OPEN) return existing;
+  // Same race as producers: concurrent viewport calls would each open a socket
+  // and all but the last would leak.
+  const pending = viewportSocketsOpening.get(key);
+  if (pending) return pending;
+  const task = openViewportSocketInner(sessionId, targetId, key).finally(() => {
+    if (viewportSocketsOpening.get(key) === task) viewportSocketsOpening.delete(key);
+  });
+  viewportSocketsOpening.set(key, task);
+  return task;
+}
+
+async function openViewportSocketInner(
+  sessionId: string, targetId: string, key: string
+): Promise<WebSocket> {
   const base = sessionCdpBases.get(sessionId);
   if (!base) throw new Error(`No CDP base for session ${sessionId}`);
-  const sock = new WebSocket(`${base}/devtools/page/${targetId}`);
+  const sock = castSocketFactory(`${base}/devtools/page/${targetId}`);
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("viewport socket timeout")), 8000);
+    const timer = setTimeout(() => {
+      // Don't leave a socket that may still connect later with nobody holding it.
+      try { sock.terminate(); } catch { /* nothing to close */ }
+      reject(new Error("viewport socket timeout"));
+    }, 8000);
     sock.once("open", () => { clearTimeout(timer); resolve(); });
-    sock.once("error", (err) => { clearTimeout(timer); reject(err); });
+    sock.once("error", (err) => { clearTimeout(timer); try { sock.terminate(); } catch { /**/ } reject(err); });
   });
   // The page can go away under us (closed tab, crashed renderer): drop the
   // handle so the next call reconnects instead of writing into a dead socket.
@@ -1209,8 +1275,10 @@ export async function setTargetViewport(
   if (cdpServiceOverrides.setTargetViewport) {
     return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor);
   }
-  targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
+  // Open first: remembering a viewport for a target that doesn't exist would
+  // leave an entry nothing ever cleans up.
   const sock = await openViewportSocket(sessionId, targetId);
+  targetViewports.set(targetKey(sessionId, targetId), { width, height, deviceScaleFactor });
   const id = viewportCmdId++;
   // Wait for the reply: a silent send hides protocol errors, and "the viewport
   // didn't change but every HTTP call returned 200" is exactly the kind of
@@ -1275,6 +1343,10 @@ type CastProducer = {
 };
 
 const producers = new Map<string, CastProducer>();
+// Two viewers arriving at the same instant would both find no producer and both
+// create one; the second overwrites the map entry and the first becomes a zombie
+// that keeps acking frames forever. Share the in-flight creation instead.
+const producersStarting = new Map<string, Promise<CastProducer>>();
 // Frame encoding: Chrome already hands us a base64 jpeg, so the producer only
 // acks and fans out — no image work on our side.
 const CAST_QUALITY = 70;
@@ -1288,17 +1360,24 @@ function producerSend(p: CastProducer, method: string, params: Record<string, un
   p.socket.send(JSON.stringify({ id: p.cmdId++, method, params }));
 }
 
+// A viewer on a slow link must not turn into unbounded memory: video frames are
+// worthless once stale, so skip this frame for anyone already behind instead of
+// queueing (the next frame supersedes it anyway).
+const VIEWER_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
+
 function broadcastFrame(p: CastProducer, data: string): void {
   const payload = JSON.stringify({ data, url: p.url, title: p.title, favicon: null });
   for (const viewer of p.viewers) {
-    if (viewer.readyState === WebSocket.OPEN) viewer.send(payload);
+    if (viewer.readyState !== WebSocket.OPEN) continue;
+    if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) continue;
+    viewer.send(payload);
   }
 }
 
 async function createProducer(sessionId: string, targetId: string): Promise<CastProducer> {
   const base = sessionCdpBases.get(sessionId);
   if (!base) throw new Error(`No CDP base for session ${sessionId}`);
-  const socket = new WebSocket(`${base}/devtools/page/${targetId}`);
+  const socket = castSocketFactory(`${base}/devtools/page/${targetId}`);
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("cast socket timeout")), 10000);
     socket.once("open", () => { clearTimeout(timer); resolve(); });
@@ -1333,7 +1412,11 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
 
   socket.on("close", () => {
     p.closed = true;
-    producers.delete(targetKey(sessionId, targetId));
+    p.lastFrame = null;          // release the retained JPEG
+    if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
+    if (producers.get(targetKey(sessionId, targetId)) === p) {
+      producers.delete(targetKey(sessionId, targetId));
+    }
     // The page went away (closed tab, crashed renderer): tell viewers so they
     // stop waiting for frames that will never come.
     for (const viewer of p.viewers) {
@@ -1373,6 +1456,36 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   return p;
 }
 
+function scheduleLingerIfIdle(producer: CastProducer, key: string, targetId: string): void {
+  if (producer.viewers.size > 0 || producer.closed) return;
+  // 'close' and 'error' can both fire for the same viewer: without clearing, the
+  // second call leaves an orphan timer that fires against a producer that has
+  // already been stopped (and possibly replaced).
+  if (producer.stopTimer) clearTimeout(producer.stopTimer);
+  producer.stopTimer = setTimeout(() => {
+    if (producer.viewers.size > 0 || producer.closed) return;
+    producerSend(producer, "Page.stopScreencast");
+    try { producer.socket.close(); } catch { /* already gone */ }
+    // Only drop the entry if it is still ours — a reconnect during the linger
+    // window may already have installed a fresh producer under this key.
+    if (producers.get(key) === producer) producers.delete(key);
+    console.info(`[cast] producer stopped for ${targetId} (no viewers)`);
+  }, PRODUCER_LINGER_MS);
+}
+
+/** The session token is session-wide, so a caller could name any targetId in
+ *  the session. Today the platform BFF only ever passes a targetId taken from a
+ *  ticket-bound page record, but check the target exists and is a page anyway:
+ *  streaming a worker/iframe target is meaningless, and this is the seam where a
+ *  future target-level isolation model would have to hold. */
+async function assertPageTarget(sessionId: string, targetId: string): Promise<void> {
+  const res = await executeCdpCommand(sessionId, "Target.getTargets");
+  const infos = (res.targetInfos ?? []) as Array<{ targetId: string; type: string }>;
+  const hit = infos.find((t) => t.targetId === targetId);
+  if (!hit) throw new Error(`target ${targetId} not found in session ${sessionId}`);
+  if (hit.type !== "page") throw new Error(`target ${targetId} is ${hit.type}, not a page`);
+}
+
 /** Attach a viewer socket to this target's stream, starting the producer if needed. */
 export async function attachCastViewer(
   sessionId: string, targetId: string, viewer: WebSocket
@@ -1381,26 +1494,49 @@ export async function attachCastViewer(
     return cdpServiceOverrides.attachCastViewer(sessionId, targetId, viewer);
   }
   const key = targetKey(sessionId, targetId);
+  // Track disconnects that happen *while* we're still setting the producer up.
+  let gone = viewer.readyState !== WebSocket.OPEN;
+  const markGone = () => { gone = true; };
+  viewer.once("close", markGone);
+  viewer.once("error", markGone);
+
   let p = producers.get(key);
   if (!p || p.closed || p.socket.readyState !== WebSocket.OPEN) {
-    p = await createProducer(sessionId, targetId);
+    let pending = producersStarting.get(key);
+    if (!pending) {
+      pending = assertPageTarget(sessionId, targetId)
+        .then(() => createProducer(sessionId, targetId))
+        .finally(() => {
+        if (producersStarting.get(key) === pending) producersStarting.delete(key);
+      });
+      producersStarting.set(key, pending);
+    }
+    p = await pending;
   }
   if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
-  p.viewers.add(viewer);
+  const producer = p;
+  // Creating a producer can take seconds (socket + Chrome). A viewer that hung
+  // up in the meantime must not be added to the set: its 'close' already fired,
+  // so nothing would ever remove it and viewers.size would never reach zero —
+  // the producer would ack frames forever and never linger out.
+  if (viewer.readyState !== WebSocket.OPEN || gone) {
+    scheduleLingerIfIdle(producer, key, targetId);
+    return;
+  }
+  producer.viewers.add(viewer);
   // Paint something immediately instead of waiting for the next frame.
-  if (p.lastFrame && viewer.readyState === WebSocket.OPEN) {
-    viewer.send(JSON.stringify({ data: p.lastFrame, url: p.url, title: p.title, favicon: null }));
+  if (producer.lastFrame) {
+    viewer.send(JSON.stringify({
+      data: producer.lastFrame, url: producer.url, title: producer.title, favicon: null,
+    }));
   }
   const detach = () => {
-    p!.viewers.delete(viewer);
-    if (p!.viewers.size > 0 || p!.closed) return;
-    p!.stopTimer = setTimeout(() => {
-      if (p!.viewers.size > 0 || p!.closed) return;
-      producerSend(p!, "Page.stopScreencast");
-      try { p!.socket.close(); } catch { /* already gone */ }
-      producers.delete(key);
-      console.info(`[cast] producer stopped for ${targetId} (no viewers)`);
-    }, PRODUCER_LINGER_MS);
+    producer.viewers.delete(viewer);
+    if (producer.viewers.size > 0 || producer.closed) return;
+    // 'close' and 'error' can both fire for the same viewer: without clearing,
+    // the second call leaves an orphan timer that fires against a producer that
+    // has already been stopped (and possibly replaced).
+    scheduleLingerIfIdle(producer, key, targetId);
   };
   viewer.on("close", detach);
   viewer.on("error", detach);

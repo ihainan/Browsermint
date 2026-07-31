@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 
 Object.assign(process.env, {
   DATABASE_URL: "postgresql://user:pass@localhost:5432/browsermint_test",
@@ -9,12 +10,174 @@ Object.assign(process.env, {
 });
 
 const { parseSessionWebSocketPath } = await import("./services/proxy.service.js");
+const {
+  attachCastViewer, forgetTargetViewport, setTargetViewport,
+  setCastTestHooks, resetCastTestHooks, setCdpServiceOverridesForTests,
+  resetCdpServiceOverridesForTests,
+} = await import("./services/cdp.service.js");
 
-// The viewer we serve is Steel's player, which appends its own params with "?"
-// even when the base URL already has a query string. The parser has to survive
-// that; a pagecast route that silently loses targetId would fail at attach time
-// with no useful signal.
-test("pagecast路由: 解析 targetId 与 token（含玩家的双问号拼接）", () => {
+const SESSION = "sess-1";
+const TARGET = "page-1";
+
+/** Minimal stand-in for a devtools socket: records the CDP commands we send and
+ *  lets the test push events back (frames, close). */
+class FakeSocket extends EventEmitter {
+  readyState = 1;                       // OPEN
+  bufferedAmount = 0;
+  sent: Array<Record<string, any>> = [];
+  constructor(public url = "") {
+    super();
+    setImmediate(() => this.emit("open"));
+  }
+  send(raw: string) {
+    const msg = JSON.parse(raw);
+    this.sent.push(msg);
+    // Chrome replies to every command; setTargetViewport waits for it.
+    if (msg.id !== undefined) {
+      setImmediate(() => this.emit("message", Buffer.from(JSON.stringify({ id: msg.id, result: {} }))));
+    }
+  }
+  close() { this.readyState = 3; this.emit("close"); }
+  terminate() { this.close(); }
+  methods() { return this.sent.map((m) => m.method).filter(Boolean); }
+  pushFrame(data: string, ackId = 7) {
+    this.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame", params: { data, sessionId: ackId },
+    })));
+  }
+}
+
+/** Stand-in for a viewer connection (what the platform BFF proxies to). */
+class FakeViewer extends EventEmitter {
+  readyState = 1;
+  bufferedAmount = 0;
+  received: string[] = [];
+  send(payload: string) { this.received.push(payload); }
+  close() { this.readyState = 3; this.emit("close"); }
+}
+
+function setup(opts: { sockets?: FakeSocket[] } = {}) {
+  const created: FakeSocket[] = [];
+  resetCastTestHooks();
+  setCdpServiceOverridesForTests({
+    executeCdpCommand: async (_s, method) => {
+      if (method === "Target.getTargets") {
+        return { targetInfos: [{ targetId: TARGET, type: "page" }, { targetId: "w-1", type: "worker" }] };
+      }
+      return {};
+    },
+  });
+  setCastTestHooks({
+    cdpBase: { sessionId: SESSION, base: "ws://fake" },
+    socketFactory: () => { const s = opts.sockets?.shift() ?? new FakeSocket(); created.push(s); return s as any; },
+  });
+  return created;
+}
+
+function teardown() {
+  forgetTargetViewport(SESSION);
+  resetCastTestHooks();
+  resetCdpServiceOverridesForTests();
+}
+
+test("并发 attach 只建一个 producer（否则旧的成为永不停歇的僵尸）", async () => {
+  const created = setup();
+  try {
+    const a = new FakeViewer(), b = new FakeViewer();
+    await Promise.all([
+      attachCastViewer(SESSION, TARGET, a as any),
+      attachCastViewer(SESSION, TARGET, b as any),
+    ]);
+    assert.equal(created.length, 1, `expected 1 producer socket, got ${created.length}`);
+    // 两个 viewer 都挂在同一条流上
+    created[0].pushFrame("AAA");
+    assert.equal(a.received.length, 1);
+    assert.equal(b.received.length, 1);
+  } finally { teardown(); }
+});
+
+test("帧先 ack 再广播（未 ack 时 Chrome 不发下一帧）", async () => {
+  const created = setup();
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const before = created[0].sent.length;
+    created[0].pushFrame("AAA", 42);
+    const ack = created[0].sent.slice(before).find((m) => m.method === "Page.screencastFrameAck");
+    assert.ok(ack, "frame must be acked");
+    assert.equal(ack!.params.sessionId, 42);
+    assert.equal(v.received.length, 1);
+  } finally { teardown(); }
+});
+
+test("建流期间 viewer 已断开：不得加入 viewers（否则永不归零、流永不停）", async () => {
+  const created = setup();
+  try {
+    const v = new FakeViewer();
+    const p = attachCastViewer(SESSION, TARGET, v as any);
+    v.close();                      // producer 还在建立中就断开
+    await p;
+    created[0].pushFrame("AAA");
+    assert.equal(v.received.length, 0, "closed viewer must not receive frames");
+    // 且不该留下一个有 viewer 的 producer：再接一个 viewer 应复用同一条流
+    const v2 = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v2 as any);
+    assert.equal(created.length, 1);
+  } finally { teardown(); }
+});
+
+test("慢 viewer 被跳过而不是无限缓冲（帧过期即无价值）", async () => {
+  const created = setup();
+  try {
+    const fast = new FakeViewer(), slow = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, fast as any);
+    await attachCastViewer(SESSION, TARGET, slow as any);
+    slow.bufferedAmount = 8 * 1024 * 1024;      // 已经落后 8MiB
+    created[0].pushFrame("AAA");
+    assert.equal(fast.received.length, 1);
+    assert.equal(slow.received.length, 0);
+  } finally { teardown(); }
+});
+
+test("视口必须在 startScreencast 之前设置（否则第一帧是错的尺寸）", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const methods = created[created.length - 1].methods();
+    const iMetrics = methods.indexOf("Emulation.setDeviceMetricsOverride");
+    const iStart = methods.indexOf("Page.startScreencast");
+    assert.ok(iMetrics >= 0 && iStart >= 0, `missing commands: ${methods.join(",")}`);
+    assert.ok(iMetrics < iStart, `viewport must precede startScreencast: ${methods.join(",")}`);
+  } finally { teardown(); }
+});
+
+test("非 page 类型的 target 不给建流", async () => {
+  setup();
+  try {
+    const v = new FakeViewer();
+    await assert.rejects(() => attachCastViewer(SESSION, "w-1", v as any), /not a page/);
+    await assert.rejects(() => attachCastViewer(SESSION, "nope", v as any), /not found/);
+  } finally { teardown(); }
+});
+
+test("session 清理会带走 producer、viewer 与 socket（三张表不留残渣）", async () => {
+  const created = setup();
+  try {
+    const v = new FakeViewer();
+    await setTargetViewport(SESSION, TARGET, 735, 867);
+    await attachCastViewer(SESSION, TARGET, v as any);
+    forgetTargetViewport(SESSION);
+    assert.equal(v.readyState, 3, "viewer should be closed");
+    assert.ok(created.every((s) => s.readyState === 3), "producer sockets should be closed");
+    // session 级清理连 CDP base 一起丢掉：此后再 attach 必须失败而不是复用死 producer
+    const v2 = new FakeViewer();
+    await assert.rejects(() => attachCastViewer(SESSION, TARGET, v2 as any), /No CDP base/);
+  } finally { teardown(); }
+});
+
+test("pagecast路由: 解析 targetId 与 token（含播放器的双问号拼接）", () => {
   const p = parseSessionWebSocketPath(
     "/ws/sessions/sess-1/pagecast?token=T&targetId=ABC?pageId=ABC");
   assert.equal(p?.wsType, "pagecast");
@@ -25,6 +188,5 @@ test("pagecast路由: 解析 targetId 与 token（含玩家的双问号拼接）
 test("pagecast与被反代的cast是两条路由，互不影响", () => {
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/cast?token=T")?.wsType, "cast");
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/pagecast?token=T")?.wsType, "pagecast");
-  // 未知类型不该被误当成 pagecast
   assert.equal(parseSessionWebSocketPath("/ws/sessions/s/bogus?token=T"), null);
 });
