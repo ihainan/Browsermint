@@ -1422,14 +1422,16 @@ async function fitViewportToContent(
   }
   if (!Number.isFinite(scrollWidth)) return;
   // 2% tolerance: sub-pixel rounding shouldn't trigger a re-layout.
-  // Sharpness: the frame carries exactly `layoutWidth` pixels but gets painted
-  // into `want.width * dpr` physical pixels. If the page has to be scaled down
-  // anyway, render it wide enough that those two match — a 1250px frame shown in
-  // a 1470-physical-pixel pane is upscaled and looks soft for free.
+  // Only widen when the page genuinely does not fit. Folding the DPI bump into
+  // this condition (as a first cut did) widens *every* page to width*dpr, which
+  // halves the apparent text size on responsive sites — they are supposed to lay
+  // out at the pane width, that is the whole point of the feature.
+  if (scrollWidth <= want.width * 1.02) return;
+  // This page is going to be scaled down regardless, so render it wide enough
+  // that the frame carries at least as many pixels as the pane has physical
+  // ones: a 1250px frame shown in 1470 physical pixels is upscaled for free.
   const sharpWidth = Math.round(want.width * (want.deviceScaleFactor || 1));
-  const needed = Math.max(scrollWidth, sharpWidth);
-  if (needed <= want.width * 1.02) return;
-  const layoutWidth = Math.min(Math.round(needed), 3840);
+  const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
   const layoutHeight = Math.min(
     Math.max(Math.round(want.height * (layoutWidth / want.width)), 240), 2160);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {

@@ -205,24 +205,28 @@ test("pagecast与被反代的cast是两条路由，互不影响", () => {
 test("不重排的站点：内容超出视口时缩放适配（而不是留一条横向滚动条）", async () => {
   const created = setup({ scrollWidth: 1250 });   // 视口给 735，页面仍要 1250（百度实测值）
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);   // HiDPI 观看端
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
     await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估
 
     const producerSock = created.at(-1)!;
     const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    assert.equal(metrics.at(-1)!.params.width, 1250, "布局视口应放宽到内容宽度");
+    // max(内容 1250, 栏宽 735 × DPR 2 = 1470) → 1470
+    assert.equal(metrics.at(-1)!.params.width, 1470,
+      "要缩放的页面：布局宽取 max(内容宽, 栏宽×DPR)");
     // 上限必须放行整幅布局：按栏宽封顶会把 1470 的帧又缩回 735，等于白做
     const casts = producerSock.sent.filter((m) => m.method === "Page.startScreencast");
-    assert.equal(casts.at(-1)!.params.maxWidth, 1250);
+    assert.equal(casts.at(-1)!.params.maxWidth, 1470);
   } finally { teardown(); }
 });
 
-test("响应式站点不触发缩放（内容宽度本来就装得下）", async () => {
+// 关键回归：曾把「按 DPR 提分辨率」折进触发条件，结果响应式站点也被放宽到 width×dpr，
+// 正文字号直接减半——那正是这个功能要避免的事。
+test("响应式站点不触发缩放（哪怕 DPR>1 也不能放宽，否则字变一半大）", async () => {
   const created = setup({ scrollWidth: 735 });    // 页面老实按视口重排
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);   // HiDPI 观看端
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
     await new Promise((r) => setTimeout(r, 1600));
@@ -230,6 +234,6 @@ test("响应式站点不触发缩放（内容宽度本来就装得下）", async
     const producerSock = created.at(-1)!;
     const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
     assert.ok(metrics.every((m) => m.params.width === 735),
-      "响应式站点不该被放宽布局视口（那会白白缩小内容）");
+      "响应式站点不该被放宽布局视口（那会把正文字号缩掉一半）");
   } finally { teardown(); }
 });
