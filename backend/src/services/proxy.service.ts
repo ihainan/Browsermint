@@ -1458,6 +1458,43 @@ export async function handleActivateTarget(
   }
 }
 
+export async function handleSetTargetViewport(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string }; Body: { width: number; height: number; deviceScaleFactor?: number } }>,
+  reply: FastifyReply
+) {
+  // 按 **单个 page target** 覆盖视口。与 /resize 的区别：那个改的是 X display + 窗口
+  // 边界（整个 session 共用），把一个 target 缩到嵌入方的宽度会连累其它 target；
+  // Emulation.setDeviceMetricsOverride 走 flat session，只作用于这一个页面。
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: true });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+
+  const body = request.body as { width?: unknown; height?: unknown; deviceScaleFactor?: unknown };
+  const width = Math.floor(Number(body?.width));
+  const height = Math.floor(Number(body?.height));
+  const dsf = body?.deviceScaleFactor === undefined ? 1 : Number(body.deviceScaleFactor);
+  if (!Number.isFinite(width) || !Number.isFinite(height) ||
+      width < 320 || height < 240 || width > 3840 || height > 2160) {
+    return reply.status(400).send({ error: "width/height out of range (320x240..3840x2160)" });
+  }
+  if (!Number.isFinite(dsf) || dsf < 0.5 || dsf > 4) {
+    return reply.status(400).send({ error: "deviceScaleFactor out of range (0.5..4)" });
+  }
+
+  try {
+    await executeCdpCommand(sessionId, "Emulation.setDeviceMetricsOverride", {
+      width, height, deviceScaleFactor: dsf, mobile: false,
+    }, targetId);
+    logSessionEvent(sessionId, "target_viewport", request.ip, request.url, 200,
+      { targetId, width, height, deviceScaleFactor: dsf }, getHttpSource(request));
+    return reply.send({ ok: true, width, height, deviceScaleFactor: dsf });
+  } catch (err) {
+    return reply.status(502).send({ error: String(err) });
+  }
+}
+
 export async function handleNavigate(
   request: FastifyRequest<{ Params: { id: string }; Querystring: { token?: string }; Body: { url: string; targetId: string } }>,
   reply: FastifyReply

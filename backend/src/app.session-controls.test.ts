@@ -613,3 +613,54 @@ test("driving REST endpoints auto-resume a paused session", async () => {
     await closeApp(app);
   }
 });
+
+test("per-target viewport override targets only that page (not the shared display)", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown>; targetId?: string }> = [];
+  const { app } = await makeApp({
+    executeCdpCommand: async (_sessionId, method, params = {}, targetId) => {
+      calls.push({ method, params, targetId });
+      return {};
+    },
+  });
+  const token = sessionToken();
+  try {
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
+      payload: { width: 760, height: 900 },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), { ok: true, width: 760, height: 900, deviceScaleFactor: 1 });
+    // 必须走 flat session 只作用于 page-1；用 /resize 那条路会改整个 session 的显示
+    assert.deepEqual(calls, [{
+      method: "Emulation.setDeviceMetricsOverride",
+      params: { width: 760, height: 900, deviceScaleFactor: 1, mobile: false },
+      targetId: "page-1",
+    }]);
+  } finally {
+    await closeApp(app);
+  }
+});
+
+test("per-target viewport rejects out-of-range sizes before touching CDP", async () => {
+  const calls: string[] = [];
+  const { app } = await makeApp({
+    executeCdpCommand: async (_sessionId, method) => { calls.push(method); return {}; },
+  });
+  const token = sessionToken();
+  try {
+    for (const payload of [{ width: 10, height: 900 }, { width: 760, height: 99999 },
+                           { width: 760, height: 900, deviceScaleFactor: 99 }]) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
+        payload,
+      });
+      assert.equal(res.statusCode, 400);
+    }
+    assert.deepEqual(calls, []);
+  } finally {
+    await closeApp(app);
+  }
+});

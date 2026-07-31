@@ -28,6 +28,7 @@ import {
   handleVncViewer,
   handleWebSocketUpgrade,
   handleSetTargetLabel,
+  handleSetTargetViewport,
   handleGetTargetLabels,
 } from "./services/proxy.service.js";
 
@@ -159,6 +160,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.post("/api/sessions/:id/targets/:targetId/activate", {
     handler: async (request, reply) =>
       handleActivateTarget(request as Parameters<typeof handleActivateTarget>[0], reply),
+  });
+  server.post("/api/sessions/:id/targets/:targetId/viewport", {
+    handler: async (request, reply) =>
+      handleSetTargetViewport(request as Parameters<typeof handleSetTargetViewport>[0], reply),
   });
   server.post("/api/sessions/:id/navigate", {
     handler: async (request, reply) =>
