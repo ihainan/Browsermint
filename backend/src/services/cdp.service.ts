@@ -1176,6 +1176,7 @@ export function forgetTargetViewport(sessionId: string, targetId?: string): void
     if (producer) {
       producer.closed = true;
       if (producer.stopTimer) clearTimeout(producer.stopTimer);
+      if (producer.firstFrameTimer) clearTimeout(producer.firstFrameTimer);
       producer.lastFrame = null;
       for (const viewer of producer.viewers) {
         try { viewer.close(); } catch { /* already gone */ }
@@ -1339,6 +1340,7 @@ type CastProducer = {
   title: string;
   cmdId: number;
   stopTimer: NodeJS.Timeout | null;
+  firstFrameTimer: NodeJS.Timeout | null;
   closed: boolean;
 };
 
@@ -1354,6 +1356,8 @@ const CAST_QUALITY = 70;
 // in the workspace pane disconnects and reconnects within a second, and tearing
 // the stream down each time costs a visible black flash.
 const PRODUCER_LINGER_MS = 5000;
+// How long to wait for the first frame before forcing the tab to the front.
+const FIRST_FRAME_FALLBACK_MS = 3000;
 
 function producerSend(p: CastProducer, method: string, params: Record<string, unknown> = {}): void {
   if (p.socket.readyState !== WebSocket.OPEN) return;
@@ -1386,7 +1390,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
 
   const p: CastProducer = {
     socket, viewers: new Set(), lastFrame: null,
-    url: "", title: "", cmdId: 1, stopTimer: null, closed: false,
+    url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1397,7 +1401,11 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       const ackId = msg.params?.sessionId;
       // Ack first: Chrome stalls the stream until the previous frame is acked.
       if (ackId !== undefined) producerSend(p, "Page.screencastFrameAck", { sessionId: ackId });
-      if (data) { p.lastFrame = data; broadcastFrame(p, data); }
+      if (data) {
+        if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
+        p.lastFrame = data;
+        broadcastFrame(p, data);
+      }
       return;
     }
     if (msg.method === "Page.frameNavigated" && msg.params?.frame?.parentId === undefined) {
@@ -1414,6 +1422,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     p.closed = true;
     p.lastFrame = null;          // release the retained JPEG
     if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
+    if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
     if (producers.get(targetKey(sessionId, targetId)) === p) {
       producers.delete(targetKey(sessionId, targetId));
     }
@@ -1452,6 +1461,25 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     format: "jpeg", quality: CAST_QUALITY,
     ...(want ? { maxWidth: want.width, maxHeight: want.height } : {}),
   });
+  // setWebLifecycleState is the polite way to make Chrome consider this page
+  // active, but it is not sufficient in every state we've observed (a target
+  // that Chrome treats as fully backgrounded stays silent). If no frame arrives
+  // shortly, fall back to actually activating the tab — worse for a concurrently
+  // working agent, but a viewer with no picture at all is worse still.
+  p.firstFrameTimer = setTimeout(() => {
+    p.firstFrameTimer = null;
+    if (p.closed || p.lastFrame) return;
+    console.info(`[cast] no frame for ${targetId} yet, activating target`);
+    executeCdpCommand(sessionId, "Target.activateTarget", { targetId })
+      .then(() => {
+        if (p.closed) return;
+        producerSend(p, "Page.startScreencast", {
+          format: "jpeg", quality: CAST_QUALITY,
+          ...(want ? { maxWidth: want.width, maxHeight: want.height } : {}),
+        });
+      })
+      .catch((err) => console.warn(`[cast] activate fallback failed for ${targetId}:`, err));
+  }, FIRST_FRAME_FALLBACK_MS);
   console.info(`[cast] producer started for ${targetId}` + (want ? ` @${want.width}x${want.height}` : ""));
   return p;
 }
