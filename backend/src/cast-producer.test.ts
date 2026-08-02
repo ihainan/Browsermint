@@ -619,3 +619,56 @@ test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async
     assert.equal(datas.at(-1), "SHARP_STILL", "静止时高清帧应到达 viewer");
   } finally { teardown(); }
 });
+
+// ── 放宽布局跨 producer 记忆（2026-08-02 用户实测：切走回来必放大缩小一次）────
+// fit 放宽的布局原本只活在 producer 里：viewer 全走 + linger 到期拆掉 producer 后
+// 布局丢失，下次建流先按基础布局起（页面重排、内容显大），1.2s 后 fit 又放宽回去
+// （再重排、内容显小）。现在放宽结果按 target 记住，重建的 producer 直接用它起流。
+test("producer 重建按记住的放宽布局起流，fit 复核不再重排", async () => {
+  const created = setup({ scrollWidth: 1250 });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v1 = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v1 as any);
+    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估：735 → 1470
+    const sock1 = created.at(-1)!;   // [0]=viewport socket, [1]=producer
+    const widened = sock1.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
+    assert.equal(widened.params.width, 1470, "前置：fit 已放宽到 1470");
+
+    // producer 意外死掉（等价于 linger 到期拆流，跳过 5s 等待）
+    sock1.close();
+    const v2 = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v2 as any);
+    const sock2 = created.at(-1)!;
+    assert.notEqual(sock2, sock1, "应新建 producer");
+    const metrics0 = sock2.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride")[0];
+    assert.equal(metrics0.params.width, 1470,
+      "重建的 producer 必须直接按放宽布局起流，而不是基础 735（那会让页面重排两次）");
+    const cast0 = sock2.sent.filter((m) => m.method === "Page.startScreencast")[0];
+    assert.equal(cast0.params.maxWidth, 1470, "帧上限同样按放宽布局");
+
+    // 喂一帧让 producer 知道当前布局，再等 fit 复核：同布局不得 stop/start
+    sock2.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 1470, deviceHeight: 1734 } },
+    })));
+    await new Promise((r) => setTimeout(r, 1600));
+    const stops = sock2.sent.filter((m) => m.method === "Page.stopScreencast");
+    assert.equal(stops.length, 0, "fit 复核发现布局已一致：不许再 stop/start 重排页面");
+  } finally { teardown(); }
+});
+
+test("显式改视口（拖分栏/换缩放档）会作废记住的放宽布局，由 fit 重新推导", async () => {
+  const created = setup({ scrollWidth: 1250 });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v1 = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v1 as any);
+    await new Promise((r) => setTimeout(r, 1600));   // fit → 1470
+    await setTargetViewport(SESSION, TARGET, 900, 867, 2);   // 用户拖宽了栏
+    // 改视口后 producer 收到的 metrics 应是新基础布局 900，而不是按旧栏宽算的 1470
+    const prod = created[1];   // [0]=viewport socket, [1]=producer
+    const m = prod.sent.filter((x) => x.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
+    assert.equal(m.params.width, 900, "旧放宽布局必须作废（它按 735 栏宽推导）");
+  } finally { teardown(); }
+});

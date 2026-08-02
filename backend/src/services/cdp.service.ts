@@ -1171,6 +1171,12 @@ function layoutSize(want: ViewportWant): { width: number; height: number } {
     height: Math.min(Math.max(Math.round(want.height / z), 240), 2160),
   };
 }
+// fitViewportToContent 放宽后的布局，按 target 记住。它原本只活在 producer 里：
+// viewer 全走 + 5s linger 到期 → producer 拆掉 → 放宽布局丢失 → 下次建流先按基础
+// 布局起（页面重排、内容显大），1.2s 后 fit 又放宽回去（再重排、内容显小）——
+// 用户每次切走再回来都看到一次「放大再缩小」（2026-08-02 Playwright 实测:
+// 恢复后帧宽 661 → 1250）。记住它，重建的 producer 直接按放宽布局起流。
+const fittedLayouts = new Map<string, { width: number; height: number }>();
 const sessionCdpBases = new Map<string, string>();                    // sessionId -> ws://host:9223
 
 function targetKey(sessionId: string, targetId: string): string {
@@ -1189,6 +1195,7 @@ export function forgetTargetViewport(sessionId: string, targetId?: string): void
     if (sock) { try { sock.terminate(); } catch { /* already gone */ } }
     targetViewportSockets.delete(k);
     targetViewports.delete(k);
+    fittedLayouts.delete(k);
     viewportSocketsOpening.delete(k);
     producersStarting.delete(k);
     const producer = producers.get(k);
@@ -1303,6 +1310,9 @@ export async function setTargetViewport(
   const sock = await openViewportSocket(sessionId, targetId);
   const want: ViewportWant = { width, height, deviceScaleFactor, zoom };
   targetViewports.set(targetKey(sessionId, targetId), want);
+  // Pane size / zoom changed: the remembered widened layout was computed against
+  // the old base and no longer applies. The fit pass re-derives it if still needed.
+  fittedLayouts.delete(targetKey(sessionId, targetId));
   const layout = layoutSize(want);
   const id = viewportCmdId++;
   // Wait for the reply: a silent send hides protocol errors, and "the viewport
@@ -1496,13 +1506,20 @@ async function fitViewportToContent(
     return;                     // 读不到就维持原样，画面仍在，只是可能有横向滚动
   }
   if (!Number.isFinite(scrollWidth)) return;
+  const fitKey = targetKey(sessionId, targetId);
   // 2% tolerance: sub-pixel rounding shouldn't trigger a re-layout.
   // Only widen when the page genuinely does not fit. Folding the DPI bump into
   // this condition (as a first cut did) widens *every* page to width*dpr, which
   // halves the apparent text size on responsive sites — they are supposed to lay
   // out at the pane width, that is the whole point of the feature.
   const base = layoutSize(want);
-  if (scrollWidth <= base.width * 1.02) return;
+  if (scrollWidth <= base.width * 1.02) {
+    // Content fits the base layout → any remembered widened layout is stale.
+    // Keeping it would make the next producer start wide on a page that no
+    // longer needs it, and this early return would never take it back down.
+    fittedLayouts.delete(fitKey);
+    return;
+  }
   // This page is going to be scaled down regardless, so render it wide enough
   // that the frame carries at least as many pixels as the pane has physical
   // ones: a 1250px frame shown in 1470 physical pixels is upscaled for free.
@@ -1510,6 +1527,13 @@ async function fitViewportToContent(
   const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
   const layoutHeight = Math.min(
     Math.max(Math.round(base.height * (layoutWidth / base.width)), 240), 2160);
+  fittedLayouts.set(fitKey, { width: layoutWidth, height: layoutHeight });
+  // Already streaming at exactly this layout (a rebuilt producer started from the
+  // remembered fit, or a repeat trigger): reconfiguring again would stop/start the
+  // stream and reflow the page for nothing.
+  if (p.layout
+      && Math.abs(p.layout.width - layoutWidth) <= LAYOUT_MATCH_TOLERANCE_PX
+      && Math.abs(p.layout.height - layoutHeight) <= LAYOUT_MATCH_TOLERANCE_PX) return;
   beginReconfigure(p, layoutWidth, layoutHeight);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutWidth, height: layoutHeight,
@@ -1764,7 +1788,10 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     }
     if (msg.method === "Page.frameNavigated" && msg.params?.frame?.parentId === undefined) {
       p.url = msg.params.frame.url ?? p.url;
-      // A different page may have a different minimum layout width.
+      // A different page may have a different minimum layout width — the layout
+      // remembered for the previous page must not survive the navigation (a
+      // producer rebuilt before the fit pass below would start from it).
+      fittedLayouts.delete(targetKey(sessionId, targetId));
       const wantNow = targetViewports.get(targetKey(sessionId, targetId));
       if (wantNow) {
         setTimeout(() => {
@@ -1806,7 +1833,12 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // Order matters: viewport first, then start the stream — the frames must be
   // rendered at the size we asked for, not resized after the fact.
   const want = targetViewports.get(targetKey(sessionId, targetId));
-  const layout = want ? layoutSize(want) : null;
+  // A rebuilt producer must start at the layout the page was last streaming at.
+  // Starting at the base layout reflows the page (content jumps bigger), then the
+  // fit pass 1.2s later widens it back (content jumps smaller) — a guaranteed
+  // zoom-in/zoom-out on every tab-away-and-back once the linger window expired.
+  const fitted = fittedLayouts.get(targetKey(sessionId, targetId));
+  const layout = fitted ?? (want ? layoutSize(want) : null);
   producerSend(p, "Page.enable");
   installPasswordWatch(p);
   // Chrome only emits screencast frames for a page it considers active; a
@@ -1824,7 +1856,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   }
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY,
-    ...(want ? castCaps(want) : {}),
+    ...(layout ? { maxWidth: layout.width, maxHeight: layout.height } : {}),
   });
   // setWebLifecycleState is the polite way to make Chrome consider this page
   // active, but it is not sufficient in every state we've observed (a target
@@ -1846,7 +1878,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         if (p.closed) return;
         producerSend(p, "Page.startScreencast", {
           format: "jpeg", quality: CAST_QUALITY,
-          ...(want ? castCaps(want) : {}),
+          ...(layout ? { maxWidth: layout.width, maxHeight: layout.height } : {}),
         });
       })
       .catch((err) => console.warn(`[cast] activate fallback failed for ${targetId}:`, err));
