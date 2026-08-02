@@ -523,3 +523,40 @@ test("遮罩期间绝不抓高清静帧（比直接发流更糟：把密码页�
     assert.equal(shot, undefined, "遮罩期间不得抓图");
   } finally { teardown(); }
 });
+
+test("落后的连接不会饿死：缓冲排空后补发最后一帧（不是永远停在旧画面）", async () => {
+  const created = setup();
+  try {
+    const slow = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, slow as any);
+    slow.received.length = 0;
+    slow.bufferedAmount = 60_000;         // 正忙
+    created[0].pushFrame("LAST");         // 之后页面静止，不会再有帧
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(slow.received, [], "忙的时候先不发");
+    slow.bufferedAmount = 0;              // 排空了，但没有任何新帧来触发发送
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(JSON.parse(slow.received[0]).data, "LAST",
+      "必须自己补发，否则页面静止后这个连接永远停在更早的画面上");
+  } finally { teardown(); }
+});
+
+test("新连上的观看者拿到缓存帧时，必须同时拿到布局尺寸（否则能看不能点）", async () => {
+  const created = setup();
+  try {
+    const first = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, first as any);
+    created[0].emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "CACHED", sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } },
+    })));
+    await new Promise((r) => setTimeout(r, 20));
+
+    const joiner = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, joiner as any);
+    const painted = JSON.parse(joiner.received[0]);
+    assert.equal(painted.data, "CACHED");
+    assert.equal(painted.layoutWidth, 800, "没有布局尺寸，viewer 会拒绝一切输入");
+    assert.equal(painted.layoutHeight, 600);
+  } finally { teardown(); }
+});

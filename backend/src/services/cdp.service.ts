@@ -1363,7 +1363,11 @@ export async function reapplyTargetViewport(sessionId: string, targetId: string)
 type CastProducer = {
   socket: WebSocket;
   viewers: Set<WebSocket>;
-  lastFrame: string | null;      // most recent jpeg, so a new viewer paints immediately
+  /// Most recent jpeg *with the metadata it was rendered under*, so a joining
+  /// viewer paints immediately **and can map clicks**. Storing only the bytes was
+  /// a bug: a joiner on a static page got a picture with no layout, and since a
+  /// still page produces no further frames it could stay un-clickable forever.
+  lastFrame: { data: string; revision: number; width: number; height: number } | null;
   url: string;
   title: string;
   cmdId: number;
@@ -1540,6 +1544,9 @@ function beginReconfigure(p: CastProducer, width: number, height: number): void 
   p.reconfigureTimer = setTimeout(() => {
     if (p.closed || !p.pendingLayout) return;
     console.warn("[cast] reconfigure not confirmed by any frame; publishing anyway");
+    // The cached frame predates this layout; handing it to a joiner under the new
+    // revision would let stale coordinates pass validation.
+    p.lastFrame = null;
     finishReconfigure(p);
   }, RECONFIGURE_CONFIRM_TIMEOUT_MS);
 }
@@ -1607,13 +1614,50 @@ async function captureSharpStill(p: CastProducer): Promise<void> {
     if (!data) return;
     // Anything that happened while the screenshot was being taken invalidates it.
     if (p.closed || p.masked || p.pendingLayout || p.viewportRevision !== at) return;
-    p.lastFrame = data;      // joiners get the crisp one too
+    // joiners get the crisp one too — with the layout it was taken at
+    p.lastFrame = { data, revision: p.viewportRevision, width, height };
     broadcastFrame(p, data, { skipIdleReschedule: true });
   } catch {
     /* a failed still just means the soft stream frame stays on screen */
   } finally {
     p.stillInFlight = false;
   }
+}
+
+// Skipping a frame is only safe if another one is coming. It usually is — but not
+// always: the last frame before a page goes still, and the sharp still that follows
+// it, can both land while the socket is busy, and then nothing ever triggers a send
+// again (the still deliberately does not reschedule itself). Non-frame messages such
+// as `masked` also occupy `bufferedAmount` and can cause the same stall. So keep one
+// overwritable frame per viewer and retry once the socket drains.
+const viewerPendingFrame = new WeakMap<WebSocket, string>();
+const viewerDrainTimer = new WeakMap<WebSocket, NodeJS.Timeout>();
+const DRAIN_RETRY_MS = 50;
+
+function sendLatestFrame(viewer: WebSocket, payload: string): void {
+  if (viewer.readyState !== WebSocket.OPEN) return;
+  if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) {
+    viewerPendingFrame.set(viewer, payload);   // overwrite: only the newest matters
+    scheduleDrainRetry(viewer);
+    return;
+  }
+  viewerPendingFrame.delete(viewer);
+  viewer.send(payload);
+}
+
+function scheduleDrainRetry(viewer: WebSocket): void {
+  if (viewerDrainTimer.has(viewer)) return;
+  const timer = setTimeout(() => {
+    viewerDrainTimer.delete(viewer);
+    const held = viewerPendingFrame.get(viewer);
+    if (held === undefined) return;
+    if (viewer.readyState !== WebSocket.OPEN) { viewerPendingFrame.delete(viewer); return; }
+    if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) { scheduleDrainRetry(viewer); return; }
+    viewerPendingFrame.delete(viewer);
+    viewer.send(held);
+  }, DRAIN_RETRY_MS);
+  timer.unref?.();
+  viewerDrainTimer.set(viewer, timer);
 }
 
 function broadcastFrame(
@@ -1631,11 +1675,7 @@ function broadcastFrame(
     layoutWidth: p.layout?.width ?? null,
     layoutHeight: p.layout?.height ?? null,
   });
-  for (const viewer of p.viewers) {
-    if (viewer.readyState !== WebSocket.OPEN) continue;
-    if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) continue;
-    viewer.send(payload);
-  }
+  for (const viewer of p.viewers) sendLatestFrame(viewer, payload);
   //每帧都重排空闲计时：动的时候永远不触发，一停下来就补高清。
   if (!opts.skipIdleReschedule) scheduleIdleStill(p);
 }
@@ -1683,7 +1723,14 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         // While masked we neither ship nor **retain** the frame: a cached frame
         // would be handed to the next viewer that connects, which is exactly the
         // password screen we are trying not to show.
-        if (!p.masked) p.lastFrame = data;
+        // Never cache mid-reconfigure: those pixels belong to the old layout, and
+        // the timeout fallback would later hand them out stamped with a new revision.
+        if (!p.masked && !p.pendingLayout && p.layout) {
+          p.lastFrame = {
+            data, revision: p.viewportRevision,
+            width: p.layout.width, height: p.layout.height,
+          };
+        }
         broadcastFrame(p, data);
       }
       return;
@@ -1967,11 +2014,13 @@ export async function attachCastViewer(
   // frozen (or blank) picture with no explanation.
   if (producer.masked) {
     viewer.send(JSON.stringify({ type: "masked", masked: true }));
-  } else if (producer.lastFrame) {
+  } else if (producer.lastFrame && !producer.pendingLayout) {
     // Paint something immediately instead of waiting for the next frame.
     viewer.send(JSON.stringify({
-      data: producer.lastFrame, url: producer.url, title: producer.title, favicon: null,
-      revision: producer.viewportRevision,
+      data: producer.lastFrame.data, url: producer.url, title: producer.title, favicon: null,
+      revision: producer.lastFrame.revision,
+      layoutWidth: producer.lastFrame.width,
+      layoutHeight: producer.lastFrame.height,
     }));
   }
   // Input is accepted only from a connection that carries a live lease. Viewers
