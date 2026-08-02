@@ -560,3 +560,62 @@ test("新连上的观看者拿到缓存帧时，必须同时拿到布局尺寸�
     assert.equal(painted.layoutHeight, 600);
   } finally { teardown(); }
 });
+
+// ── 高清静帧与动帧的竞态（codex 复审 2026-08-02）────────────────────────────
+// 静帧截图是慢往返：期间若页面又动了（新动帧已广播），迟到的静帧再发出去就是
+// 把旧画面盖在新画面上。frameSeq 在截图开始时固化，动过就丢弃这张静帧。
+
+/** captureScreenshot 的回复由测试手动控制，其余命令照常自动回。 */
+class StillSocket extends FakeSocket {
+  answerShot: ((data: string) => void) | null = null;
+  send(raw: string) {
+    const msg = JSON.parse(raw);
+    if (msg.method === "Page.captureScreenshot") {
+      this.sent.push(msg);
+      this.answerShot = (data: string) => this.emit("message",
+        Buffer.from(JSON.stringify({ id: msg.id, result: { data } })));
+      return;
+    }
+    super.send(raw);
+  }
+  pushStreamFrame(data: string) {
+    this.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data, sessionId: 9, metadata: { deviceWidth: 800, deviceHeight: 600 } },
+    })));
+  }
+}
+
+test("截图期间来了新动帧：迟到的静帧作废，不得盖在新画面上", async () => {
+  const created = setup({ sockets: [new StillSocket()] });
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created[0] as StillSocket;
+    sock.pushStreamFrame("MOVE1");
+    await new Promise((r) => setTimeout(r, 400));   // 250ms 静止 → 触发截图
+    assert.ok(sock.answerShot, "idle 后应发起高清截图");
+    sock.pushStreamFrame("MOVE2");                  // 截图往返期间页面又动了
+    sock.answerShot!("STALE_STILL");
+    await new Promise((r) => setTimeout(r, 20));
+    const datas = v.received.map((x) => JSON.parse(x).data).filter(Boolean);
+    assert.ok(!datas.includes("STALE_STILL"), "过期静帧必须被丢弃");
+    assert.equal(datas.at(-1), "MOVE2", "屏上留的必须是最新动帧");
+  } finally { teardown(); }
+});
+
+test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async () => {
+  const created = setup({ sockets: [new StillSocket()] });
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created[0] as StillSocket;
+    sock.pushStreamFrame("MOVE1");
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(sock.answerShot, "idle 后应发起高清截图");
+    sock.answerShot!("SHARP_STILL");
+    await new Promise((r) => setTimeout(r, 20));
+    const datas = v.received.map((x) => JSON.parse(x).data).filter(Boolean);
+    assert.equal(datas.at(-1), "SHARP_STILL", "静止时高清帧应到达 viewer");
+  } finally { teardown(); }
+});

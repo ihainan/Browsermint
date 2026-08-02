@@ -1398,6 +1398,11 @@ type CastProducer = {
   /// Idle → grab one high-resolution still (see SHARP_STILL_SCALE).
   idleTimer: NodeJS.Timeout | null;
   stillInFlight: boolean;
+  /// Counts stream frames. The sharp still records it before the (slow) screenshot
+  /// round-trip and bails if it moved: `viewportRevision` alone only catches layout
+  /// changes, so a stream frame arriving mid-capture would otherwise be painted
+  /// over by an older still moments later (codex review 2026-08-02).
+  frameSeq: number;
   /// Serialises input so `mousePressed → mouseMoved → mouseReleased` cannot be
   /// reordered by their independent lease lookups completing out of order (High-2).
   inputChain: Promise<void>;
@@ -1601,6 +1606,7 @@ async function captureSharpStill(p: CastProducer): Promise<void> {
   if (p.viewers.size === 0) return;
   p.stillInFlight = true;
   const at = p.viewportRevision;
+  const seqAt = p.frameSeq;
   const { width, height } = p.layout;
   try {
     // Must run on the producer's own CDP session: the viewport is per-session
@@ -1612,8 +1618,10 @@ async function captureSharpStill(p: CastProducer): Promise<void> {
     });
     const data = res?.data as string | undefined;
     if (!data) return;
-    // Anything that happened while the screenshot was being taken invalidates it.
-    if (p.closed || p.masked || p.pendingLayout || p.viewportRevision !== at) return;
+    // Anything that happened while the screenshot was being taken invalidates it —
+    // including a newer *stream* frame: the page moved, this still shows the past.
+    if (p.closed || p.masked || p.pendingLayout || p.viewportRevision !== at
+        || p.frameSeq !== seqAt) return;
     // joiners get the crisp one too — with the layout it was taken at
     p.lastFrame = { data, revision: p.viewportRevision, width, height };
     broadcastFrame(p, data, { skipIdleReschedule: true });
@@ -1695,7 +1703,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
-    layout: null, idleTimer: null, stillInFlight: false,
+    layout: null, idleTimer: null, stillInFlight: false, frameSeq: 0,
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1731,6 +1739,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
             width: p.layout.width, height: p.layout.height,
           };
         }
+        p.frameSeq++;
         broadcastFrame(p, data);
       }
       return;
