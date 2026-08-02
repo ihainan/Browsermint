@@ -460,3 +460,66 @@ test("High-3：新 revision 只在确认属于新布局的帧到达后才发布"
     assert.equal(frame.revision, 2, "确认帧到达时才 +1");
   } finally { teardown(); }
 });
+
+test("最新帧优先：socket 里还有没发完的帧时，跳过而不是排队", async () => {
+  const created = setup();
+  try {
+    const slow = new FakeViewer();
+    const fast = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, slow as any);
+    await attachCastViewer(SESSION, TARGET, fast as any);
+    slow.received.length = 0; fast.received.length = 0;
+
+    slow.bufferedAmount = 60_000;        // 上一帧还没发完
+    created[0].pushFrame("F1");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(slow.received, [],
+      "落后的连接不该继续排队——排进去的那一帧发到时早就过期了");
+    assert.equal(fast.received.length, 1, "没落后的连接照常收帧");
+
+    slow.bufferedAmount = 0;             // 追上了
+    created[0].pushFrame("F2");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(JSON.parse(slow.received[0]).data, "F2",
+      "追上之后直接拿到最新的一帧，不补发旧的");
+  } finally { teardown(); }
+});
+
+// 空闲高清帧：截图流的帧尺寸恒等于 CSS 视口（实测，dsf 无效），所以流本身没法更清晰；
+// captureScreenshot 的 clip.scale 才认。停下来补一张 2x 的图。
+test("静止后补一张 2x 高清帧，并按当前布局裁切", async () => {
+  const created = setup();
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    created[0].emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "SOFT", sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } },
+    })));
+    await new Promise((r) => setTimeout(r, 400));   // 超过空闲阈值
+    const shot = created[0].sent.find((m) => m.method === "Page.captureScreenshot");
+    assert.ok(shot, "静止后应抓一张高清静帧");
+    assert.equal(shot!.params.clip.scale, 2);
+    assert.equal(shot!.params.clip.width, 800, "裁切区域必须是流当前的布局");
+    assert.equal(shot!.params.clip.height, 600);
+  } finally { teardown(); }
+});
+
+test("遮罩期间绝不抓高清静帧（比直接发流更糟：把密码页拍得更清楚）", async () => {
+  const created = setup();
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    created[0].emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "SOFT", sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } },
+    })));
+    // 密码框聚焦
+    created[0].emit("message", Buffer.from(JSON.stringify({
+      method: "Runtime.bindingCalled", params: { name: "__browsermint_password_focus", payload: "1" },
+    })));
+    await new Promise((r) => setTimeout(r, 400));
+    const shot = created[0].sent.find((m) => m.method === "Page.captureScreenshot");
+    assert.equal(shot, undefined, "遮罩期间不得抓图");
+  } finally { teardown(); }
+});

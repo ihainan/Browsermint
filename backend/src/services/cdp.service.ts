@@ -1196,6 +1196,8 @@ export function forgetTargetViewport(sessionId: string, targetId?: string): void
       producer.closed = true;
       if (producer.stopTimer) clearTimeout(producer.stopTimer);
       if (producer.firstFrameTimer) clearTimeout(producer.firstFrameTimer);
+      if (producer.reconfigureTimer) clearTimeout(producer.reconfigureTimer);
+      clearIdleStill(producer);
       producer.lastFrame = null;
       for (const viewer of producer.viewers) {
         try { viewer.close(); } catch { /* already gone */ }
@@ -1386,6 +1388,12 @@ type CastProducer = {
   /// as current and let stale coordinates pass validation (High-3).
   pendingLayout: { width: number; height: number } | null;
   reconfigureTimer: NodeJS.Timeout | null;
+  /// Layout the current stream is rendering at, learned from frame metadata.
+  /// Needed to ask for a still of exactly the same region.
+  layout: { width: number; height: number } | null;
+  /// Idle → grab one high-resolution still (see SHARP_STILL_SCALE).
+  idleTimer: NodeJS.Timeout | null;
+  stillInFlight: boolean;
   /// Serialises input so `mousePressed → mouseMoved → mouseReleased` cannot be
   /// reordered by their independent lease lookups completing out of order (High-2).
   inputChain: Promise<void>;
@@ -1418,10 +1426,16 @@ function producerSend(p: CastProducer, method: string, params: Record<string, un
   p.socket.send(JSON.stringify({ id: p.cmdId++, method, params }));
 }
 
-// A viewer on a slow link must not turn into unbounded memory: video frames are
-// worthless once stale, so skip this frame for anyone already behind instead of
-// queueing (the next frame supersedes it anyway).
-const VIEWER_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
+// Latest frame wins. A frame still sitting in the socket buffer has already been
+// superseded by the one we are about to send, and a queued WebSocket message
+// cannot be replaced — so skip rather than queue.
+//
+// This used to allow 4 MiB of backlog, which at ~60 KiB a frame is roughly 60
+// frames: the picture stayed "live" but ran seconds behind the page, and that lag
+// was most of what read as sluggishness. Zero means at most one frame in flight
+// per viewer; a slow link then simply gets a lower frame rate of *current*
+// frames instead of a smooth replay of the past.
+const VIEWER_BUFFER_LIMIT_BYTES = 0;
 
 // Screencast frames are always the CSS size of the visual viewport: measured,
 // deviceScaleFactor makes no difference (dsf=1 and dsf=2 produce byte-identical
@@ -1546,7 +1560,65 @@ function frameMatchesPendingLayout(p: CastProducer, metadata: any): boolean {
     && Math.abs(h - p.pendingLayout.height) <= LAYOUT_MATCH_TOLERANCE_PX;
 }
 
-function broadcastFrame(p: CastProducer, data: string): void {
+// Screencast frames are always the CSS size of the visual viewport — measured, and
+// neither deviceScaleFactor nor setPageScaleFactor changes it. So on a 2x display
+// every frame is upscaled, and JPEG ringing lands exactly on text edges. There is
+// no way to make the *stream* sharper.
+//
+// `Page.captureScreenshot` is a different command and its `clip.scale` does apply.
+// So: while the page is moving, ship the (soft) stream; the moment it settles,
+// grab one screenshot at 2x and send it as the current frame. Motion stays smooth,
+// still content becomes crisp — the same trade every remote-desktop protocol makes.
+const SHARP_STILL_SCALE = 2;
+const SHARP_STILL_QUALITY = 92;
+const IDLE_BEFORE_STILL_MS = 250;
+// Bound the payload: a 2x still of a very wide fitted layout gets big fast.
+const SHARP_STILL_MAX_WIDTH = 2560;
+
+function clearIdleStill(p: CastProducer): void {
+  if (p.idleTimer) { clearTimeout(p.idleTimer); p.idleTimer = null; }
+}
+
+function scheduleIdleStill(p: CastProducer): void {
+  clearIdleStill(p);
+  if (p.closed || p.masked || p.pendingLayout || !p.layout) return;
+  if (Math.round(p.layout.width * SHARP_STILL_SCALE) > SHARP_STILL_MAX_WIDTH) return;
+  p.idleTimer = setTimeout(() => { void captureSharpStill(p); }, IDLE_BEFORE_STILL_MS);
+}
+
+async function captureSharpStill(p: CastProducer): Promise<void> {
+  // Re-check everything: 250ms is plenty of time for the page to be masked, torn
+  // down or re-laid-out. Capturing while masked would hand out the password screen
+  // at higher resolution than the stream we just refused to send.
+  if (p.closed || p.masked || p.pendingLayout || p.stillInFlight || !p.layout) return;
+  if (p.viewers.size === 0) return;
+  p.stillInFlight = true;
+  const at = p.viewportRevision;
+  const { width, height } = p.layout;
+  try {
+    // Must run on the producer's own CDP session: the viewport is per-session
+    // state, so a screenshot taken from another connection can come back with a
+    // different layout than the stream is showing.
+    const res = await producerRequest(p, "Page.captureScreenshot", {
+      format: "jpeg", quality: SHARP_STILL_QUALITY, captureBeyondViewport: false,
+      clip: { x: 0, y: 0, width, height, scale: SHARP_STILL_SCALE },
+    });
+    const data = res?.data as string | undefined;
+    if (!data) return;
+    // Anything that happened while the screenshot was being taken invalidates it.
+    if (p.closed || p.masked || p.pendingLayout || p.viewportRevision !== at) return;
+    p.lastFrame = data;      // joiners get the crisp one too
+    broadcastFrame(p, data, { skipIdleReschedule: true });
+  } catch {
+    /* a failed still just means the soft stream frame stays on screen */
+  } finally {
+    p.stillInFlight = false;
+  }
+}
+
+function broadcastFrame(
+  p: CastProducer, data: string, opts: { skipIdleReschedule?: boolean } = {}
+): void {
   if (p.masked) return;   // password field focused: ship nothing at all
   if (p.pendingLayout) return;   // mid-reconfigure: these pixels are the old layout
   const payload = JSON.stringify({
@@ -1558,6 +1630,8 @@ function broadcastFrame(p: CastProducer, data: string): void {
     if (viewer.bufferedAmount > VIEWER_BUFFER_LIMIT_BYTES) continue;
     viewer.send(payload);
   }
+  //每帧都重排空闲计时：动的时候永远不触发，一停下来就补高清。
+  if (!opts.skipIdleReschedule) scheduleIdleStill(p);
 }
 
 async function createProducer(sessionId: string, targetId: string): Promise<CastProducer> {
@@ -1575,6 +1649,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
+    layout: null, idleTimer: null, stillInFlight: false,
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1591,6 +1666,13 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         // new revision now (and only now), then let this frame through with it.
         if (p.pendingLayout && frameMatchesPendingLayout(p, msg.params?.metadata)) {
           finishReconfigure(p);
+        }
+        // Learn the layout the stream is actually rendering at — the sharp-still
+        // capture needs to clip exactly this region.
+        const mw = Number(msg.params?.metadata?.deviceWidth);
+        const mh = Number(msg.params?.metadata?.deviceHeight);
+        if (Number.isFinite(mw) && Number.isFinite(mh) && mw > 0 && mh > 0) {
+          p.layout = { width: Math.round(mw), height: Math.round(mh) };
         }
         // While masked we neither ship nor **retain** the frame: a cached frame
         // would be handed to the next viewer that connects, which is exactly the
@@ -1610,7 +1692,10 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
             viewer.send(JSON.stringify({ type: "masked", masked: on }));
           }
         }
-        if (on) p.lastFrame = null;   // don't let a new viewer paint the old frame
+        // Cancel any pending sharp still as well: captureSharpStill re-checks
+        // `masked` before firing, but leaving the timer armed is one more way for
+        // a future edit to leak the password screen at higher resolution.
+        if (on) { clearIdleStill(p); p.lastFrame = null; }   // don't let a new viewer paint the old frame
         console.info(`[cast] ${targetId}: password field ${on ? "focused — masking" : "left — unmasked"}`);
       }
       return;
@@ -1637,6 +1722,8 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     p.lastFrame = null;          // release the retained JPEG
     if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
     if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
+    if (p.reconfigureTimer) { clearTimeout(p.reconfigureTimer); p.reconfigureTimer = null; }
+    clearIdleStill(p);
     if (producers.get(targetKey(sessionId, targetId)) === p) {
       producers.delete(targetKey(sessionId, targetId));
     }
