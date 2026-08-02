@@ -1344,7 +1344,10 @@ export async function setTargetViewport(
 export async function reapplyTargetViewport(sessionId: string, targetId: string): Promise<boolean> {
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!want) return false;
-  await setTargetViewport(sessionId, targetId, want.width, want.height, want.deviceScaleFactor);
+  // `zoom` must be carried through: omitting it silently re-applies at 100% and
+  // throws away whatever gear the user picked.
+  await setTargetViewport(sessionId, targetId, want.width, want.height,
+                          want.deviceScaleFactor, want.zoom);
   return true;
 }
 
@@ -1372,8 +1375,23 @@ type CastProducer = {
   /// Password field focused → stop shipping frames entirely. A rendered password
   /// is dots, but the surrounding page (and typing feedback) still leaks.
   masked: boolean;
-  /// Mouse buttons / keys currently held by the controller, so a disconnect can
-  /// synthesise the matching release instead of leaving the page stuck.
+  /// Per-control-connection held state. This is deliberately **not** shared on the
+  /// producer: with one global set, a stale control socket closing mid-drag would
+  /// synthesise mouseReleased/keyUp and wipe the *current* holder's state — a
+  /// single-writer violation, not just a glitch (codex review 2026-08-02, High-1).
+  controllers: Map<WebSocket, ControllerState>;
+  /// Layout we asked Chrome for but have not yet seen a frame from. While this is
+  /// set the stream is in transition: frames still in flight were rendered against
+  /// the *old* layout, so publishing the new revision now would stamp stale pixels
+  /// as current and let stale coordinates pass validation (High-3).
+  pendingLayout: { width: number; height: number } | null;
+  reconfigureTimer: NodeJS.Timeout | null;
+  /// Serialises input so `mousePressed → mouseMoved → mouseReleased` cannot be
+  /// reordered by their independent lease lookups completing out of order (High-2).
+  inputChain: Promise<void>;
+};
+
+type ControllerState = {
   heldButtons: Set<string>;
   heldKeys: Set<number>;
 };
@@ -1469,7 +1487,7 @@ async function fitViewportToContent(
   const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
   const layoutHeight = Math.min(
     Math.max(Math.round(base.height * (layoutWidth / base.width)), 240), 2160);
-  p.viewportRevision += 1;
+  beginReconfigure(p, layoutWidth, layoutHeight);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutWidth, height: layoutHeight,
     deviceScaleFactor: want.deviceScaleFactor, mobile: false,
@@ -1487,8 +1505,50 @@ async function fitViewportToContent(
     `pane ${want.width}px @${Math.round(want.zoom * 100)}% @${want.deviceScaleFactor}x), zoomed to fit`);
 }
 
+// A viewport change is not instantaneous: `setDeviceMetricsOverride` +
+// stop/startScreencast are fire-and-forget, and frames already queued on the CDP
+// socket were rendered against the previous layout. Bumping the revision at
+// request time therefore stamps stale pixels with the new number — the viewer
+// draws an old layout, echoes the new revision back, and its coordinates pass
+// validation while pointing at the wrong place. Instead: record what we asked
+// for, hold the revision, and publish it only once a frame whose metadata matches
+// the requested layout actually arrives.
+const RECONFIGURE_CONFIRM_TIMEOUT_MS = 3000;
+// Chrome reports the visual viewport in CSS px; rounding differs by a pixel or
+// two between our request and its metadata.
+const LAYOUT_MATCH_TOLERANCE_PX = 4;
+
+function beginReconfigure(p: CastProducer, width: number, height: number): void {
+  p.pendingLayout = { width, height };
+  if (p.reconfigureTimer) clearTimeout(p.reconfigureTimer);
+  // Safety net: if the metadata never matches (an emulation quirk, a page that
+  // forces its own size), publishing anyway beats freezing the stream forever.
+  p.reconfigureTimer = setTimeout(() => {
+    if (p.closed || !p.pendingLayout) return;
+    console.warn("[cast] reconfigure not confirmed by any frame; publishing anyway");
+    finishReconfigure(p);
+  }, RECONFIGURE_CONFIRM_TIMEOUT_MS);
+}
+
+function finishReconfigure(p: CastProducer): void {
+  if (p.reconfigureTimer) { clearTimeout(p.reconfigureTimer); p.reconfigureTimer = null; }
+  p.pendingLayout = null;
+  p.viewportRevision += 1;
+}
+
+/** Does this frame come from the layout we are waiting for? */
+function frameMatchesPendingLayout(p: CastProducer, metadata: any): boolean {
+  if (!p.pendingLayout) return false;
+  const w = Number(metadata?.deviceWidth);
+  const h = Number(metadata?.deviceHeight);
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return false;
+  return Math.abs(w - p.pendingLayout.width) <= LAYOUT_MATCH_TOLERANCE_PX
+    && Math.abs(h - p.pendingLayout.height) <= LAYOUT_MATCH_TOLERANCE_PX;
+}
+
 function broadcastFrame(p: CastProducer, data: string): void {
   if (p.masked) return;   // password field focused: ship nothing at all
+  if (p.pendingLayout) return;   // mid-reconfigure: these pixels are the old layout
   const payload = JSON.stringify({
     data, url: p.url, title: p.title, favicon: null,
     revision: p.viewportRevision,
@@ -1513,7 +1573,8 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   const p: CastProducer = {
     socket, viewers: new Set(), lastFrame: null,
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
-    viewportRevision: 1, masked: false, heldButtons: new Set(), heldKeys: new Set(),
+    viewportRevision: 1, masked: false, controllers: new Map(),
+    pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1526,6 +1587,11 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       if (ackId !== undefined) producerSend(p, "Page.screencastFrameAck", { sessionId: ackId });
       if (data) {
         if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
+        // First frame confirmed to be from the layout we requested → publish the
+        // new revision now (and only now), then let this frame through with it.
+        if (p.pendingLayout && frameMatchesPendingLayout(p, msg.params?.metadata)) {
+          finishReconfigure(p);
+        }
         // While masked we neither ship nor **retain** the frame: a cached frame
         // would be handed to the next viewer that connects, which is exactly the
         // password screen we are trying not to show.
@@ -1694,19 +1760,35 @@ function installPasswordWatch(p: CastProducer): void {
   producerSend(p, "Runtime.evaluate", { expression: PASSWORD_WATCH_SCRIPT });
 }
 
+/** CDP `buttons` is a bitmask of the buttons currently held — not the button that
+ *  triggered this event. The viewer never sends it, and defaulting it to 0 tells
+ *  Chrome "a press happened while nothing is pressed": the click is delivered but
+ *  drags and text selection never start, because every mouseMoved in between also
+ *  claims no button is down. We already track `heldButtons` for lease cleanup, so
+ *  derive the mask from it rather than trusting a field the viewer omits. */
+const MOUSE_BUTTON_BITS: Record<string, number> = { left: 1, right: 2, middle: 4 };
+
+function heldButtonsMask(st: ControllerState): number {
+  let mask = 0;
+  for (const b of st.heldButtons) mask |= MOUSE_BUTTON_BITS[b] ?? 0;
+  return mask;
+}
+
 /** Dispatch one viewer input event onto the page. Coordinates arrive in remote
  *  CSS-viewport space (the viewer maps from its canvas), which is exactly what
  *  Input.* expects — no scaling here on purpose. */
-function dispatchInput(p: CastProducer, msg: Record<string, any>): void {
+function dispatchInput(p: CastProducer, msg: Record<string, any>, st: ControllerState): void {
   const ev = msg?.event;
   if (!ev || typeof ev !== "object") return;
   if (msg.type === "mouseEvent") {
     const button = typeof ev.button === "string" ? ev.button : "none";
-    if (ev.type === "mousePressed") p.heldButtons.add(button);
-    if (ev.type === "mouseReleased") p.heldButtons.delete(button);
+    if (ev.type === "mousePressed") st.heldButtons.add(button);
+    if (ev.type === "mouseReleased") st.heldButtons.delete(button);
     producerSend(p, "Input.dispatchMouseEvent", {
       type: ev.type, x: Number(ev.x) || 0, y: Number(ev.y) || 0,
-      button, buttons: Number(ev.buttons) || 0,
+      button, buttons: ev.buttons !== undefined
+        ? Number(ev.buttons) || 0
+        : heldButtonsMask(st),
       clickCount: Number(ev.clickCount) || (ev.type === "mouseMoved" ? 0 : 1),
       modifiers: Number(ev.modifiers) || 0,
       ...(ev.deltaX !== undefined ? { deltaX: Number(ev.deltaX) || 0 } : {}),
@@ -1716,8 +1798,8 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>): void {
   }
   if (msg.type === "keyEvent") {
     const code = Number(ev.windowsVirtualKeyCode) || 0;
-    if (ev.type === "keyDown" && code) p.heldKeys.add(code);
-    if (ev.type === "keyUp" && code) p.heldKeys.delete(code);
+    if (ev.type === "keyDown" && code) st.heldKeys.add(code);
+    if (ev.type === "keyUp" && code) st.heldKeys.delete(code);
     producerSend(p, "Input.dispatchKeyEvent", {
       type: ev.type, key: ev.key, code: ev.code,
       text: ev.text, unmodifiedText: ev.unmodifiedText,
@@ -1735,19 +1817,19 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>): void {
 
 /** Let go of whatever the controller was holding. Without this a lease that ends
  *  mid-drag leaves the page with a stuck button and a pressed modifier. */
-function releaseHeldInput(p: CastProducer): void {
-  for (const button of p.heldButtons) {
+function releaseHeldInput(p: CastProducer, st: ControllerState): void {
+  for (const button of st.heldButtons) {
     producerSend(p, "Input.dispatchMouseEvent", {
       type: "mouseReleased", x: 0, y: 0, button, buttons: 0, clickCount: 1,
     });
   }
-  p.heldButtons.clear();
-  for (const code of p.heldKeys) {
+  st.heldButtons.clear();
+  for (const code of st.heldKeys) {
     producerSend(p, "Input.dispatchKeyEvent", {
       type: "keyUp", windowsVirtualKeyCode: code, nativeVirtualKeyCode: code,
     });
   }
-  p.heldKeys.clear();
+  st.heldKeys.clear();
 }
 
 /** Attach a viewer socket to this target's stream, starting the producer if needed. */
@@ -1804,20 +1886,37 @@ export async function attachCastViewer(
   // ignored by the UI. (Before this, any cast connection would have become a
   // control channel the moment the producer started reading input.)
   if (leaseId) {
+    const state: ControllerState = { heldButtons: new Set(), heldKeys: new Set() };
+    producer.controllers.set(viewer, state);
     viewer.on("message", (raw: WebSocket.RawData) => {
       if (producer.closed) return;
       let msg: Record<string, any>;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
       // revision is mandatory: making it optional means "omit it and skip the
       // check", which is not a check at all.
-      if (!Number.isInteger(msg?.revision) || msg.revision !== producer.viewportRevision) {
-        return;   // aimed at a layout that no longer exists — dropping beats mis-clicking
-      }
-      holdsLease(sessionId, targetId, leaseId).then((ok) => {
-        if (ok && !producer.closed) dispatchInput(producer, msg);
+      if (!Number.isInteger(msg?.revision)) return;
+      // Serialise: each event's lease lookup is an independent await, and letting
+      // them race means press/move/release can reach the page out of order (a
+      // release arriving before its press leaves the button stuck down).
+      producer.inputChain = producer.inputChain.then(async () => {
+        if (producer.closed || !producer.controllers.has(viewer)) return;
+        // Re-checked *after* the await as well: the layout can change while the
+        // lease query is in flight, and coordinates computed against the old one
+        // would then land somewhere else. Mid-reconfigure, refuse outright.
+        if (producer.pendingLayout) return;
+        if (msg.revision !== producer.viewportRevision) return;
+        const ok = await holdsLease(sessionId, targetId, leaseId);
+        if (!ok || producer.closed || producer.pendingLayout) return;
+        if (msg.revision !== producer.viewportRevision) return;
+        dispatchInput(producer, msg, state);
       }).catch(() => { /* arbitration unavailable: refuse the input */ });
     });
-    viewer.once("close", () => releaseHeldInput(producer));
+    // Release only what *this* connection is holding. Clearing producer-wide
+    // state here would let a stale socket's close interrupt the current holder.
+    viewer.once("close", () => {
+      producer.controllers.delete(viewer);
+      releaseHeldInput(producer, state);
+    });
   }
 
   const detach = () => {
@@ -1839,7 +1938,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   const want = targetViewports.get(targetKey(sessionId, targetId));
   if (!p || p.closed || !want) return false;
   const layoutNow = layoutSize(want);
-  p.viewportRevision += 1;
+  beginReconfigure(p, layoutNow.width, layoutNow.height);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutNow.width, height: layoutNow.height, deviceScaleFactor: want.deviceScaleFactor,
     mobile: false, screenWidth: layoutNow.width, screenHeight: layoutNow.height,

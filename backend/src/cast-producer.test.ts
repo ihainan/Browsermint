@@ -11,7 +11,7 @@ Object.assign(process.env, {
 
 const { parseSessionWebSocketPath } = await import("./services/proxy.service.js");
 const {
-  attachCastViewer, forgetTargetViewport, setTargetViewport,
+  attachCastViewer, forgetTargetViewport, setTargetViewport, applyViewportToProducer,
   setCastTestHooks, resetCastTestHooks, setCdpServiceOverridesForTests,
   resetCdpServiceOverridesForTests,
 } = await import("./services/cdp.service.js");
@@ -366,5 +366,97 @@ test("不带 revision 的输入被丢弃（可选校验等于没有校验）", a
     await new Promise((r) => setTimeout(r, 60));
     const inputs = created[0].sent.slice(before).filter((m) => String(m.method).startsWith("Input."));
     assert.deepEqual(inputs, []);
+  } finally { teardown(); }
+});
+
+// ── 2026-08-02 codex 评审的三条 High：放行路径上的缺陷 ────────────────────────
+// 这些在「接管输入根本到不了页面」期间全是潜伏的；把输入接通后才变成实际风险。
+
+test("High-1：旧控制连接关闭，不得清掉当前持有者按住的键", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma({ leaseId: "L1" }));
+  try {
+    const a = new FakeViewer(), b = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, a as any, "L1");
+    await attachCastViewer(SESSION, TARGET, b as any, "L1");
+    for (const [v, button] of [[a, "left"], [b, "right"]] as const) {
+      (v as any).emit("message", Buffer.from(JSON.stringify({
+        type: "mouseEvent", revision: 1,
+        event: { type: "mousePressed", x: 1, y: 1, button },
+      })));
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    const before = created[0].sent.length;
+    a.close();                       // 旧连接断开
+    await new Promise((r) => setTimeout(r, 60));
+    const released = created[0].sent.slice(before)
+      .filter((m) => m.method === "Input.dispatchMouseEvent" && m.params.type === "mouseReleased")
+      .map((m) => m.params.button);
+    assert.deepEqual(released, ["left"],
+      "只能释放该连接自己按住的键；清掉 right 就是把当前持有者的拖拽打断了");
+  } finally { teardown(); }
+});
+
+test("High-2：租约查询乱序返回时，press/release 顺序不得被打乱", async () => {
+  const created = setup();
+  let call = 0;
+  setPrismaForTests({
+    $queryRaw: async () => [{ now: new Date() }],
+    targetLease: {
+      // 第一次查询故意慢：没有串行化时 release 会抢在 press 前面派发。
+      findFirst: async ({ where }: any) => {
+        const delay = call++ === 0 ? 60 : 0;
+        await new Promise((r) => setTimeout(r, delay));
+        return where.leaseId === "L1" ? { id: "x" } : null;
+      },
+      findUnique: async () => ({ leaseId: "L1", expiresAt: new Date(Date.now() + 60000) }),
+      create: async () => ({}), updateMany: async () => ({ count: 0 }),
+      deleteMany: async () => ({ count: 0 }),
+    },
+  } as any);
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      (v as any).emit("message", Buffer.from(JSON.stringify({
+        type: "mouseEvent", revision: 1,
+        event: { type, x: 3, y: 4, button: "left" },
+      })));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    const order = created[0].sent
+      .filter((m) => m.method === "Input.dispatchMouseEvent")
+      .map((m) => m.params.type);
+    assert.deepEqual(order, ["mousePressed", "mouseReleased"]);
+  } finally { teardown(); }
+});
+
+test("High-3：新 revision 只在确认属于新布局的帧到达后才发布", async () => {
+  const created = setup();
+  setPrismaForTests(leasePrisma({ leaseId: "L1" }));
+  try {
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    await setTargetViewport(SESSION, TARGET, 800, 600, 1, 1);
+    v.received.length = 0;
+    await applyViewportToProducer(SESSION, TARGET);
+
+    const pushMeta = (data: string, w: number, h: number) =>
+      created[0].emit("message", Buffer.from(JSON.stringify({
+        method: "Page.screencastFrame",
+        params: { data, sessionId: 1, metadata: { deviceWidth: w, deviceHeight: h } },
+      })));
+
+    pushMeta("OLD", 400, 300);           // 还在管线里的旧布局帧
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(v.received, [],
+      "过渡期内旧布局的帧不得下发——否则它会被打上新 revision，坐标校验形同虚设");
+
+    pushMeta("NEW", 800, 600);           // 第一张确认属于新布局的帧
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(v.received.length, 1);
+    const frame = JSON.parse(v.received[0]);
+    assert.equal(frame.data, "NEW");
+    assert.equal(frame.revision, 2, "确认帧到达时才 +1");
   } finally { teardown(); }
 });
