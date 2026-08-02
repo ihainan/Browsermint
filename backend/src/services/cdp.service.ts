@@ -1621,9 +1621,15 @@ function broadcastFrame(
 ): void {
   if (p.masked) return;   // password field focused: ship nothing at all
   if (p.pendingLayout) return;   // mid-reconfigure: these pixels are the old layout
+  // `layout` is the remote CSS viewport this frame was rendered for. The viewer
+  // needs it to map clicks: it cannot infer it from the image, because a sharp
+  // still is 2x the layout while a stream frame is 1x — using image width would
+  // put every click at half coordinates on stills.
   const payload = JSON.stringify({
     data, url: p.url, title: p.title, favicon: null,
     revision: p.viewportRevision,
+    layoutWidth: p.layout?.width ?? null,
+    layoutHeight: p.layout?.height ?? null,
   });
   for (const viewer of p.viewers) {
     if (viewer.readyState !== WebSocket.OPEN) continue;
