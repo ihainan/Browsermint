@@ -992,3 +992,95 @@ test("组合中的文字也要送到页面（否则远端一直空白到选词�
     assert.equal(comp[0].params.text, "nihao");
   } finally { teardown(); setPrismaForTests(null as any); }
 });
+
+// ── codex 复审 2026-08-03（输入法批次）的修复 ───────────────────────────────
+function leaseOk() {
+  setPrismaForTests({
+    $queryRaw: async () => [{ now: new Date() }],
+    targetLease: { findFirst: async () => ({ id: "L1" }) },
+  } as any);
+}
+async function controllingViewer(created: any[]) {
+  await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+  const v = new FakeViewer();
+  await attachCastViewer(SESSION, TARGET, v as any, "L1");
+  const sock = created.at(-1)!;
+  sock.emit("message", Buffer.from(JSON.stringify({
+    method: "Page.screencastFrame",
+    params: { data: "F", sessionId: 1, metadata: { deviceWidth: 735, deviceHeight: 867 } },
+  })));
+  await new Promise((r) => setTimeout(r, 20));
+  return { v, sock };
+}
+
+test("打字打到一半断线：远端不许留着那段没定稿的拼音（High-1）", async () => {
+  const created = setup();
+  try {
+    leaseOk();
+    const { v, sock } = await controllingViewer(created);
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "imeComposition", text: "nihao", revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    v.close();                       // 打到一半连接断了
+    await new Promise((r) => setTimeout(r, 30));
+    const comps = sock.sent.filter((m) => m.method === "Input.imeSetComposition");
+    assert.equal(comps.at(-1)!.params.text, "",
+      "断线时必须撤销组合，否则那段拼音永远留在页面上、用户自己也删不掉");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("定稿是一条消息里做完撤销+插入（High-2：拆开会丢字）", async () => {
+  const created = setup();
+  try {
+    leaseOk();
+    const { v, sock } = await controllingViewer(created);
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "imeCommit", text: "你好啊", revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const methods = sock.sent.map((m) => m.method);
+    const iClear = methods.lastIndexOf("Input.imeSetComposition");
+    const iIns = methods.lastIndexOf("Input.insertText");
+    assert.ok(iClear >= 0 && iIns > iClear, "撤销要在插入之前，且两者都要发生");
+    assert.equal(sock.sent[iClear].params.text, "");
+    assert.equal(sock.sent[iIns].params.text, "你好啊");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("按 Esc 取消组合：只撤销、不插入空文字", async () => {
+  const created = setup();
+  try {
+    leaseOk();
+    const { v, sock } = await controllingViewer(created);
+    const before = sock.sent.filter((m) => m.method === "Input.insertText").length;
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "imeCommit", text: "", revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(sock.sent.filter((m) => m.method === "Input.insertText").length, before);
+    assert.equal(
+      sock.sent.filter((m) => m.method === "Input.imeSetComposition").at(-1)!.params.text, "");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("超长粘贴按码点截断，不把 emoji 劈成半个（M7）", async () => {
+  const created = setup();
+  try {
+    leaseOk();
+    const { v, sock } = await controllingViewer(created);
+    // 每个 emoji 占 2 个 UTF-16 单元。**前面加一个单单元字符**，截断位置才会落在
+    // 某个 emoji 中间——全是 emoji 的话按偶数位切正好在边界上，测不出问题
+    // （第一版就是这么写的，变异验证时才发现它抓不住）。
+    const text = "a" + "😀".repeat(60000);
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "insertText", text, revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 80));
+    const sent = sock.sent.filter((m) => m.method === "Input.insertText").at(-1)!.params.text;
+    assert.ok(sent.length > 0);
+    // 没有落单的代理项 = 没有被劈开的字符
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(sent),
+      "截断处不得留下半个字符");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});

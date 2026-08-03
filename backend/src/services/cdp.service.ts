@@ -1450,6 +1450,10 @@ type ControllerState = {
   /// "does this connection *still* hold the write lease" can re-check instead of
   /// trusting the fact that it once presented one (codex review 2026-08-03, M4).
   leaseId: string;
+  /// 这条连接是否留着一段没定稿的输入法组合（带下划线的临时拼音）。
+  /// 断线、租约失效、切走 tab 都可能发生在打字打到一半时；不撤销的话那段拼音会永远
+  /// 留在远端页面上，下一个拿到写权的人还得先替他删掉（codex 复审 High-1）。
+  composing: boolean;
 };
 
 const producers = new Map<string, CastProducer>();
@@ -1843,7 +1847,11 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       const caret = raw && Number.isFinite(Number(xs)) && Number.isFinite(Number(ys))
         ? { x: Number(xs), y: Number(ys) } : null;
       // 密码框聚焦时连位置都不报：候选窗的落点会暴露光标在密码框的哪一格
-      const payload = JSON.stringify({ type: "caret", caret: p.masked ? null : caret });
+      // 带上 revision：布局变了之后，旧坐标换算到新画面上会摆错位置。观看端只认
+      // 与当前画面同一版本的坐标（codex 复审 M5）。
+      const payload = JSON.stringify({
+        type: "caret", caret: p.masked ? null : caret, revision: p.viewportRevision,
+      });
       for (const viewer of p.viewers) {
         if (viewer.readyState === WebSocket.OPEN) {
           try { viewer.send(payload); } catch { /* viewer went away */ }
@@ -2167,10 +2175,21 @@ const CARET_WATCH_SCRIPT = `(() => {
   if (window.__bm_caret_watch) return; window.__bm_caret_watch = true;
   const editable = (el) => !!el && (el.isContentEditable
     || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+  let pending = false, last = '';
   const report = () => {
+    // 同一次操作常常同时触发 selectionchange / keyup / click，逐个上报等于三倍的
+    // binding 往返和三倍的多端广播；拖选文本时更密。按帧节流 + 同坐标去重。
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; doReport(); });
+  };
+  const doReport = () => {
     try {
       const el = document.activeElement;
-      if (!editable(el)) { window.__browsermint_caret('') ; return; }
+      if (!editable(el)) {
+        if (last !== '') { last = ''; window.__browsermint_caret(''); }
+        return;
+      }
       let r = el.getBoundingClientRect();
       let x = r.left, y = r.bottom;
       // 光标在长文本里的真实位置比整个输入框的位置有用得多
@@ -2181,7 +2200,10 @@ const CARET_WATCH_SCRIPT = `(() => {
           if (rr.width || rr.height || rr.top) { x = rr.left; y = rr.bottom; }
         }
       } catch (e) {}
-      window.__browsermint_caret(Math.round(x) + ',' + Math.round(y));
+      const payload = Math.round(x) + ',' + Math.round(y);
+      if (payload === last) return;
+      last = payload;
+      window.__browsermint_caret(payload);
     } catch (e) {}
   };
   document.addEventListener('focusin', report, true);
@@ -2189,6 +2211,8 @@ const CARET_WATCH_SCRIPT = `(() => {
   document.addEventListener('selectionchange', report);
   document.addEventListener('keyup', report, true);
   document.addEventListener('click', report, true);
+  window.addEventListener('scroll', report, true);
+  window.addEventListener('resize', report);
 })();`;
 
 const PASSWORD_WATCH_SCRIPT = `(() => {
@@ -2216,6 +2240,19 @@ function installPasswordWatch(p: CastProducer): void {
  *  drags and text selection never start, because every mouseMoved in between also
  *  claims no button is down. We already track `heldButtons` for lease cleanup, so
  *  derive the mask from it rather than trusting a field the viewer omits. */
+// 粘贴的上限放宽到十万码点：4096 对日常粘代码/文档根本不够（codex 复审 M7）。
+// 这不是防大包的手段——JSON 那时已经收完并解析过了，防大包要在 WebSocket 层设
+// maxPayload，属于另一件事。
+const MAX_PASTE_CHARS = 100_000;
+const MAX_COMMIT_CHARS = 4096;
+
+/** 按**码点**截断。`String.prototype.slice` 切的是 UTF-16 单元，会把边界上的 emoji
+ *  或其它增补平面字符劈成半个，落到页面上就是一个乱码方块。 */
+function clampText(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length <= max ? text : points.slice(0, max).join("");
+}
+
 const MOUSE_BUTTON_BITS: Record<string, number> = { left: 1, right: 2, middle: 4 };
 
 function heldButtonsMask(st: ControllerState): number {
@@ -2236,15 +2273,27 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>, st: Controller
   // 人看不见候选词，就算看见了、选了词，定稿的那段文字也到不了页面（2026-08-03 用户
   // 实测「只有 n 进了输入框」——那个 n 是组合开始前漏出去的第一个按键）。
   if (msg.type === "insertText" && typeof msg.text === "string") {
-    // Covers IME-committed text and paste without needing composition sync.
-    producerSend(p, "Input.insertText", { text: msg.text.slice(0, 4096) });
+    // 粘贴走这条。截断按**码点**而不是 UTF-16 单元：按单元切会把边界上的 emoji
+    // 劈成半个字符，粘出来是个乱码方块（codex 复审 M7）。
+    producerSend(p, "Input.insertText", { text: clampText(msg.text, MAX_PASTE_CHARS) });
+    return;
+  }
+  // 输入法定稿：撤销组合 + 插入定稿，**必须是一条消息**。
+  // 拆成两条各自验租约的消息不具备事务语义：clear 过了、insert 被 revision 变化或一次
+  // 数据库抖动挡掉，用户刚选的那几个字就凭空消失了（codex 复审 High-2）。
+  if (msg.type === "imeCommit" && typeof msg.text === "string") {
+    producerSend(p, "Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 });
+    st.composing = false;
+    const text = clampText(msg.text, MAX_COMMIT_CHARS);
+    if (text) producerSend(p, "Input.insertText", { text });
     return;
   }
   // 组合中的文字（还没选定的拼音/假名）。没有这条的话，用户打字的整个过程远端页面
   // 一片空白，直到选词那一刻才整段蹦出来——本地打字从来不是这样的。
   // 空串等于撤销组合，Chrome 会把之前显示的临时文字清掉。
   if (msg.type === "imeComposition" && typeof msg.text === "string") {
-    const text = msg.text.slice(0, 1024);
+    const text = clampText(msg.text, MAX_COMMIT_CHARS);
+    st.composing = text.length > 0;
     producerSend(p, "Input.imeSetComposition", {
       text, selectionStart: text.length, selectionEnd: text.length,
     });
@@ -2286,6 +2335,14 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>, st: Controller
 /** Let go of whatever the controller was holding. Without this a lease that ends
  *  mid-drag leaves the page with a stuck button and a pressed modifier. */
 function releaseHeldInput(p: CastProducer, st: ControllerState): void {
+  // 先撤组合再松按键：一段没定稿的拼音留在页面上，比一个卡住的按键更难看懂——
+  // 用户回来只会看到输入框里多了几个莫名其妙的字母，而且自己删不掉（那是组合态）。
+  if (st.composing) {
+    producerSend(p, "Input.imeSetComposition", {
+      text: "", selectionStart: 0, selectionEnd: 0,
+    });
+    st.composing = false;
+  }
   for (const button of st.heldButtons) {
     producerSend(p, "Input.dispatchMouseEvent", {
       type: "mouseReleased", x: 0, y: 0, button, buttons: 0, clickCount: 1,
@@ -2356,7 +2413,9 @@ export async function attachCastViewer(
   // ignored by the UI. (Before this, any cast connection would have become a
   // control channel the moment the producer started reading input.)
   if (leaseId) {
-    const state: ControllerState = { heldButtons: new Set(), heldKeys: new Set(), leaseId };
+    const state: ControllerState = {
+      heldButtons: new Set(), heldKeys: new Set(), leaseId, composing: false,
+    };
     producer.controllers.set(viewer, state);
     viewer.on("message", (raw: WebSocket.RawData) => {
       if (producer.closed) return;
