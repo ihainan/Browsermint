@@ -1706,7 +1706,12 @@ const SHARP_STILL_SCALE = 2;
 // downsampled and the artefacts average away. So the still is worth taking even when
 // it adds no pixels, as long as it carries a visibly better quality.
 const SHARP_STILL_QUALITY = 96;
-const IDLE_BEFORE_STILL_MS = 250;
+// 停多久才补高清静帧。
+//
+// 250ms 太急了：滚动是一串带惯性的小步，中间的每个小停顿都会触发一张**整帧**静帧
+// （2 倍分辨率、~200KB），把增量省下来的带宽又还回去（实测一轮滚动里 29 张整帧 vs
+// 10 张增量）。700ms 只有「真的停下来看」才会触发，交互中的碎停顿不再中招。
+const IDLE_BEFORE_STILL_MS = 700;
 // Bound the payload: a 2x still of a very wide fitted layout gets big fast.
 const SHARP_STILL_MAX_WIDTH = 2560;
 
@@ -1815,9 +1820,10 @@ function broadcastFrame(
   if (!opts.skipIdleReschedule) scheduleIdleStill(p);
 
   if (opts.key) {
-    // 高清静帧：它的尺寸是流的 2 倍，客户端画上去之后画布就换了分辨率——之后再发按
-    // 流坐标算的增量会贴错位置。所以静帧一律当整帧发，并让差分器重新起头。
-    p.differ.reset();
+    // 高清静帧走整帧。**只有在它的分辨率与流不同时才需要重置差分器**：那种情况下
+    // 客户端画布的像素尺寸会跟着变，之后按流坐标算的增量会贴错位置。观看端本来就是
+    // 2 倍屏时（流已经是 2x），静帧尺寸一样，重置就是白白多发一张整帧。
+    if (stillScale(p) !== (p.streamScale || 1)) p.differ.reset();
     sendFramePayload(p, { key: true, data });
     return;
   }

@@ -506,7 +506,7 @@ test("静止后补一张 2x 高清帧，并按当前布局裁切", async () => {
       method: "Page.screencastFrame",
       params: { data: "SOFT", sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } },
     })));
-    await new Promise((r) => setTimeout(r, 400));   // 超过空闲阈值
+    await new Promise((r) => setTimeout(r, 900));   // 超过空闲阈值（IDLE_BEFORE_STILL_MS=700）
     const shot = created[0].sent.find((m) => m.method === "Page.captureScreenshot");
     assert.ok(shot, "静止后应抓一张高清静帧");
     assert.equal(shot!.params.clip.scale, 2);
@@ -528,7 +528,7 @@ test("遮罩期间绝不抓高清静帧（比直接发流更糟：把密码页�
     created[0].emit("message", Buffer.from(JSON.stringify({
       method: "Runtime.bindingCalled", params: { name: "__browsermint_password_focus", payload: "1" },
     })));
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 900));
     const shot = created[0].sent.find((m) => m.method === "Page.captureScreenshot");
     assert.equal(shot, undefined, "遮罩期间不得抓图");
   } finally { teardown(); }
@@ -603,7 +603,7 @@ test("截图期间来了新动帧：迟到的静帧作废，不得盖在新画�
     await attachCastViewer(SESSION, TARGET, v as any);
     const sock = created[0] as StillSocket;
     sock.pushStreamFrame("MOVE1");
-    await new Promise((r) => setTimeout(r, 400));   // 250ms 静止 → 触发截图
+    await new Promise((r) => setTimeout(r, 900));   // 静止超过 700ms → 触发截图
     assert.ok(sock.answerShot, "idle 后应发起高清截图");
     sock.pushStreamFrame("MOVE2");                  // 截图往返期间页面又动了
     sock.answerShot!("STALE_STILL");
@@ -621,7 +621,7 @@ test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async
     await attachCastViewer(SESSION, TARGET, v as any);
     const sock = created[0] as StillSocket;
     sock.pushStreamFrame("MOVE1");
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 900));
     assert.ok(sock.answerShot, "idle 后应发起高清截图");
     sock.answerShot!("SHARP_STILL");
     await new Promise((r) => setTimeout(r, 20));
@@ -648,7 +648,7 @@ test("流已经是 2x：静止时照样抓高清静帧（同倍率、更高画�
     await attachCastViewer(SESSION, TARGET, v as any);
     const sock = created.at(-1)! as StillSocket;
     sock.pushStreamFrame("MOVE1");
-    await new Promise((r) => setTimeout(r, 400));   // 超过 IDLE_BEFORE_STILL_MS
+    await new Promise((r) => setTimeout(r, 900));   // 超过 IDLE_BEFORE_STILL_MS
     const shot = sock.sent.find((m) => m.method === "Page.captureScreenshot");
     assert.ok(shot, "静止之后必须抓一张静帧");
     assert.equal(shot!.params.clip.scale, 2, "倍率不低于流本身，别把画面降下去");
