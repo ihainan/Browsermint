@@ -1441,6 +1441,7 @@ type CastProducer = {
   diffBusy: boolean;
   diffPending: string | null;
   lastDiffLogAt?: number;
+  diffStats?: { key: number; delta: number; bytes: number; since: number };
   /// Layout we asked Chrome for but have not yet seen a frame from. While this is
   /// set the stream is in transition: frames still in flight were rendered against
   /// the *old* layout, so publishing the new revision now would stamp stale pixels
@@ -1832,6 +1833,23 @@ function broadcastFrame(
   void runDiff(p, data);
 }
 
+/**
+ * 每 10 秒汇总一次「整帧 / 增量 / 发了多少字节」。
+ *
+ * 差分省没省下带宽，只有这个数说了算——离线基准和真机差得远（真机上曾经是「一帧内容
+ * 一帧白」，离线怎么测都测不出来）。留着它，下次怀疑画面费流量时不用再临时加日志。
+ */
+function countFrame(p: CastProducer, key: boolean, bytes: number): void {
+  const s = (p.diffStats ||= { key: 0, delta: 0, bytes: 0, since: Date.now() });
+  if (key) s.key++; else s.delta++;
+  s.bytes += bytes;
+  const now = Date.now();
+  if (now - s.since >= 10_000) {
+    console.info(`[cast] 10s 汇总 整帧=${s.key} 增量=${s.delta} 合计=${Math.round(s.bytes / 1024)}KB`);
+    p.diffStats = { key: 0, delta: 0, bytes: 0, since: now };
+  }
+}
+
 async function runDiff(p: CastProducer, data: string): Promise<void> {
   p.diffBusy = true;
   try {
@@ -1844,9 +1862,11 @@ async function runDiff(p: CastProducer, data: string): Promise<void> {
         p.lastDiffLogAt = now;
         console.info(`[cast] key frame (${res.why})`);
       }
+      countFrame(p, true, res.data.length * 0.75);
       sendFramePayload(p, { key: true, data: res.data });
     }
     else if (res.tiles.length > 0 || res.shift !== 0) {
+      countFrame(p, false, res.tiles.reduce((n, t) => n + t.data.length * 0.75, 0));
       sendFramePayload(p, { key: false, shift: res.shift, tiles: res.tiles });
     }
     // 一帧都没变化 → 什么都不发（静止页面从此不再烧带宽）

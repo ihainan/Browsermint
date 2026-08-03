@@ -1,7 +1,16 @@
 import test from "node:test";
 
 /** 帧差分是异步的（要解码 JPEG），推一帧之后要等一拍才看得到广播结果。 */
-const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r)); };
+/**
+ * 等广播这一轮真正跑完。
+ *
+ * **不能只 drain 微任务**：帧现在要过一遍帧差（sharp 解码/编码，真的落到线程池），
+ * 30 个 setImmediate 常常还没轮到它 —— 这条以前是随机挂的（实测 4 跑挂 3），
+ * 而随机挂的测试比它守的行为更危险：绿灯是假的。
+ */
+const settle = async () => {
+  for (let i = 0; i < 30; i++) await new Promise(r => setTimeout(r, 5));
+};
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
