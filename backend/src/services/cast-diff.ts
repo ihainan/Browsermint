@@ -90,6 +90,14 @@ function profileSpread(p: Float32Array): number {
  * 真正分开「滚了」和「没滚」的是下面的倍数关系，不是这个绝对值：实测真滚动 5~27 倍，
  * 完全没动时是 0 倍。所以这道只用来挡「两幅无关画面」。
  */
+/** 「整幅纯白」的判据：亮度接近 255 且几乎没有起伏。 */
+function isBlank(p: Float32Array | null): boolean {
+  if (!p || p.length === 0) return false;
+  let min = Infinity;
+  for (let i = 0; i < p.length; i++) if (p[i] < min) min = p[i];
+  return min > 250 && profileSpread(p) < 0.05;
+}
+
 const SHIFT_MAD_LIMIT = 3.0;
 const SHIFT_MARGIN = 2.5;         // 最优要比「不动」明显好这么多倍，才敢说真的滚了
 const MIN_SPREAD = 1.5;           // 剖面起伏下限
@@ -210,6 +218,13 @@ export class FrameDiffer {
     }
 
     const profile = rowProfile(data, width, height);
+
+    // **一张纯白的帧不是画面**。后台标签的合成器会时不时吐一张空帧（实测与真实帧交替
+    // 出现），照单全收的话观看端就是闪白，帧差也没法工作——每一帧都在跟一张白纸比。
+    // 已经有过内容还突然全白，一律当无效帧丢掉：真实网页哪怕是空白页也有细微起伏。
+    if (isBlank(profile) && !isBlank(this.prevProfile)) {
+      return { kind: "delta", shift: 0, tiles: [] };
+    }
     const shift = detectShift(this.prevProfile, profile, height, this.opt.shiftRange, this.diag);
     const tiles = this.changedRegions(this.prevRaw, data, width, height, shift);
 

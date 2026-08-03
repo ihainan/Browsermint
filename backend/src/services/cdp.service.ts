@@ -2059,6 +2059,9 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // watching go back to normal visibility semantics.
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
   producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  // 焦点模拟只保证后台页**继续出帧**，不保证出的是画面：2026-08-04 实测，观看一个非前台
+  // 标签时流是「一帧内容、一帧纯白」交替（帧差诊断里 亮度=255 起伏=0.00 与真实帧轮流出现）。
+  // 空帧在 cast-diff 里被丢掉（抢前台不行——前台留给正在干活的 agent，见可见性那段的测试）。
   if (want && layout) {
     producerSend(p, "Emulation.setDeviceMetricsOverride", {
       width: layout.width, height: layout.height, deviceScaleFactor: want.deviceScaleFactor,

@@ -224,3 +224,32 @@ test("位移检测：画面没动时不能报出位移", () => {
   const p = profile(y => 128 + 60 * Math.sin(y / 9));
   assert.equal(detectShift(p, p, H, 200), 0);
 });
+
+test("后台标签吐出来的纯白帧要丢掉（别闪白，也别拿它当基准）", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  const white = Buffer.alloc(W * H * 3, 255);
+  const blank: any = await d.next(await toJpeg(white));
+  assert.equal(blank.kind, "delta");
+  assert.equal(blank.tiles.length, 0, "白帧不该发出任何像素");
+  // 关键：白帧不能污染基准，下一张真实帧还得能跟白帧之前的画面正常做差分
+  const typed = Buffer.from(base);
+  for (let y = 100; y < 130; y++) for (let x = 200; x < 320; x++) {
+    const i = (y * W + x) * 3; typed[i] = 0; typed[i + 1] = 0; typed[i + 2] = 0;
+  }
+  const res: any = await d.next(await toJpeg(typed));
+  assert.equal(res.kind, "delta");
+  assert.ok(res.tiles.length < 10, `白帧污染了基准，变化块 ${res.tiles.length}`);
+});
+
+test("真正的空白网页（纯白但有压缩起伏）不能被当成无效帧丢掉", async () => {
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(makeBase()));
+  const nearlyWhite = Buffer.alloc(W * H * 3, 255);
+  for (let y = 40; y < 60; y++) for (let x = 30; x < 400; x++) {    // 一行字
+    const i = (y * W + x) * 3; nearlyWhite[i] = 40; nearlyWhite[i + 1] = 40; nearlyWhite[i + 2] = 40;
+  }
+  const res: any = await d.next(await toJpeg(nearlyWhite));
+  assert.ok(res.kind === "key" || res.tiles.length > 0, "有内容的白底页面必须照常送出");
+});
