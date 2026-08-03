@@ -13,7 +13,7 @@ const { parseSessionWebSocketPath } = await import("./services/proxy.service.js"
 const {
   attachCastViewer, forgetTargetViewport, setTargetViewport, applyViewportToProducer,
   setCastTestHooks, resetCastTestHooks, setCdpServiceOverridesForTests,
-  resetCdpServiceOverridesForTests,
+  resetCdpServiceOverridesForTests, notifyChildTarget,
 } = await import("./services/cdp.service.js");
 const { setPrismaForTests } = await import("./db/client.js");
 
@@ -855,5 +855,51 @@ test("主框架导航后重申焦点模拟（导航是最可能把它弄丢的�
       .filter((m: any) => m.type === "tabUpdate");
     assert.ok(tabUpdates.length >= 1, "导航后必须仍然广播 tabUpdate");
     assert.equal(tabUpdates.at(-1).url, "https://x/", "URL 必须更新");
+  } finally { teardown(); }
+});
+
+// ── 用户点开的新页面（2026-08-03）────────────────────────────────────────────
+// 点 target=_blank 的链接会在远端建一个新 target。平台的页面台账靠 agent 显式上报
+// 喂养，而 Chrome 自己开的标签页没人上报 —— 于是新页面对平台不存在，画面停在原页，
+// 用户看到的是「点了没反应」。attachedToTarget 的 openerId 是唯一的来源线索。
+test("页面开出新页面：通知来源页的观看端", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    v.received.length = 0;
+    notifyChildTarget(SESSION, TARGET, { targetId: "child-1", url: "https://x/" });
+    const msgs = v.received.map((x) => JSON.parse(x)).filter((m) => m.type === "childTarget");
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].targetId, "child-1");
+    assert.equal(msgs[0].url, "https://x/");
+    assert.equal(msgs[0].openerTargetId, TARGET);
+  } finally { teardown(); }
+});
+
+test("只有持写权的连接算「发起者」，其他窗口不跟着跳", async () => {
+  const created = setup();
+  try {
+    setPrismaForTests({ targetLease: { findFirst: async () => ({ id: "L1" }) } } as any);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const watcher = new FakeViewer();
+    const controller = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, watcher as any);            // 只读
+    await attachCastViewer(SESSION, TARGET, controller as any, "L1");   // 持租约
+    watcher.received.length = 0; controller.received.length = 0;
+    notifyChildTarget(SESSION, TARGET, { targetId: "child-2" });
+    const pick = (v: FakeViewer) => v.received.map((x) => JSON.parse(x))
+      .find((m: any) => m.type === "childTarget");
+    assert.equal(pick(controller)?.initiated, true, "点链接的那个窗口才是发起者");
+    assert.equal(pick(watcher)?.initiated, false,
+      "旁观窗口只收到通知，不得自动切页（那就是抢焦点的老毛病换个马甲）");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("没有观看端时不做任何广播（agent 自己开的页面不该惊动谁）", () => {
+  setup();
+  try {
+    notifyChildTarget(SESSION, "no-such-target", { targetId: "child-3" });
   } finally { teardown(); }
 });

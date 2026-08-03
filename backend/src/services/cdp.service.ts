@@ -849,6 +849,17 @@ export async function initCdpSession(
       const autoSessionId = params?.sessionId as string | undefined;
       const info = params?.targetInfo as Record<string, unknown> | undefined;
       if (info?.type === "page" && autoSessionId) {
+        // A page opened from another page carries its origin here. This is the
+        // only moment we learn about a tab the user opened by clicking a link:
+        // the platform's page ledger is fed by explicit declares, and nobody
+        // declares a tab that Chrome created on its own.
+        const opener = info.openerId as string | undefined;
+        if (opener) {
+          notifyChildTarget(sessionId, opener, {
+            targetId: info.targetId as string,
+            url: info.url as string | undefined,
+          });
+        }
         try {
           // Use the session ID from the auto-attach event directly (no re-attach needed).
           // Also apply immediately via Runtime.evaluate in case the page is already loaded.
@@ -2000,6 +2011,36 @@ function onScreencastVisibility(
 /** A frame proves the page is producing again — no report needed to tell us. */
 function clearVisibilityRecovery(p: CastProducer): void {
   if (p.visibilityTimer) { clearTimeout(p.visibilityTimer); p.visibilityTimer = null; }
+}
+
+/** A page opened another page (a `target=_blank` link, `window.open`, a form with
+ *  a target). Tell whoever is watching the page it came from, so the platform can
+ *  give the new page an identity instead of it existing only inside Chrome.
+ *
+ *  `initiated` separates "you did this" from "this happened": only the connection
+ *  holding the write lease is treated as the originator and should follow the new
+ *  page. Everyone else gets the same notice as a cue to refresh their page list —
+ *  auto-switching every window would be the focus-stealing bug in a new costume. */
+export function notifyChildTarget(
+  sessionId: string, openerTargetId: string,
+  child: { targetId: string; url?: string },
+): void {
+  const p = producers.get(targetKey(sessionId, openerTargetId));
+  if (!p || p.closed || p.viewers.size === 0) return;
+  for (const viewer of p.viewers) {
+    if (viewer.readyState !== WebSocket.OPEN) continue;
+    const payload = {
+      type: "childTarget",
+      targetId: child.targetId,
+      url: child.url ?? null,
+      openerTargetId,
+      // A page can open another page with no user involved at all (script on
+      // load, a redirect chain). Then nobody "initiated" it and nobody follows.
+      initiated: p.controllers.has(viewer),
+    };
+    try { viewer.send(JSON.stringify(payload)); } catch { /* viewer went away */ }
+  }
+  console.info(`[cast] ${openerTargetId} opened ${child.targetId}, told ${p.viewers.size} viewer(s)`);
 }
 
 function scheduleLingerIfIdle(producer: CastProducer, key: string, targetId: string): void {
