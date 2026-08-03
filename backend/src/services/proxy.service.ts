@@ -1073,12 +1073,12 @@ function scheduleIdlePause(sessionId: string): void {
   idleTimers.set(sessionId, timer);
 }
 
-async function pauseSessionIfIdle(sessionId: string): Promise<void> {
+export async function pauseSessionIfIdle(sessionId: string): Promise<void> {
   if ((wsConnectionCount.get(sessionId) ?? 0) > 0) return;
 
   const session = await prisma.session.findFirst({
     where: { id: sessionId, status: "running", deletedAt: null },
-    select: { containerId: true, runningStartedAt: true },
+    select: { containerId: true, runningStartedAt: true, internalApiUrl: true },
   });
   if (!session?.containerId) return;
 
@@ -1087,21 +1087,15 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
     // Pause-by-deletion drivers (K8s) lose the in-memory Chrome on pause: save
     // the open tabs for restore on resume, and close Chrome gracefully so the
     // profile (cookies etc.) is flushed to the PVC before the pod goes away.
-    // Save pages **with the embedder's labels**: CDP target ids die with the pod,
-    // so a plain URL list cannot tell which restored tab is which page when the
-    // same URL appears twice or a redirect changes it.
-    let savedTabs: Array<{ label?: string; url: string }> = [];
+    // 保存标签页交给 snapshotOpenTabs：**一条规则两条路径共用**（定期快照 / 暂停前）。
+    // 关键是「读不到」不等于「一个都没开」——后端重启后没有 CDP 会话，把空列表写上去
+    // 就等于把用户开着的页面全丢了（2026-08-03 事故）。读不到就保留上一次的快照。
     if (driver.pauseReleasesWorkload) {
-      const entries = await getOpenPageEntries(sessionId).catch(() => []);
-      const labelRow = await prisma.session.findUnique({
-        where: { id: sessionId }, select: { targetLabels: true },
-      }).catch(() => null);
-      const labelByTarget = new Map<string, string>();
-      const stored = (labelRow?.targetLabels ?? {}) as Record<string, unknown>;
-      for (const [label, targetId] of Object.entries(stored)) {
-        if (typeof targetId === "string") labelByTarget.set(targetId, label);
+      const saved = await snapshotOpenTabs(
+        sessionId, { reattachUrl: session.internalApiUrl ?? undefined });
+      if (!saved) {
+        console.warn(`[idle-pause] Session ${sessionId}: cannot read open tabs — keeping the previous snapshot`);
       }
-      savedTabs = entries.map((e: { targetId: string; url: string }) => ({ label: labelByTarget.get(e.targetId), url: e.url }));
       await closeBrowserGracefully(sessionId).catch(() => {});
     }
     cleanupCdpSession(sessionId);
@@ -1115,9 +1109,6 @@ async function pauseSessionIfIdle(sessionId: string): Promise<void> {
         status: "paused",
         onlineMs: { increment: delta },
         runningStartedAt: null,
-        ...(driver.pauseReleasesWorkload
-          ? { savedTabs: savedTabs.length > 0 ? savedTabs : Prisma.JsonNull }
-          : {}),
       },
     });
     console.info(`[idle-pause] Session ${sessionId} paused`);
@@ -1280,6 +1271,56 @@ const pagecastWss = new WebSocketServer({ noServer: true });
 // growing without bound on a long-lived deployment.
 const LEASE_SWEEP_INTERVAL_MS = 10 * 60_000;
 setInterval(() => { void sweepExpiredLeases(); }, LEASE_SWEEP_INTERVAL_MS).unref?.();
+
+// ─── Periodic tab snapshot ──────────────────────────────────────────────────
+// Saving tabs only on the graceful idle-pause path is not enough: a pod that is
+// evicted, OOM-killed, or recreated after a backend deploy never gets that far,
+// and the session resumes into a blank browser. Nothing about that is visible to
+// the user beforehand — they just lose every page they had open (2026-08-03).
+//
+// So keep a recent snapshot while the session is running. It costs one small DB
+// write per running session per interval, and it turns "lost everything" into
+// "lost at most the last minute of navigation".
+const TAB_SNAPSHOT_INTERVAL_MS = 60_000;
+
+export async function snapshotOpenTabs(
+  sessionId: string, opts: { reattachUrl?: string } = {}
+): Promise<boolean> {
+  let entries = await getOpenPageEntries(sessionId).catch(() => null);
+  if (entries === null && opts.reattachUrl) {
+    // 暂停这条路径上 pod 还活着：先试一次重连 CDP 再问，别白白丢掉标签页
+    const ok = await initCdpSession(sessionId, opts.reattachUrl).catch(() => false);
+    if (ok) entries = await getOpenPageEntries(sessionId).catch(() => null);
+  }
+  if (entries === null) return false;        // 读不到就别动上一次的快照
+  const labelRow = await prisma.session.findUnique({
+    where: { id: sessionId }, select: { targetLabels: true },
+  }).catch(() => null);
+  const labelByTarget = new Map<string, string>();
+  const stored = (labelRow?.targetLabels ?? {}) as Record<string, unknown>;
+  for (const [label, targetId] of Object.entries(stored)) {
+    if (typeof targetId === "string") labelByTarget.set(targetId, label);
+  }
+  const tabs = entries.map(e => ({ label: labelByTarget.get(e.targetId), url: e.url }));
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { savedTabs: tabs.length > 0 ? tabs : Prisma.JsonNull },
+  }).catch(() => {});
+  return true;
+}
+
+async function snapshotRunningSessions(): Promise<void> {
+  const rows = await prisma.session.findMany({
+    where: { status: "running", deletedAt: null },
+    select: { id: true },
+  }).catch(() => []);
+  for (const row of rows) {
+    await snapshotOpenTabs(row.id).catch(() => false);
+  }
+}
+
+setInterval(() => { void snapshotRunningSessions(); }, TAB_SNAPSHOT_INTERVAL_MS).unref?.();
+
 
 export async function handleWebSocketUpgrade(
   request: IncomingMessage,

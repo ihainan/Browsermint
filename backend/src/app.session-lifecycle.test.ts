@@ -947,3 +947,84 @@ test("target labels: pause saves labelled tabs and resume republishes the new ma
     await closeApp(app);
   }
 });
+
+// ── 暂停时保存标签页：读不到 ≠ 一个都没开（2026-08-03 事故）────────────────────
+// 后端重启之后没有 CDP 会话，getOpenPageEntries 当时返回 []，idle-pause 就把「没有
+// 标签页」写了上去，恢复出来的浏览器是空的——用户开着的 13 个页面全没了。
+test("暂停时读不到标签页 → 保留上一次的快照，绝不写空", async () => {
+  const { app, prisma } = await makeApp([
+    makeSession({
+      id: "s-keep", status: "running", containerId: "c-keep",
+      savedTabs: [{ label: "p1", url: "https://example.com/keep" }],
+    }),
+  ]);
+  const { setCdpServiceOverridesForTests, resetCdpServiceOverridesForTests } =
+    await import("./services/cdp.service.js");
+  const { setDriverOverridesForTests, resetDriverOverridesForTests } =
+    await import("./services/driver/index.js");
+  const { pauseSessionIfIdle } = await import("./services/proxy.service.js");
+  try {
+    // 暂停即销毁工作负载（K8s 语义）——只有这条路径才需要保存标签页
+    setDriverOverridesForTests({ pauseReleasesWorkload: true, pauseSession: async () => {} });
+    setCdpServiceOverridesForTests({ getOpenPageEntries: async () => null });
+    await pauseSessionIfIdle("s-keep");
+    const session = prisma.__sessions[0];
+    assert.deepEqual(session.savedTabs, [{ label: "p1", url: "https://example.com/keep" }],
+      "读不到就该原样保留，写空等于把用户的页面全丢了");
+  } finally {
+    resetCdpServiceOverridesForTests();
+    resetDriverOverridesForTests?.();
+    await closeApp(app);
+  }
+});
+
+test("暂停时读得到标签页 → 覆盖成最新的一份", async () => {
+  const { app, prisma } = await makeApp([
+    makeSession({
+      id: "s-fresh", status: "running", containerId: "c-fresh",
+      savedTabs: [{ label: "old", url: "https://example.com/old" }],
+    }),
+  ]);
+  const { setCdpServiceOverridesForTests, resetCdpServiceOverridesForTests } =
+    await import("./services/cdp.service.js");
+  const { pauseSessionIfIdle } = await import("./services/proxy.service.js");
+  try {
+    setDriverOverridesForTests({ pauseReleasesWorkload: true, pauseSession: async () => {} });
+    setCdpServiceOverridesForTests({
+      getOpenPageEntries: async () => [{ targetId: "T1", url: "https://example.com/new" }],
+    });
+    await pauseSessionIfIdle("s-fresh");
+    assert.deepEqual(prisma.__sessions[0].savedTabs, [{ label: undefined, url: "https://example.com/new" }]);
+  } finally {
+    resetCdpServiceOverridesForTests();
+    resetDriverOverridesForTests?.();
+    await closeApp(app);
+  }
+});
+
+test("运行期间定期快照：读得到就写，读不到什么都不动", async () => {
+  const { app, prisma } = await makeApp([
+    makeSession({
+      id: "s-snap", status: "running", containerId: "c-snap",
+      savedTabs: [{ label: "prev", url: "https://example.com/prev" }],
+    }),
+  ]);
+  const { setCdpServiceOverridesForTests, resetCdpServiceOverridesForTests } =
+    await import("./services/cdp.service.js");
+  const { snapshotOpenTabs } = await import("./services/proxy.service.js");
+  try {
+    setCdpServiceOverridesForTests({ getOpenPageEntries: async () => null });
+    assert.equal(await snapshotOpenTabs("s-snap"), false);
+    assert.deepEqual(prisma.__sessions[0].savedTabs, [{ label: "prev", url: "https://example.com/prev" }]);
+
+    setCdpServiceOverridesForTests({
+      getOpenPageEntries: async () => [{ targetId: "T9", url: "https://example.com/live" }],
+    });
+    assert.equal(await snapshotOpenTabs("s-snap"), true);
+    assert.deepEqual(prisma.__sessions[0].savedTabs, [{ label: undefined, url: "https://example.com/live" }]);
+  } finally {
+    resetCdpServiceOverridesForTests();
+    resetDriverOverridesForTests?.();
+    await closeApp(app);
+  }
+});

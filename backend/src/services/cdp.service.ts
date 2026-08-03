@@ -553,7 +553,7 @@ type CdpServiceOverrides = Partial<{
   initCdpSession: (sessionId: string, internalApiUrl: string) => Promise<boolean>;
   closeBrowserGracefully: (sessionId: string, timeoutMs?: number) => Promise<boolean>;
   getOpenPageUrls: (sessionId: string) => Promise<string[]>;
-  getOpenPageEntries: (sessionId: string) => Promise<Array<{ targetId: string; url: string }>>;
+  getOpenPageEntries: (sessionId: string) => Promise<Array<{ targetId: string; url: string }> | null>;
   openSavedTabs: (sessionId: string, urls: string[]) => Promise<void>;
   restoreSavedTabs: (sessionId: string, tabs: SavedTab[]) => Promise<Record<string, string>>;
   cleanupCdpSession: (sessionId: string) => void;
@@ -998,14 +998,19 @@ export type SavedTab = { label?: string; url: string };
  * the labels they assigned (see `Session.targetLabels`). Kept separate from
  * `getOpenPageUrls` to preserve that function's legacy shape.
  */
+// Returns null when we *cannot tell* (no CDP session, or the query failed) —
+// which is NOT the same as "this browser has no tabs". Conflating the two cost a
+// user every page they had open: after a backend restart there is no CDP session,
+// this returned [], and the idle-pause path happily saved "no tabs" over their
+// real list, so the resumed browser came back blank (2026-08-03 incident).
 export async function getOpenPageEntries(
   sessionId: string
-): Promise<Array<{ targetId: string; url: string }>> {
+): Promise<Array<{ targetId: string; url: string }> | null> {
   if (cdpServiceOverrides.getOpenPageEntries) {
     return cdpServiceOverrides.getOpenPageEntries(sessionId);
   }
   const ws = activeSessions.get(sessionId);
-  if (!ws || ws.readyState !== WebSocket.OPEN) return [];
+  if (!ws || ws.readyState !== WebSocket.OPEN) return null;
   try {
     const getTargetsId = sendCmd(ws, "Target.getTargets", {});
     const targetsResp = await waitForResponse(ws, getTargetsId, 5000);
@@ -1018,7 +1023,7 @@ export async function getOpenPageEntries(
       .filter(t => t.url.startsWith("http://") || t.url.startsWith("https://"));
   } catch (err) {
     console.warn(`[cdp] Failed to get open page entries for session ${sessionId}:`, err);
-    return [];
+    return null;
   }
 }
 
