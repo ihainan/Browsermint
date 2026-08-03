@@ -35,6 +35,7 @@ import {
   handleReleaseLease,
   handleGetLease,
   handleGetTargetLabels,
+  handleGetTargetOpener,
 } from "./services/proxy.service.js";
 
 export interface CreateAppOptions {
@@ -151,6 +152,10 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   server.get("/api/sessions/:id/targets", {
     handler: async (request, reply) =>
       handleGetTargets(request as Parameters<typeof handleGetTargets>[0], reply),
+  });
+  server.get("/api/sessions/:id/targets/:targetId/opener", {
+    handler: async (request, reply) =>
+      handleGetTargetOpener(request as Parameters<typeof handleGetTargetOpener>[0], reply),
   });
   server.post("/api/sessions/:id/targets", {
     handler: async (request, reply) =>

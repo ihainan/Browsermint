@@ -1446,6 +1446,10 @@ type CastProducer = {
 type ControllerState = {
   heldButtons: Set<string>;
   heldKeys: Set<number>;
+  /// The lease this connection claimed. Kept so anything that needs to know
+  /// "does this connection *still* hold the write lease" can re-check instead of
+  /// trusting the fact that it once presented one (codex review 2026-08-03, M4).
+  leaseId: string;
 };
 
 const producers = new Map<string, CastProducer>();
@@ -2021,12 +2025,62 @@ function clearVisibilityRecovery(p: CastProducer): void {
  *  holding the write lease is treated as the originator and should follow the new
  *  page. Everyone else gets the same notice as a cue to refresh their page list —
  *  auto-switching every window would be the focus-stealing bug in a new costume. */
+// 「这个 target 是从那个 target 开出来的」——只有 attachedToTarget 那一瞬间知道。
+// 事后 `Target.getTargets` **不再带 openerId**（实测：刚建时有，之后只剩
+// canAccessOpener=false），所以平台没法回头去核对，只能由我们记下来背书。
+// 平台据此判断收编请求是否可信；没有这条记录就不许收编（codex 复审 High-1）。
+const CHILD_ORIGIN_TTL_MS = 5 * 60_000;
+const childOrigins = new Map<string, { openerTargetId: string; at: number }>();
+
+function childOriginKey(sessionId: string, targetId: string): string {
+  return `${sessionId}:${targetId}`;
+}
+
+function rememberChildOrigin(sessionId: string, childTargetId: string, openerTargetId: string): void {
+  const now = Date.now();
+  for (const [k, v] of childOrigins) {
+    if (now - v.at > CHILD_ORIGIN_TTL_MS) childOrigins.delete(k);
+  }
+  childOrigins.set(childOriginKey(sessionId, childTargetId), { openerTargetId, at: now });
+}
+
+/** 平台收编前问这一句：这个 target 到底是谁开出来的？不知道就返回 null。 */
+export function lookupChildOrigin(sessionId: string, childTargetId: string): string | null {
+  const hit = childOrigins.get(childOriginKey(sessionId, childTargetId));
+  if (!hit) return null;
+  if (Date.now() - hit.at > CHILD_ORIGIN_TTL_MS) {
+    childOrigins.delete(childOriginKey(sessionId, childTargetId));
+    return null;
+  }
+  return hit.openerTargetId;
+}
+
 export function notifyChildTarget(
   sessionId: string, openerTargetId: string,
   child: { targetId: string; url?: string },
 ): void {
+  // 先记账再判断有没有人在看：即便此刻没有观看端（agent 自己点出来的页面），
+  // 这条来源关系照样是收编时唯一可信的依据。
+  rememberChildOrigin(sessionId, child.targetId, openerTargetId);
+  void notifyChildTargetViewers(sessionId, openerTargetId, child);
+}
+
+async function notifyChildTargetViewers(
+  sessionId: string, openerTargetId: string,
+  child: { targetId: string; url?: string },
+): Promise<void> {
   const p = producers.get(targetKey(sessionId, openerTargetId));
   if (!p || p.closed || p.viewers.size === 0) return;
+  // Presenting a lease once is not the same as still holding it: leases expire and
+  // can be taken over while the socket stays open. Re-check now, so a connection
+  // that lost the lease minutes ago is not told it "initiated" this
+  // (codex review 2026-08-03, M4).
+  const holders = new Set<WebSocket>();
+  await Promise.all([...p.controllers].map(async ([viewer, state]) => {
+    try {
+      if (await holdsLease(sessionId, openerTargetId, state.leaseId)) holders.add(viewer);
+    } catch { /* fail closed: treat as not holding */ }
+  }));
   for (const viewer of p.viewers) {
     if (viewer.readyState !== WebSocket.OPEN) continue;
     const payload = {
@@ -2036,7 +2090,9 @@ export function notifyChildTarget(
       openerTargetId,
       // A page can open another page with no user involved at all (script on
       // load, a redirect chain). Then nobody "initiated" it and nobody follows.
-      initiated: p.controllers.has(viewer),
+      // This is a UX hint only — the platform still proves provenance server-side
+      // before it will adopt anything.
+      initiated: holders.has(viewer),
     };
     try { viewer.send(JSON.stringify(payload)); } catch { /* viewer went away */ }
   }
@@ -2230,7 +2286,7 @@ export async function attachCastViewer(
   // ignored by the UI. (Before this, any cast connection would have become a
   // control channel the moment the producer started reading input.)
   if (leaseId) {
-    const state: ControllerState = { heldButtons: new Set(), heldKeys: new Set() };
+    const state: ControllerState = { heldButtons: new Set(), heldKeys: new Set(), leaseId };
     producer.controllers.set(viewer, state);
     viewer.on("message", (raw: WebSocket.RawData) => {
       if (producer.closed) return;

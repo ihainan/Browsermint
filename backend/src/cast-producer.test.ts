@@ -870,6 +870,7 @@ test("页面开出新页面：通知来源页的观看端", async () => {
     await attachCastViewer(SESSION, TARGET, v as any);
     v.received.length = 0;
     notifyChildTarget(SESSION, TARGET, { targetId: "child-1", url: "https://x/" });
+    await new Promise((r) => setTimeout(r, 30));
     const msgs = v.received.map((x) => JSON.parse(x)).filter((m) => m.type === "childTarget");
     assert.equal(msgs.length, 1);
     assert.equal(msgs[0].targetId, "child-1");
@@ -878,22 +879,51 @@ test("页面开出新页面：通知来源页的观看端", async () => {
   } finally { teardown(); }
 });
 
-test("只有持写权的连接算「发起者」，其他窗口不跟着跳", async () => {
+test("只有**此刻仍持写权**的连接算发起者，其他窗口不跟着跳", async () => {
   const created = setup();
+  const asked: any[] = [];
   try {
-    setPrismaForTests({ targetLease: { findFirst: async () => ({ id: "L1" }) } } as any);
+    // 租约查询必须真的被调用：旧版只看「连接当时带没带 leaseId」，把过期租约也
+    // 当成持有者（codex 复审 M4）。这个 mock 同时充当「有没有真的去查」的探针。
+    // holdsLease 先取库时间再查行，两个都要有替身，否则查询根本走不到
+    setPrismaForTests({
+      $queryRaw: async () => [{ now: new Date() }],
+      targetLease: { findFirst: async (q: any) => { asked.push(q); return { id: "L1" } } },
+    } as any);
     await setTargetViewport(SESSION, TARGET, 735, 867, 2);
     const watcher = new FakeViewer();
     const controller = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, watcher as any);            // 只读
-    await attachCastViewer(SESSION, TARGET, controller as any, "L1");   // 持租约
+    await attachCastViewer(SESSION, TARGET, watcher as any);
+    await attachCastViewer(SESSION, TARGET, controller as any, "L1");
     watcher.received.length = 0; controller.received.length = 0;
     notifyChildTarget(SESSION, TARGET, { targetId: "child-2" });
+    await new Promise((r) => setTimeout(r, 30));
     const pick = (v: FakeViewer) => v.received.map((x) => JSON.parse(x))
       .find((m: any) => m.type === "childTarget");
+    assert.ok(asked.length > 0, "必须真的去查租约，而不是只看连接带过 leaseId");
     assert.equal(pick(controller)?.initiated, true, "点链接的那个窗口才是发起者");
     assert.equal(pick(watcher)?.initiated, false,
       "旁观窗口只收到通知，不得自动切页（那就是抢焦点的老毛病换个马甲）");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("租约已经失效的连接不算发起者（连接还开着不代表还持有写权）", async () => {
+  const created = setup();
+  try {
+    setPrismaForTests({
+      $queryRaw: async () => [{ now: new Date() }],
+      targetLease: { findFirst: async () => null },      // 租约没了
+    } as any);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const stale = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, stale as any, "L-EXPIRED");
+    stale.received.length = 0;
+    notifyChildTarget(SESSION, TARGET, { targetId: "child-x" });
+    await new Promise((r) => setTimeout(r, 30));
+    const msg = stale.received.map((x) => JSON.parse(x))
+      .find((m: any) => m.type === "childTarget");
+    assert.ok(msg, "通知本身还是要发（页面确实开了）");
+    assert.equal(msg.initiated, false, "但它已经不是发起者了");
   } finally { teardown(); setPrismaForTests(null as any); }
 });
 

@@ -8,7 +8,7 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../db/client.js";
 import { config } from "../config.js";
 import { acquireLease, renewLease, releaseLease, currentLease, isLockedByOther, anyLeaseHeld, sweepExpiredLeases, LEASE_RENEW_HINT_MS } from "./lease.service.js";
-import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, attachCastViewer, COMBINED_INJECT_SCRIPT } from "./cdp.service.js";
+import { executeCdpCommand, initCdpSession, cleanupCdpSession, closeBrowserGracefully, getOpenPageUrls, getOpenPageEntries, openSavedTabs, restoreSavedTabs, setTargetViewport, reapplyTargetViewport, attachCastViewer, COMBINED_INJECT_SCRIPT, lookupChildOrigin } from "./cdp.service.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { driver } from "./driver/index.js";
 import { Prisma } from "@prisma/client";
@@ -1585,6 +1585,25 @@ export async function handleGetTargets(
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
   }
+}
+
+/** 这个 target 是从哪个 target 开出来的？
+ *
+ *  平台在收编「用户点链接开出来的新页面」之前用它做归属校验。**不能事后从
+ *  `Target.getTargets` 查**：openerId 只在 target 刚创建时存在，之后就只剩
+ *  canAccessOpener=false（实测）。所以答案来自 cast 服务在 attachedToTarget
+ *  那一刻记下的账（见 cdp.service 的 childOrigins）。不知道就如实答 null，
+ *  由平台决定拒绝——宁可少收编一个页面，也不能让人随口指认一个 target。 */
+export async function handleGetTargetOpener(
+  request: FastifyRequest<{ Params: { id: string; targetId: string }; Querystring: { token?: string } }>,
+  reply: FastifyReply
+) {
+  const { id: sessionId, targetId } = request.params;
+  const token = request.query.token;
+  if (!token) return reply.status(401).send({ error: "Missing token" });
+  const context = await getSessionProxyContext(sessionId, token, { wake: false });
+  if (!context) return reply.status(401).send({ error: "Invalid token" });
+  return reply.send({ openerTargetId: lookupChildOrigin(sessionId, targetId) });
 }
 
 export async function handleCreateTarget(
