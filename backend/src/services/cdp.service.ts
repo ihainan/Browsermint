@@ -1486,7 +1486,13 @@ const producersStarting = new Map<string, Promise<CastProducer>>();
 // acks and fans out — no image work on our side.
 // 70 was visibly soft on text; screencast frames are re-encoded per frame, so a
 // higher quality costs bandwidth but not latency.
-const CAST_QUALITY = 90;
+// 动帧的 JPEG 质量。90 太高了：1280x800 的密集页面一帧就 ~200KB，几次滚动十兆起步，
+// 公网链路上这直接变成「点一下要等半天」（2026-08-03 用户报障，实测中位 212KB/帧）。
+//
+// 这里的取舍是**动的时候糊一点没关系，停下来要清楚**——停下 250ms 就会有一张 q96 的
+// 高清静帧盖上来（SHARP_STILL_QUALITY），所以真正被人盯着看的画面质量不受影响。
+// 远程桌面协议普遍就是这么做的。
+const CAST_QUALITY = 62;
 // Keep the producer alive briefly after the last viewer leaves: switching tabs
 // in the workspace pane disconnects and reconnects within a second, and tearing
 // the stream down each time costs a visible black flash.
