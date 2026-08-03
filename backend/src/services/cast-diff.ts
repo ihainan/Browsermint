@@ -34,7 +34,7 @@ export interface FrameDifferOptions {
   keyframeRatio?: number;
   /** 两次整帧之间最多隔多久（毫秒）：防止长期增量累积出漂移 */
   keyframeIntervalMs?: number;
-  /** 位移搜索范围（像素）。一屏 800 高，±400 足够覆盖常见滚动 */
+  /** 位移搜索范围（像素）。一屏 800 高；差分忙时会跳帧，两帧间可能滚了大半屏，所以给到 ±700 */
   shiftRange?: number;
 }
 
@@ -46,7 +46,7 @@ const DEFAULTS = {
   quality: 62,
   keyframeRatio: 0.4,
   keyframeIntervalMs: 10_000,
-  shiftRange: 400,
+  shiftRange: 700,   // 帧被跳过时两帧之间可能已经滚了大半屏，范围太小就认不出来
 };
 
 /**
@@ -101,10 +101,16 @@ const SHIFT_TIE_RATIO = 1.15;
  *
  * 判据故意保守：错判成位移会让整屏内容对不上（很显眼），漏判只是这一帧退回分块/整帧。
  */
+/** 上一次位移判定的取值。只用于排障日志——真机上「为什么没认出滚动」只能靠它。 */
+export const shiftDiag = { best: 0, bestMad: 0, still: 0, spread: 0, why: "" };
+
 export function detectShift(
   prev: Float32Array, next: Float32Array, height: number, range: number,
 ): number {
-  if (profileSpread(prev) < MIN_SPREAD || profileSpread(next) < MIN_SPREAD) return 0;
+  const spread = Math.min(profileSpread(prev), profileSpread(next));
+  shiftDiag.spread = spread;
+  shiftDiag.best = 0; shiftDiag.bestMad = 0; shiftDiag.still = 0; shiftDiag.why = "";
+  if (spread < MIN_SPREAD) { shiftDiag.why = "flat"; return 0; }
   const buf: number[] = [];
   /**
    * 位移 dy 下「对得有多好」。**掐掉最差的那 1/4 行**：sticky 头部、固定底栏、悬浮按钮
@@ -134,7 +140,8 @@ export function detectShift(
     scores[dy + range] = m;
     if (m < bestMad) { bestMad = m; best = dy; }
   }
-  if (bestMad > SHIFT_MAD_LIMIT) return 0;
+  shiftDiag.best = best; shiftDiag.bestMad = bestMad; shiftDiag.still = still;
+  if (bestMad > SHIFT_MAD_LIMIT) { shiftDiag.why = "mad"; return 0; }
   // 同样好的候选里取最近的一个：页面上重复的行（表格、列表）会让远处也「对得上」，
   // 认错方向或认成一屏多的位移，画面就整块错位。
   for (let dy = -range; dy <= range; dy++) {
@@ -143,7 +150,7 @@ export function detectShift(
       best = dy;
     }
   }
-  if (still <= bestMad * SHIFT_MARGIN) return 0;   // 「没动」解释得同样好 → 不算位移
+  if (still <= bestMad * SHIFT_MARGIN) { shiftDiag.why = "margin"; return 0; }
   return best;
 }
 
@@ -192,7 +199,9 @@ export class FrameDiffer {
     const limit = shift === 0 ? this.opt.keyframeRatio : 0.8;
     if (area > limit) {
       return this.keyframe(jpeg, data, width, height, now,
-        `area=${area.toFixed(2)}>${limit} shift=${shift}`);
+        `area=${area.toFixed(2)}>${limit} shift=${shift} 位移判据[最优=${shiftDiag.best} `
+        + `分=${shiftDiag.bestMad.toFixed(2)} 不动=${shiftDiag.still.toFixed(2)} `
+        + `起伏=${shiftDiag.spread.toFixed(2)} 否决=${shiftDiag.why || "无"}]`);
     }
 
     await this.encodeTiles(tiles, data, width);

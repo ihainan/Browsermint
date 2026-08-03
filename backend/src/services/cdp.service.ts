@@ -1840,7 +1840,7 @@ async function runDiff(p: CastProducer, data: string): Promise<void> {
     if (res.kind === "key") {
       // 为什么退回整帧：排「怎么全是整帧」这类问题时，没有这行只能猜（限频打印）
       const now = Date.now();
-      if (now - (p.lastDiffLogAt || 0) > 2000) {
+      if (now - (p.lastDiffLogAt || 0) > 800) {
         p.lastDiffLogAt = now;
         console.info(`[cast] key frame (${res.why})`);
       }
