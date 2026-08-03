@@ -195,6 +195,25 @@ test("位移检测：真的位移要认出来（含非 8 倍数——JPEG 块会
   }
 });
 
+test("位移检测：真实页面那种「对得上但不完美」的滚动也要认出来", () => {
+  // 真机日志的教训：sticky 头部 + JPEG 噪声下，最优匹配的平均差实测在 0.85~1.36，
+  // 门槛卡在 1.0 会让常见滚动全被判成「没滚」→ 每帧退回整帧。这条钉住那个区间。
+  const src = profile(y => 128 + 60 * Math.sin(y / 9) + 20 * Math.cos(y / 3));
+  const dy = 40;
+  const noise = (y: number) => ((y * 2654435761) % 1000) / 1000 * 2.6 - 1.3;  // ±1.3 的确定性噪声
+  const b = profile(y => (y < 90 ? src[y] : y + dy < H ? src[y + dy] + noise(y) : 30 + (y % 17)));
+  assert.equal(detectShift(src, b, H, 200), dy);
+});
+
+test("位移检测：重复纹理下取最近的解，别认成隔了好几屏", () => {
+  // 表格/列表这类页面上，隔 N 行的内容也「对得上」；认错距离画面会整块错位
+  // 行距 40 的重复纹理（表格行）滚了 12px：12 / 52 / 92 都「对得上」，必须取 12。
+  const period = 40, dy = 12;
+  const src = profile(y => 128 + 60 * Math.sin((y / period) * 2 * Math.PI) + y / 40);
+  const b = profile(y => (y + dy < H ? src[y + dy] : 40 + (y % 13)));
+  assert.equal(detectShift(src, b, H, 200), dy);
+});
+
 test("位移检测：剖面太平（大片纯色）时放弃检测，别乱认", () => {
   const flat = profile(() => 200);
   const alsoFlat = profile(() => 200.2);

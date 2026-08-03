@@ -82,9 +82,19 @@ function profileSpread(p: Float32Array): number {
   return dev / p.length;
 }
 
-const SHIFT_MAD_LIMIT = 1.0;      // 平均绝对差小于它才算「对得上」
+/**
+ * 「对得上」的绝对门槛。**放宽到 3.0 是实测改的**：真实页面滚动（含 sticky 头部、
+ * 懒加载、JPEG 噪声）的最优匹配落在 0.85~1.36，卡在 1.0 会把 20px 和 150px 这类
+ * 常见滚动直接判成「没滚」——真机日志里 shift 全是 0、每帧退回整帧，就是这么来的。
+ *
+ * 真正分开「滚了」和「没滚」的是下面的倍数关系，不是这个绝对值：实测真滚动 5~27 倍，
+ * 完全没动时是 0 倍。所以这道只用来挡「两幅无关画面」。
+ */
+const SHIFT_MAD_LIMIT = 3.0;
 const SHIFT_MARGIN = 2.5;         // 最优要比「不动」明显好这么多倍，才敢说真的滚了
 const MIN_SPREAD = 1.5;           // 剖面起伏下限
+/** 差不多好的候选里取位移最小的：远处的巧合匹配（页面自身重复纹理）不该赢过近处的真解。 */
+const SHIFT_TIE_RATIO = 1.15;
 
 /**
  * 找「整幅内容上下平移了多少」。返回 0 表示不是位移。
@@ -95,24 +105,44 @@ export function detectShift(
   prev: Float32Array, next: Float32Array, height: number, range: number,
 ): number {
   if (profileSpread(prev) < MIN_SPREAD || profileSpread(next) < MIN_SPREAD) return 0;
+  const buf: number[] = [];
+  /**
+   * 位移 dy 下「对得有多好」。**掐掉最差的那 1/4 行**：sticky 头部、固定底栏、悬浮按钮
+   * 在滚动时原地不动，永远对不上；把它们和真正对不上的行一起平均，会把一次好端端的
+   * 滚动的分数拉到判不出来（实测顶部 90px 固定栏就足以让 40px 滚动被判成「没滚」）。
+   */
   const mad = (dy: number): number => {
     const from = Math.max(0, -dy);
     const to = Math.min(height, height - dy);
     if (to - from < height * 0.3) return Infinity;
+    buf.length = 0;
+    for (let y = from; y < to; y += 4) buf.push(Math.abs(prev[y + dy] - next[y]));
+    if (buf.length < 20) return Infinity;
+    buf.sort((a, b) => a - b);
+    const keep = Math.max(10, Math.floor(buf.length * 0.75));
     let sum = 0;
-    let n = 0;
-    for (let y = from; y < to; y += 4) { sum += Math.abs(prev[y + dy] - next[y]); n++; }
-    return n >= 20 ? sum / n : Infinity;
+    for (let i = 0; i < keep; i++) sum += buf[i];
+    return sum / keep;
   };
   const still = mad(0);
   let best = 0;
   let bestMad = Infinity;
+  const scores = new Float64Array(2 * range + 1);
   for (let dy = -range; dy <= range; dy++) {
-    if (dy === 0) continue;
+    if (dy === 0) { scores[dy + range] = Infinity; continue; }
     const m = mad(dy);
+    scores[dy + range] = m;
     if (m < bestMad) { bestMad = m; best = dy; }
   }
   if (bestMad > SHIFT_MAD_LIMIT) return 0;
+  // 同样好的候选里取最近的一个：页面上重复的行（表格、列表）会让远处也「对得上」，
+  // 认错方向或认成一屏多的位移，画面就整块错位。
+  for (let dy = -range; dy <= range; dy++) {
+    if (dy === 0) continue;
+    if (scores[dy + range] <= bestMad * SHIFT_TIE_RATIO && Math.abs(dy) < Math.abs(best)) {
+      best = dy;
+    }
+  }
   if (still <= bestMad * SHIFT_MARGIN) return 0;   // 「没动」解释得同样好 → 不算位移
   return best;
 }
