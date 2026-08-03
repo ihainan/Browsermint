@@ -639,6 +639,63 @@ test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async
   } finally { teardown(); }
 });
 
+
+/**
+ * 造两张「差一点点」的真 JPEG。
+ *
+ * 不能用假字符串：差分器解码不了就直接回退整帧，于是**任何关于增量的断言在这一层都
+ * 区分不出对错**（这条测试第一版就是这么白写的）。
+ */
+async function realJpegs(): Promise<{ a: string; b: string }> {
+  const sharp = (await import("sharp")).default;
+  const W = 320, H = 240;
+  const raw = Buffer.alloc(W * H * 3);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 3;
+    const band = 60 + 150 * Math.abs(Math.sin(y / 9));
+    raw[i] = band; raw[i + 1] = (band + x) & 0xff; raw[i + 2] = (band + y) & 0xff;
+  }
+  const changed = Buffer.from(raw);
+  for (let y = 40; y < 70; y++) for (let x = 40; x < 90; x++) {
+    const i = (y * W + x) * 3; changed[i] = 0; changed[i + 1] = 0; changed[i + 2] = 0;
+  }
+  const enc = (r: Buffer) =>
+    sharp(r, { raw: { width: W, height: H, channels: 3 } }).jpeg({ quality: 62 }).toBuffer();
+  return { a: (await enc(raw)).toString("base64"), b: (await enc(changed)).toString("base64") };
+}
+
+test("静帧之后的下一帧必须是整帧，不能是接在旧动帧上的增量", async () => {
+  // 用户实测（2026-08-04）：静止时画面整体下移、顶部空一条、底部被切，和正常状态来回跳。
+  // 根因是观看端手里已经换成了那张高清静帧，而差分器的基准还停在之前的动帧上——
+  // 下一帧的增量（含滚动位移）被贴到了静帧上。
+  //
+  // **必须把观看端倍率设成 2**：只有「静帧倍率 == 流倍率」时旧写法才跳过重置。
+  // 倍率不同的时候旧写法也会重置，所以此前的用例（默认 1x）永远碰不到这个洞——
+  // 这正是它躲过测试、直到用户在视网膜屏上才撞见的原因。
+  const created = setup({
+    sockets: [() => new FakeSocket(), () => new StillSocket()], scrollWidth: 735,
+  });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)! as StillSocket;
+    const { a, b } = await realJpegs();
+    sock.pushStreamFrame(a);
+    await new Promise((r) => setTimeout(r, 900));
+    assert.ok(sock.answerShot, "idle 后应发起高清截图");
+    sock.answerShot!(a);                            // 高清静帧（观看端手里换成了它）
+    await new Promise((r) => setTimeout(r, 60));
+    v.received.length = 0;
+    sock.pushStreamFrame(b);                        // 页面又动起来
+    await new Promise((r) => setTimeout(r, 400));
+    const frames = v.received.map((x) => JSON.parse(x)).filter(f => f.data || f.delta);
+    assert.ok(frames.length > 0, "动起来之后应当有帧发出");
+    assert.ok(frames[0].data,
+      `静帧之后的第一帧必须是整帧，实际 ${JSON.stringify(frames[0]).slice(0, 140)}`);
+  } finally { teardown(); }
+});
+
 // 注：原「放宽布局跨 producer 记忆」的两条用例已随 fit 机制一并移除
 // （布局固定后没有「放宽布局」这个概念了，见上面的固定视口用例）。
 
