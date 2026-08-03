@@ -112,15 +112,22 @@ const SHIFT_MAD_LIMIT = 3.0;
 /**
  * 最优要比「不动」好这么多倍，才敢说真的滚了。
  *
- * 2.5 太严：真机上一次 102px 的滚动只比「不动」好 2.14 倍就被否掉了（离线合成图能到
- * 5~27 倍，真实页面因为 sticky/懒加载达不到）。放到 1.6 的底气在于**认错也不会画错**：
+ * 2.5 太严：真机上真实滚动只比「不动」好 1.5~2.1 倍就被否掉了（离线合成图能到
+ * 5~27 倍，真实页面因为 sticky/懒加载达不到）。放到 1.3 的底气在于**认错也不会画错**：
  * 位移之后所有块都要跟「按这个位移搬过来的上一帧」逐块比，认错的话几乎每块都对不上，
  * 面积判据会立刻把这一帧退回整帧。
  */
-const SHIFT_MARGIN = 1.6;
+const SHIFT_MARGIN = 1.3;
 const MIN_SPREAD = 1.5;           // 剖面起伏下限
-/** 差不多好的候选里取位移最小的：远处的巧合匹配（页面自身重复纹理）不该赢过近处的真解。 */
+/**
+ * 差不多好的候选里取位移最小的：远处的巧合匹配（页面自身重复纹理）不该赢过近处的真解。
+ *
+ * 但**只在明显更近时才换**（不到六成距离）。第一版写成「近一点就换」，于是真机上
+ * 最优 200 被换成 199——差一像素等于整屏内容全对不上，比认不出位移还糟（面积判据里
+ * 看得清清楚楚：位移认对了，却仍有 81% 的块判成变化）。
+ */
 const SHIFT_TIE_RATIO = 1.15;
+const SHIFT_TIE_MUST_BE_NEARER = 0.6;
 
 /**
  * 位移判定的取值，只用于排障日志。**每个差分器传自己的**——写成模块级全局的话，
@@ -170,7 +177,9 @@ export function detectShift(
     const to = Math.min(height, height - dy);
     if (to - from < height * 0.3) return Infinity;
     buf.length = 0;
-    for (let y = from; y < to; y += 4) buf.push(Math.abs(prev[y + dy] - next[y]));
+    // 隔 2 行采样（不是 4）：采得太稀会把最优位移算偏一两个像素，而位移偏一像素
+    // 就是整屏对不上——这里省下的一点 CPU 不值。
+    for (let y = from; y < to; y += 2) buf.push(Math.abs(prev[y + dy] - next[y]));
     if (buf.length < 20) return Infinity;
     buf.sort((a, b) => a - b);
     const keep = Math.max(10, Math.floor(buf.length * 0.75));
@@ -194,7 +203,8 @@ export function detectShift(
   // 认错方向或认成一屏多的位移，画面就整块错位。
   for (let dy = -range; dy <= range; dy++) {
     if (dy === 0) continue;
-    if (scores[dy + range] <= bestMad * SHIFT_TIE_RATIO && Math.abs(dy) < Math.abs(best)) {
+    if (scores[dy + range] <= bestMad * SHIFT_TIE_RATIO
+        && Math.abs(dy) <= Math.abs(best) * SHIFT_TIE_MUST_BE_NEARER) {
       best = dy;
     }
   }

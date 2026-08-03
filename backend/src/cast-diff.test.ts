@@ -307,3 +307,11 @@ test("位移不是 8 的倍数时，没变的内容不能被当成变了（JPEG 
   const area = res.tiles.reduce((s: number, t: any) => s + t.w * t.h, 0) / (W * H);
   assert.ok(area < 0.25, `位移之后只该补新露出来的一条，实际变化面积 ${(area * 100).toFixed(0)}%`);
 });
+
+test("位移必须精确到像素：差一像素比认不出来更糟", () => {
+  // 「同分取最近」写松了会把 200 换成 199，整屏内容随之全部对不上
+  const src = profile(y => 128 + 50 * Math.sin(y / 8) + 25 * Math.cos(y / 21));
+  const dy = 200;
+  const b = profile(y => (y + dy < H ? src[y + dy] : 20 + (y % 23)));
+  assert.equal(detectShift(src, b, H, 300), dy);
+});
