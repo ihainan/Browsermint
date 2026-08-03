@@ -1440,6 +1440,7 @@ type CastProducer = {
   /// ——和「只送最新一帧」同一个道理，且顺便给 CPU 封了顶。
   diffBusy: boolean;
   diffPending: string | null;
+  lastDiffLogAt?: number;
   /// Layout we asked Chrome for but have not yet seen a frame from. While this is
   /// set the stream is in transition: frames still in flight were rendered against
   /// the *old* layout, so publishing the new revision now would stamp stale pixels
@@ -1836,7 +1837,15 @@ async function runDiff(p: CastProducer, data: string): Promise<void> {
   try {
     const res = await p.differ.next(Buffer.from(data, "base64"));
     if (p.closed || p.masked || p.pendingLayout) return;
-    if (res.kind === "key") sendFramePayload(p, { key: true, data: res.data });
+    if (res.kind === "key") {
+      // 为什么退回整帧：排「怎么全是整帧」这类问题时，没有这行只能猜（限频打印）
+      const now = Date.now();
+      if (now - (p.lastDiffLogAt || 0) > 2000) {
+        p.lastDiffLogAt = now;
+        console.info(`[cast] key frame (${res.why})`);
+      }
+      sendFramePayload(p, { key: true, data: res.data });
+    }
     else if (res.tiles.length > 0 || res.shift !== 0) {
       sendFramePayload(p, { key: false, shift: res.shift, tiles: res.tiles });
     }

@@ -24,7 +24,7 @@ export interface DiffTile {
 }
 
 export type DiffResult =
-  | { kind: "key"; data: string }                                  // 整帧（base64 JPEG）
+  | { kind: "key"; data: string; why: string }                     // 整帧（base64 JPEG）
   | { kind: "delta"; shift: number; tiles: DiffTile[] };           // 增量：先位移，再贴块
 
 export interface FrameDifferOptions {
@@ -146,7 +146,8 @@ export class FrameDiffer {
 
     if (sizeChanged || !this.prevRaw || !this.prevProfile
         || now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
-      return this.keyframe(jpeg, data, width, height, now);
+      return this.keyframe(jpeg, data, width, height, now,
+        sizeChanged ? "size" : !this.prevRaw ? "first" : "interval");
     }
 
     const profile = rowProfile(data, width, height);
@@ -160,7 +161,8 @@ export class FrameDiffer {
     const area = tiles.reduce((sum, t) => sum + t.w * t.h, 0) / (width * height);
     const limit = shift === 0 ? this.opt.keyframeRatio : 0.8;
     if (area > limit) {
-      return this.keyframe(jpeg, data, width, height, now);
+      return this.keyframe(jpeg, data, width, height, now,
+        `area=${area.toFixed(2)}>${limit} shift=${shift}`);
     }
 
     await this.encodeTiles(tiles, data, width);
@@ -170,7 +172,8 @@ export class FrameDiffer {
     // 省掉一整类「某些页面上增量反而更大」的意外（实测滚动时确实会出现）。
     const deltaBytes = tiles.reduce((sum, t) => sum + (t.data.length * 3) / 4, 0);
     if (deltaBytes >= jpeg.length * 0.9) {
-      return this.keyframe(jpeg, data, width, height, now);
+      return this.keyframe(jpeg, data, width, height, now,
+        `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`);
     }
 
     this.prevRaw = data;
@@ -179,12 +182,12 @@ export class FrameDiffer {
   }
 
   private keyframe(
-    jpeg: Buffer, raw: Buffer, width: number, height: number, now: number,
+    jpeg: Buffer, raw: Buffer, width: number, height: number, now: number, why = "first",
   ): DiffResult {
     this.prevRaw = raw;
     this.prevProfile = rowProfile(raw, width, height);
     this.lastKeyAt = now;
-    return { kind: "key", data: jpeg.toString("base64") };
+    return { kind: "key", data: jpeg.toString("base64"), why };
   }
 
   /**
