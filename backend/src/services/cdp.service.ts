@@ -1679,10 +1679,20 @@ function frameMatchesPendingLayout(p: CastProducer, metadata: any): boolean {
 // grab one screenshot at 2x and send it as the current frame. Motion stays smooth,
 // still content becomes crisp — the same trade every remote-desktop protocol makes.
 const SHARP_STILL_SCALE = 2;
-const SHARP_STILL_QUALITY = 92;
+// The still is not only about pixel count — at 2x on a retina viewer the stream is
+// already pixel-for-pixel, yet JPEG ringing still sits on every glyph edge. That is
+// what users report as "100% looks soft while 80% looks fine": at 80% the frame is
+// downsampled and the artefacts average away. So the still is worth taking even when
+// it adds no pixels, as long as it carries a visibly better quality.
+const SHARP_STILL_QUALITY = 96;
 const IDLE_BEFORE_STILL_MS = 250;
 // Bound the payload: a 2x still of a very wide fitted layout gets big fast.
 const SHARP_STILL_MAX_WIDTH = 2560;
+
+/** Still resolution: never below what the stream already ships. */
+function stillScale(p: CastProducer): number {
+  return Math.max(SHARP_STILL_SCALE, p.streamScale || 1);
+}
 
 function clearIdleStill(p: CastProducer): void {
   if (p.idleTimer) { clearTimeout(p.idleTimer); p.idleTimer = null; }
@@ -1691,12 +1701,11 @@ function clearIdleStill(p: CastProducer): void {
 function scheduleIdleStill(p: CastProducer): void {
   clearIdleStill(p);
   if (p.closed || p.masked || p.pendingLayout || !p.layout) return;
-  // The stream already carries at least as many pixels as the still would add.
-  // Taking it anyway would cost a screenshot round-trip per pause for an image
-  // the viewer cannot tell apart — and it is that swap, not the still itself,
-  // that users see as the picture "settling" a moment after it stops moving.
-  if (p.streamScale >= SHARP_STILL_SCALE) return;
-  if (Math.round(p.layout.width * SHARP_STILL_SCALE) > SHARP_STILL_MAX_WIDTH) return;
+  // Earlier this bailed out when the stream was already at 2x, on the theory that a
+  // still with the same pixel count adds nothing. That was wrong on the quality
+  // axis: same pixels at q96 instead of q90 is exactly the difference between soft
+  // and crisp text (2026-08-03 user report).
+  if (Math.round(p.layout.width * stillScale(p)) > SHARP_STILL_MAX_WIDTH) return;
   p.idleTimer = setTimeout(() => { void captureSharpStill(p); }, IDLE_BEFORE_STILL_MS);
 }
 
@@ -1716,7 +1725,7 @@ async function captureSharpStill(p: CastProducer): Promise<void> {
     // different layout than the stream is showing.
     const res = await producerRequest(p, "Page.captureScreenshot", {
       format: "jpeg", quality: SHARP_STILL_QUALITY, captureBeyondViewport: false,
-      clip: { x: 0, y: 0, width, height, scale: SHARP_STILL_SCALE },
+      clip: { x: 0, y: 0, width, height, scale: stillScale(p) },
     });
     const data = res?.data as string | undefined;
     if (!data) return;

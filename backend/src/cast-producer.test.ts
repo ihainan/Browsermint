@@ -626,7 +626,11 @@ test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async
 // 注：原「放宽布局跨 producer 记忆」的两条用例已随 fit 机制一并移除
 // （布局固定后没有「放宽布局」这个概念了，见上面的固定视口用例）。
 
-test("流已经是 2x：不再抓高清静帧（那一步正是动静之间的清晰度跳变）", async () => {
+// 2026-08-03 推翻了此前那条「流已经是 2x 就不抓静帧」。当时的理由是「像素数没增加，
+// 抓了也白抓」——**只对了像素这一半**。视网膜屏上 2x 的流已经是像素对像素，可 JPEG
+// 的振铃仍然压在每个字的边缘上，这正是用户说的「100% 看着糊、80% 反而清楚」（80% 时
+// 帧被降采样，痕迹被平均掉了）。所以静帧该抓，只是它的价值在画质不在分辨率。
+test("流已经是 2x：静止时照样抓高清静帧（同倍率、更高画质）", async () => {
   // setTargetViewport 先建一条视口 socket，producer 是第二条 —— 静帧要断言在后者上
   const created = setup({
     sockets: [() => new FakeSocket(), () => new StillSocket()], scrollWidth: 735,
@@ -638,9 +642,14 @@ test("流已经是 2x：不再抓高清静帧（那一步正是动静之间的�
     const sock = created.at(-1)! as StillSocket;
     sock.pushStreamFrame("MOVE1");
     await new Promise((r) => setTimeout(r, 400));   // 超过 IDLE_BEFORE_STILL_MS
-    assert.ok(!sock.answerShot, "流已达 2x，静止时不该再发 captureScreenshot");
+    const shot = sock.sent.find((m) => m.method === "Page.captureScreenshot");
+    assert.ok(shot, "静止之后必须抓一张静帧");
+    assert.equal(shot!.params.clip.scale, 2, "倍率不低于流本身，别把画面降下去");
+    assert.ok(shot!.params.quality >= 95, "静帧的意义在画质：质量必须明显高于流");
+    sock.answerShot!("STILL");
+    await new Promise((r) => setTimeout(r, 20));
     const datas = v.received.map((x) => JSON.parse(x).data).filter(Boolean);
-    assert.equal(datas.at(-1), "MOVE1", "屏上留的就是那张 2x 动帧");
+    assert.equal(datas.at(-1), "STILL", "屏上最后留的是那张高画质静帧");
   } finally { teardown(); }
 });
 
