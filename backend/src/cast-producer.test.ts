@@ -933,3 +933,62 @@ test("没有观看端时不做任何广播（agent 自己开的页面不该惊�
     notifyChildTarget(SESSION, "no-such-target", { targetId: "child-3" });
   } finally { teardown(); }
 });
+
+// ── 文本类输入（2026-08-03 用户实测：中文打不进去）──────────────────────────
+// dispatchInput 开头有一道 `if (!msg.event) return`，而 insertText / imeComposition
+// 这类消息只有一段文本、没有 event 字段——它们在进入任何分支之前就被丢掉了。
+// 中文定稿因此从来没送到过页面，粘贴的文本应该也一样。
+//
+// 这块此前**零测试覆盖**：BM 的输入测试全在测鼠标和滚轮；前端那条「中文输入」的
+// 用例只断言到「组件发出了 insertText」，接收端理不理没人管，于是两边都是绿的。
+test("输入法定稿的文字必须真的送到页面（没有 event 字段也要认）", async () => {
+  const created = setup();
+  try {
+    setPrismaForTests({
+      $queryRaw: async () => [{ now: new Date() }],
+      targetLease: { findFirst: async () => ({ id: "L1" }) },
+    } as any);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    const sock = created.at(-1)!;
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 735, deviceHeight: 867 } },
+    })));
+    await new Promise((r) => setTimeout(r, 20));
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "insertText", text: "你好啊", revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const ins = sock.sent.filter((m) => m.method === "Input.insertText");
+    assert.equal(ins.length, 1, "insertText 必须被分发到页面");
+    assert.equal(ins[0].params.text, "你好啊");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});
+
+test("组合中的文字也要送到页面（否则远端一直空白到选词那一刻）", async () => {
+  const created = setup();
+  try {
+    setPrismaForTests({
+      $queryRaw: async () => [{ now: new Date() }],
+      targetLease: { findFirst: async () => ({ id: "L1" }) },
+    } as any);
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any, "L1");
+    const sock = created.at(-1)!;
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 735, deviceHeight: 867 } },
+    })));
+    await new Promise((r) => setTimeout(r, 20));
+    v.emit("message", Buffer.from(JSON.stringify({
+      type: "imeComposition", text: "nihao", revision: 1,
+    })));
+    await new Promise((r) => setTimeout(r, 60));
+    const comp = sock.sent.filter((m) => m.method === "Input.imeSetComposition");
+    assert.equal(comp.length, 1);
+    assert.equal(comp[0].params.text, "nihao");
+  } finally { teardown(); setPrismaForTests(null as any); }
+});

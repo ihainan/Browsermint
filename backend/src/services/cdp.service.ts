@@ -2228,6 +2228,28 @@ function heldButtonsMask(st: ControllerState): number {
  *  CSS-viewport space (the viewer maps from its canvas), which is exactly what
  *  Input.* expects — no scaling here on purpose. */
 function dispatchInput(p: CastProducer, msg: Record<string, any>, st: ControllerState): void {
+  // 文本类消息（输入法定稿、粘贴、组合中的文字）没有 `event` 字段——它们不是鼠标或
+  // 键盘事件，只有一段文本。所以必须在下面那道 `event` 检查**之前**处理掉，否则会被
+  // 当成畸形消息直接丢掉。
+  //
+  // 这正是「中文打不出去」的真正原因，而且从一开始就是这样：候选词窗口的位置只是让
+  // 人看不见候选词，就算看见了、选了词，定稿的那段文字也到不了页面（2026-08-03 用户
+  // 实测「只有 n 进了输入框」——那个 n 是组合开始前漏出去的第一个按键）。
+  if (msg.type === "insertText" && typeof msg.text === "string") {
+    // Covers IME-committed text and paste without needing composition sync.
+    producerSend(p, "Input.insertText", { text: msg.text.slice(0, 4096) });
+    return;
+  }
+  // 组合中的文字（还没选定的拼音/假名）。没有这条的话，用户打字的整个过程远端页面
+  // 一片空白，直到选词那一刻才整段蹦出来——本地打字从来不是这样的。
+  // 空串等于撤销组合，Chrome 会把之前显示的临时文字清掉。
+  if (msg.type === "imeComposition" && typeof msg.text === "string") {
+    const text = msg.text.slice(0, 1024);
+    producerSend(p, "Input.imeSetComposition", {
+      text, selectionStart: text.length, selectionEnd: text.length,
+    });
+    return;
+  }
   const ev = msg?.event;
   if (!ev || typeof ev !== "object") return;
   if (msg.type === "mouseEvent") {
@@ -2258,22 +2280,6 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>, st: Controller
       autoRepeat: !!ev.autoRepeat, isKeypad: false, isSystemKey: false,
     });
     return;
-  }
-  if (msg.type === "insertText" && typeof msg.text === "string") {
-    // Covers IME-committed text and paste without needing composition sync.
-    producerSend(p, "Input.insertText", { text: msg.text.slice(0, 4096) });
-    return;
-  }
-  // 组合中的文字（还没选定的拼音/假名）。没有这条的话，用户打字的整个过程远端页面
-  // 一片空白，直到选词那一刻才整段蹦出来——本地打字从来不是这样的。
-  // 空串等于撤销组合，Chrome 会把之前显示的临时文字清掉。
-  if (msg.type === "imeComposition" && typeof msg.text === "string") {
-    const text = msg.text.slice(0, 1024);
-    producerSend(p, "Input.imeSetComposition", {
-      text,
-      selectionStart: text.length,
-      selectionEnd: text.length,
-    });
   }
 }
 
