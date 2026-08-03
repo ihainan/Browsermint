@@ -290,10 +290,18 @@ export class FrameDiffer {
     for (let y0 = Math.floor(from / T) * T; y0 < to; y0 += T) {
       const h = Math.min(T, to - y0);
       if (h <= 0) continue;
-      for (let x0 = 0; x0 < width; x0 += T) {
+      // **同一行里相邻的变化块并成一条横带再压**。单独压小块很亏：每块一份 JPEG 头，
+      // 块之间的相关性也用不上。真机实测滚动时 14 个小块要 51KB，而整帧才 56KB——
+      // 增量白算了。合并之后同样的内容通常只要一半上下。
+      let runStart = -1;
+      for (let x0 = 0; x0 <= width; x0 += T) {
         const w = Math.min(T, width - x0);
-        if (this.regionDiffers(prev, next, width, height, x0, y0, w, h, shift)) {
-          out.push({ x: x0, y: y0, w, h, data: "" });
+        const changed = x0 < width
+          && this.regionDiffers(prev, next, width, height, x0, y0, w, h, shift);
+        if (changed && runStart < 0) runStart = x0;
+        if (!changed && runStart >= 0) {
+          out.push({ x: runStart, y: y0, w: Math.min(x0, width) - runStart, h, data: "" });
+          runStart = -1;
         }
       }
     }

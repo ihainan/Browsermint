@@ -253,3 +253,38 @@ test("真正的空白网页（纯白但有压缩起伏）不能被当成无效�
   const res: any = await d.next(await toJpeg(nearlyWhite));
   assert.ok(res.kind === "key" || res.tiles.length > 0, "有内容的白底页面必须照常送出");
 });
+
+test("同一行相邻的变化块要并成一条，别一小块一小块单独压", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  const wide = Buffer.from(base);
+  for (let y = 100; y < 150; y++) for (let x = 0; x < W; x++) {   // 横跨整行的一条改动
+    const i = (y * W + x) * 3; wide[i] = 10; wide[i + 1] = 10; wide[i + 2] = 10;
+  }
+  const res: any = await d.next(await toJpeg(wide));
+  assert.equal(res.kind, "delta");
+  const row = res.tiles.filter((t: any) => t.y === 64);
+  assert.equal(row.length, 1, `整行改动应当只发一条，实际 ${row.length} 块`);
+  assert.equal(row[0].w, W, "这一条应当横跨整幅宽度");
+  // 还原仍要正确（合并不能把坐标算错）
+  const prevRaw = await sharp(await toJpeg(base)).removeAlpha().raw().toBuffer();
+  const restored = await apply(prevRaw, res);
+  const target = await sharp(await toJpeg(wide)).removeAlpha().raw().toBuffer();
+  assert.ok(meanDiff(restored, target) < 12, `还原偏差过大: ${meanDiff(restored, target)}`);
+});
+
+test("不相邻的变化块不能被并到一起（中间没变的部分不该重发）", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  const two = Buffer.from(base);
+  for (const x0 of [0, W - 64]) {
+    for (let y = 100; y < 120; y++) for (let x = x0; x < x0 + 64; x++) {
+      const i = (y * W + x) * 3; two[i] = 5; two[i + 1] = 5; two[i + 2] = 5;
+    }
+  }
+  const res: any = await d.next(await toJpeg(two));
+  const row = res.tiles.filter((t: any) => t.y === 64);
+  assert.equal(row.length, 2, `左右两块不该合并，实际 ${row.length}`);
+});
