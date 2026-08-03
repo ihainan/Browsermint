@@ -1837,6 +1837,21 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       return;
     }
     if (msg.method === "Runtime.bindingCalled"
+        && msg.params?.name === "__browsermint_caret") {
+      const raw = String(msg.params?.payload ?? "");
+      const [xs, ys] = raw.split(",");
+      const caret = raw && Number.isFinite(Number(xs)) && Number.isFinite(Number(ys))
+        ? { x: Number(xs), y: Number(ys) } : null;
+      // 密码框聚焦时连位置都不报：候选窗的落点会暴露光标在密码框的哪一格
+      const payload = JSON.stringify({ type: "caret", caret: p.masked ? null : caret });
+      for (const viewer of p.viewers) {
+        if (viewer.readyState === WebSocket.OPEN) {
+          try { viewer.send(payload); } catch { /* viewer went away */ }
+        }
+      }
+      return;
+    }
+    if (msg.method === "Runtime.bindingCalled"
         && msg.params?.name === "__browsermint_password_focus") {
       const on = msg.params?.payload === "1";
       if (on !== p.masked) {
@@ -2142,6 +2157,40 @@ async function assertPageTarget(sessionId: string, targetId: string): Promise<vo
 // agent's own CDP can still read the DOM — so masking is defence in depth, not a
 // guarantee. Real secrecy also requires the agent to be fenced off (it is,
 // during a takeover).
+// 输入法候选窗跟着**本地**那个承载输入的元素走。观看端只有一张画布，所以必须把
+// 那个隐藏输入框摆到「远端光标此刻在哪」对应的画布位置上，候选词才会出现在用户
+// 正在打字的地方，而不是飘到屏幕角落（原实现把它塞在 left:-9999px，等于没法用）。
+//
+// 远端光标位置只有页面自己知道，所以让页面在焦点/选区变化时报上来。坐标是远端 CSS
+// 视口坐标，与输入事件用的是同一套，观看端按已有的映射反着换算即可。
+const CARET_WATCH_SCRIPT = `(() => {
+  if (window.__bm_caret_watch) return; window.__bm_caret_watch = true;
+  const editable = (el) => !!el && (el.isContentEditable
+    || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+  const report = () => {
+    try {
+      const el = document.activeElement;
+      if (!editable(el)) { window.__browsermint_caret('') ; return; }
+      let r = el.getBoundingClientRect();
+      let x = r.left, y = r.bottom;
+      // 光标在长文本里的真实位置比整个输入框的位置有用得多
+      try {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount) {
+          const rr = sel.getRangeAt(0).getBoundingClientRect();
+          if (rr.width || rr.height || rr.top) { x = rr.left; y = rr.bottom; }
+        }
+      } catch (e) {}
+      window.__browsermint_caret(Math.round(x) + ',' + Math.round(y));
+    } catch (e) {}
+  };
+  document.addEventListener('focusin', report, true);
+  document.addEventListener('focusout', report, true);
+  document.addEventListener('selectionchange', report);
+  document.addEventListener('keyup', report, true);
+  document.addEventListener('click', report, true);
+})();`;
+
 const PASSWORD_WATCH_SCRIPT = `(() => {
   if (window.__bm_pw_watch) return; window.__bm_pw_watch = true;
   const isPw = (el) => !!el && el.tagName === 'INPUT' && el.type === 'password';
@@ -2156,6 +2205,9 @@ function installPasswordWatch(p: CastProducer): void {
   producerSend(p, "Runtime.addBinding", { name: "__browsermint_password_focus" });
   producerSend(p, "Page.addScriptToEvaluateOnNewDocument", { source: PASSWORD_WATCH_SCRIPT });
   producerSend(p, "Runtime.evaluate", { expression: PASSWORD_WATCH_SCRIPT });
+  producerSend(p, "Runtime.addBinding", { name: "__browsermint_caret" });
+  producerSend(p, "Page.addScriptToEvaluateOnNewDocument", { source: CARET_WATCH_SCRIPT });
+  producerSend(p, "Runtime.evaluate", { expression: CARET_WATCH_SCRIPT });
 }
 
 /** CDP `buttons` is a bitmask of the buttons currently held — not the button that
@@ -2210,6 +2262,18 @@ function dispatchInput(p: CastProducer, msg: Record<string, any>, st: Controller
   if (msg.type === "insertText" && typeof msg.text === "string") {
     // Covers IME-committed text and paste without needing composition sync.
     producerSend(p, "Input.insertText", { text: msg.text.slice(0, 4096) });
+    return;
+  }
+  // 组合中的文字（还没选定的拼音/假名）。没有这条的话，用户打字的整个过程远端页面
+  // 一片空白，直到选词那一刻才整段蹦出来——本地打字从来不是这样的。
+  // 空串等于撤销组合，Chrome 会把之前显示的临时文字清掉。
+  if (msg.type === "imeComposition" && typeof msg.text === "string") {
+    const text = msg.text.slice(0, 1024);
+    producerSend(p, "Input.imeSetComposition", {
+      text,
+      selectionStart: text.length,
+      selectionEnd: text.length,
+    });
   }
 }
 
