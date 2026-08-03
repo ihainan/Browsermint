@@ -1,4 +1,7 @@
 import test from "node:test";
+
+/** 帧差分是异步的（要解码 JPEG），推一帧之后要等一拍才看得到广播结果。 */
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r)); };
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
@@ -113,6 +116,7 @@ test("并发 attach 只建一个 producer（否则旧的成为永不停歇的僵
     assert.equal(created.length, 1, `expected 1 producer socket, got ${created.length}`);
     // 两个 viewer 都挂在同一条流上
     created[0].pushFrame("AAA");
+    await settle();
     assert.equal(a.received.length, 1);
     assert.equal(b.received.length, 1);
   } finally { teardown(); }
@@ -128,6 +132,7 @@ test("帧先 ack 再广播（未 ack 时 Chrome 不发下一帧）", async () =>
     const ack = created[0].sent.slice(before).find((m) => m.method === "Page.screencastFrameAck");
     assert.ok(ack, "frame must be acked");
     assert.equal(ack!.params.sessionId, 42);
+    await settle();                       // 差分是异步的，广播晚一拍
     assert.equal(v.received.length, 1);
   } finally { teardown(); }
 });
@@ -140,6 +145,7 @@ test("建流期间 viewer 已断开：不得加入 viewers（否则永不归零�
     v.close();                      // producer 还在建立中就断开
     await p;
     created[0].pushFrame("AAA");
+    await settle();
     assert.equal(v.received.length, 0, "closed viewer must not receive frames");
     // 且不该留下一个有 viewer 的 producer：再接一个 viewer 应复用同一条流
     const v2 = new FakeViewer();
@@ -156,6 +162,7 @@ test("慢 viewer 被跳过而不是无限缓冲（帧过期即无价值）", asy
     await attachCastViewer(SESSION, TARGET, slow as any);
     slow.bufferedAmount = 8 * 1024 * 1024;      // 已经落后 8MiB
     created[0].pushFrame("AAA");
+    await settle();
     assert.equal(fast.received.length, 1);
     assert.equal(slow.received.length, 0);
   } finally { teardown(); }

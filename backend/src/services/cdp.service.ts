@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { FrameDiffer } from "./cast-diff.js";
 import { config } from "../config.js";
 import { holdsLease, forgetTargetLeases } from "./lease.service.js";
 import { BROWSER_DEVICE_SCALE_FACTOR } from "./driver/session-driver.js";
@@ -1430,6 +1431,15 @@ type CastProducer = {
   /// synthesise mouseReleased/keyUp and wipe the *current* holder's state — a
   /// single-writer violation, not just a glitch (codex review 2026-08-02, High-1).
   controllers: Map<WebSocket, ControllerState>;
+  /// 帧差分：只发变化的部分（见 cast-diff.ts）。一个 producer 一个，因为它维护
+  /// 「上一帧」——那正是差分的基准。
+  differ: FrameDiffer;
+  /// 帧序号：客户端用它判断自己有没有跟丢（跟丢就要一张整帧）。
+  castSeq: number;
+  /// 差分是异步的（要解码 JPEG）。同一时刻只跑一帧，跑的时候新来的帧只覆盖待处理槽
+  /// ——和「只送最新一帧」同一个道理，且顺便给 CPU 封了顶。
+  diffBusy: boolean;
+  diffPending: string | null;
   /// Layout we asked Chrome for but have not yet seen a frame from. While this is
   /// set the stream is in transition: frames still in flight were rendered against
   /// the *old* layout, so publishing the new revision now would stamp stale pixels
@@ -1746,7 +1756,7 @@ async function captureSharpStill(p: CastProducer): Promise<void> {
         || p.frameSeq !== seqAt) return;
     // joiners get the crisp one too — with the layout it was taken at
     p.lastFrame = { data, revision: p.viewportRevision, width, height };
-    broadcastFrame(p, data, { skipIdleReschedule: true });
+    broadcastFrame(p, data, { skipIdleReschedule: true, key: true });
   } catch {
     /* a failed still just means the soft stream frame stays on screen */
   } finally {
@@ -1790,24 +1800,75 @@ function scheduleDrainRetry(viewer: WebSocket): void {
   viewerDrainTimer.set(viewer, timer);
 }
 
+/**
+ * 把一帧交给观看者。**整帧进来，出去的可能是「只有变化部分」的增量**（见 cast-diff.ts）。
+ *
+ * 差分要解码 JPEG，是异步的；而帧是一串一串来的。所以同一时刻只跑一帧，跑的时候新来的
+ * 帧只覆盖待处理槽——和「只送最新一帧」同一个道理：慢的时候降帧率，而不是排长队。
+ * 顺便给 CPU 封了顶（每帧 ~10-25ms，只在有人看的时候跑）。
+ */
 function broadcastFrame(
-  p: CastProducer, data: string, opts: { skipIdleReschedule?: boolean } = {}
+  p: CastProducer, data: string, opts: { skipIdleReschedule?: boolean; key?: boolean } = {}
 ): void {
   if (p.masked) return;   // password field focused: ship nothing at all
   if (p.pendingLayout) return;   // mid-reconfigure: these pixels are the old layout
+  if (!opts.skipIdleReschedule) scheduleIdleStill(p);
+
+  if (opts.key) {
+    // 高清静帧：它的尺寸是流的 2 倍，客户端画上去之后画布就换了分辨率——之后再发按
+    // 流坐标算的增量会贴错位置。所以静帧一律当整帧发，并让差分器重新起头。
+    p.differ.reset();
+    sendFramePayload(p, { key: true, data });
+    return;
+  }
+  if (p.diffBusy) { p.diffPending = data; return; }
+  void runDiff(p, data);
+}
+
+async function runDiff(p: CastProducer, data: string): Promise<void> {
+  p.diffBusy = true;
+  try {
+    const res = await p.differ.next(Buffer.from(data, "base64"));
+    if (p.closed || p.masked || p.pendingLayout) return;
+    if (res.kind === "key") sendFramePayload(p, { key: true, data: res.data });
+    else if (res.tiles.length > 0 || res.shift !== 0) {
+      sendFramePayload(p, { key: false, shift: res.shift, tiles: res.tiles });
+    }
+    // 一帧都没变化 → 什么都不发（静止页面从此不再烧带宽）
+  } catch (err) {
+    // 差分坏了不能让画面停住：退回整帧，并且下一帧重新起头
+    console.warn(`[cast] diff failed, falling back to full frame:`, err);
+    p.differ.reset();
+    sendFramePayload(p, { key: true, data });
+  } finally {
+    p.diffBusy = false;
+    const next = p.diffPending;
+    p.diffPending = null;
+    if (next && !p.closed) void runDiff(p, next);
+  }
+}
+
+function sendFramePayload(
+  p: CastProducer,
+  frame: { key: true; data: string } | { key: false; shift: number; tiles: unknown[] },
+): void {
   // `layout` is the remote CSS viewport this frame was rendered for. The viewer
   // needs it to map clicks: it cannot infer it from the image, because a sharp
   // still is 2x the layout while a stream frame is 1x — using image width would
   // put every click at half coordinates on stills.
-  const payload = JSON.stringify({
-    data, url: p.url, title: p.title, favicon: null,
+  const base = p.castSeq;
+  p.castSeq += 1;
+  const common = {
+    url: p.url, title: p.title, favicon: null,
     revision: p.viewportRevision,
     layoutWidth: p.layout?.width ?? null,
     layoutHeight: p.layout?.height ?? null,
-  });
+    seq: p.castSeq,
+  };
+  const payload = JSON.stringify(frame.key
+    ? { ...common, data: frame.data }
+    : { ...common, base, delta: { shift: frame.shift, tiles: frame.tiles } });
   for (const viewer of p.viewers) sendLatestFrame(viewer, payload);
-  //每帧都重排空闲计时：动的时候永远不触发，一停下来就补高清。
-  if (!opts.skipIdleReschedule) scheduleIdleStill(p);
 }
 
 async function createProducer(sessionId: string, targetId: string): Promise<CastProducer> {
@@ -1822,6 +1883,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
 
   const p: CastProducer = {
     socket, viewers: new Set(), lastFrame: null,
+    differ: new FrameDiffer({ quality: CAST_QUALITY }), castSeq: 0, diffBusy: false, diffPending: null,
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
@@ -2419,18 +2481,33 @@ export async function attachCastViewer(
     return;
   }
   producer.viewers.add(viewer);
+  // 「我跟丢了，给我一张整帧」——**每个观看者都要能说这句话**，包括没有写权的纯看者。
+  // 增量流在慢链路上是允许丢帧的，丢了就必须能要回来；这条是它唯一的自愈入口。
+  // 注意别挂在下面那个 `if (leaseId)` 里：纯看者才是最可能丢帧的那一类。
+  viewer.on("message", (raw: WebSocket.RawData) => {
+    if (producer.closed) return;
+    try {
+      const m = JSON.parse(raw.toString());
+      if (m?.type === "needKeyframe") producer.differ.reset();
+    } catch { /* 不是 JSON 就不是给我们的 */ }
+  });
   // A viewer that joins while masked must be told so — otherwise it just sees a
   // frozen (or blank) picture with no explanation.
   if (producer.masked) {
     viewer.send(JSON.stringify({ type: "masked", masked: true }));
   } else if (producer.lastFrame && !producer.pendingLayout) {
     // Paint something immediately instead of waiting for the next frame.
+    // **必须带 seq 且是整帧**：新观看者手里什么都没有，收到增量只会画错。
+    producer.castSeq += 1;
     viewer.send(JSON.stringify({
       data: producer.lastFrame.data, url: producer.url, title: producer.title, favicon: null,
       revision: producer.lastFrame.revision,
       layoutWidth: producer.lastFrame.width,
       layoutHeight: producer.lastFrame.height,
+      seq: producer.castSeq,
     }));
+    // 别的观看者也得回到同一个基准，否则下一张增量只有新来的这位能对上
+    producer.differ.reset();
   }
   // Input is accepted only from a connection that carries a live lease. Viewers
   // without one are strictly observers: their messages are dropped, not merely
