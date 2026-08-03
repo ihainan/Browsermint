@@ -94,6 +94,27 @@ export async function waitForHealth(internalApiUrl: string): Promise<void> {
 // Env + startup command shared by both drivers so browser workloads behave
 // identically regardless of engine. `domainHost` is the DNS name peers use to
 // reach the workload (container name on Docker networks, Service DNS on K8s).
+// The *real* device scale factor Chrome is launched with. This is the only lever
+// that makes the screencast stream itself sharper: frame pixels =
+// compositorSurfacePixels = layoutCss × realDsf, capped (never upscaled) by
+// startScreencast's maxWidth/maxHeight.
+//
+// `Emulation.setDeviceMetricsOverride.deviceScaleFactor` does NOT do this —
+// Blink's ScreenMetricsEmulator deliberately keeps the *real* dsf in the
+// compositor ("keep the real device scale factor in compositor to produce sharp
+// image even when emulating different scale factor"), so an emulated 2x reports
+// devicePixelRatio 2 to the page while the captured surface stays 1x.
+//
+// Measured on this image (Chrome 146, 400×300 layout):
+//   launch dsf 1 + emulated dsf 2, no cap        → 400×300 frames
+//   launch dsf 2 + emulated dsf 1, no cap        → 800×600 frames
+//   launch dsf 2 + emulated dsf 2, cap 400×300   → 400×300 frames  (cap wins)
+//   launch dsf 2 + emulated dsf 2, cap 800×600   → 800×600 frames
+// i.e. the page's own devicePixelRatio is irrelevant to frame resolution; the
+// launch flag decides, and the cap can only scale down. Callers therefore size
+// the cap by what the *viewer* can use (see castCaps in cdp.service.ts).
+export const BROWSER_DEVICE_SCALE_FACTOR = 2;
+
 export function buildBrowserEnv(domainHost: string): Record<string, string> {
   return {
     DOMAIN: `${domainHost}:3000`,
@@ -109,8 +130,14 @@ export function buildBrowserEnv(domainHost: string): Record<string, string> {
     // AutomationControlled feature flag that Chrome sets when launched via CDP.
     // Without this, navigator.webdriver is true at the C++ layer even if the
     // JS getter is patched, and some fingerprint scripts probe deeper than JS.
+    // --force-device-scale-factor: see BROWSER_DEVICE_SCALE_FACTOR above. A 2x
+    // compositor is also what the whole Chrome UI is drawn at, which is why
+    // buildResizeDisplayCommand scales the X screen to match — otherwise the
+    // noVNC fallback view would lose half its usable logical space.
     CHROME_ARGS:
-      "--disable-blink-features=AutomationControlled --disable-features=FedCm,WebAuthnConditionalUI --password-store=basic --use-mock-keychain --use-gl=angle --use-angle=swiftshader",
+      "--disable-blink-features=AutomationControlled --disable-features=FedCm,WebAuthnConditionalUI " +
+      "--password-store=basic --use-mock-keychain --use-gl=angle --use-angle=swiftshader " +
+      `--force-device-scale-factor=${BROWSER_DEVICE_SCALE_FACTOR}`,
   };
 }
 
@@ -122,9 +149,18 @@ export function buildBrowserEnv(domainHost: string): Record<string, string> {
 // modeline is what TigerVNC expects); both steps are idempotent-by-|| true
 // because a repeated size reuses the existing mode. Callers must pass validated
 // integers — the values are interpolated into a shell command.
+//
+// Callers pass the *logical* size they want the desktop to behave as (the noVNC
+// viewer's own window size). Chrome draws its UI at BROWSER_DEVICE_SCALE_FACTOR,
+// so the X screen has to be that many times larger or the desktop would only fit
+// half the content it used to. The noVNC client scales the larger framebuffer
+// back into its window, which also makes that view sharper. Capped at 4K so a
+// maximised viewer on a big monitor cannot ask for an absurd framebuffer.
+const MAX_X_SCREEN = { width: 3840, height: 2160 };
 export function buildResizeDisplayCommand(width: number, height: number): string[] {
-  const w = Math.floor(width);
-  const h = Math.floor(height);
+  const dsf = BROWSER_DEVICE_SCALE_FACTOR;
+  const w = Math.min(Math.floor(width) * dsf, MAX_X_SCREEN.width);
+  const h = Math.min(Math.floor(height) * dsf, MAX_X_SCREEN.height);
   return [
     "sh", "-c",
     `export DISPLAY=:10; ` +
@@ -135,7 +171,12 @@ export function buildResizeDisplayCommand(width: number, height: number): string
   ];
 }
 
+// Startup geometry is in *physical* pixels, so it carries the same ×dsf factor as
+// buildResizeDisplayCommand: 3840×2160 keeps the historical 1920×1080 of logical
+// desktop space. Chrome will not lay a page out wider than the window it lives in,
+// and the window cannot exceed the screen — so shrinking this would silently cap
+// the widest viewport the cast pipeline can ask for.
 export const BROWSER_STARTUP_COMMAND =
-  "nohup Xvnc :10 -geometry 1920x1080 -depth 24 -SecurityTypes None -rfbport 5900 -AlwaysShared -AcceptSetDesktopSize >/tmp/xvnc.log 2>&1 & sleep 2 && " +
+  "nohup Xvnc :10 -geometry 3840x2160 -depth 24 -SecurityTypes None -rfbport 5900 -AlwaysShared -AcceptSetDesktopSize >/tmp/xvnc.log 2>&1 & sleep 2 && " +
   "nohup websockify 6080 localhost:5900 >/tmp/websockify.log 2>&1 & " +
   "exec /app/api/entrypoint.sh";

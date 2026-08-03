@@ -60,7 +60,11 @@ class FakeViewer extends EventEmitter {
   close() { this.readyState = 3; this.emit("close"); }
 }
 
-function setup(opts: { sockets?: FakeSocket[]; scrollWidth?: number } = {}) {
+// `sockets` 也接受**惰性**构造器：FakeSocket 在构造时就 setImmediate 派发 "open"，
+// 预先 new 好放进数组的话，只要测试在 attach 之前先 await 过别的东西（例如
+// setTargetViewport 会自己建一条视口 socket），那次 await 就把 "open" 消费掉了，
+// 后面注册的 once("open") 永远等不到 → "cast socket timeout"。
+function setup(opts: { sockets?: Array<FakeSocket | (() => FakeSocket)>; scrollWidth?: number } = {}) {
   const created: FakeSocket[] = [];
   resetCastTestHooks();
   setCdpServiceOverridesForTests({
@@ -74,7 +78,8 @@ function setup(opts: { sockets?: FakeSocket[]; scrollWidth?: number } = {}) {
   setCastTestHooks({
     cdpBase: { sessionId: SESSION, base: "ws://fake" },
     socketFactory: () => {
-      const s = opts.sockets?.shift() ?? new FakeSocket();
+      const next = opts.sockets?.shift();
+      const s = (typeof next === "function" ? next() : next) ?? new FakeSocket();
       if (opts.scrollWidth !== undefined) s.scrollWidth = opts.scrollWidth;
       created.push(s);
       return s as any;
@@ -213,12 +218,15 @@ test("不重排的站点：内容超出视口时缩放适配（而不是留一�
 
     const producerSock = created.at(-1)!;
     const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    // max(内容 1250, 栏宽 735 × DPR 2 = 1470) → 1470
-    assert.equal(metrics.at(-1)!.params.width, 1470,
-      "要缩放的页面：布局宽取 max(内容宽, 栏宽×DPR)");
-    // 上限必须放行整幅布局：按栏宽封顶会把 1470 的帧又缩回 735，等于白做
+    // 只放宽到内容真正需要的宽度。以前还会再放宽到「栏宽×DPR」去换像素（1470），
+    // 那是拿正文字号换清晰度；现在帧自带 ×BROWSER_DEVICE_SCALE_FACTOR 的像素，
+    // 这笔交换不再划算。
+    assert.equal(metrics.at(-1)!.params.width, 1250,
+      "要缩放的页面：布局宽 = 内容宽，不再为买像素额外放宽");
+    // 上限必须放行整幅布局 × 观看端 DPR：按布局 CSS 宽封顶会把 2x 的帧缩回 1x
     const casts = producerSock.sent.filter((m) => m.method === "Page.startScreencast");
-    assert.equal(casts.at(-1)!.params.maxWidth, 1470);
+    assert.equal(casts.at(-1)!.params.maxWidth, 2500,
+      "HiDPI 观看端：上限 = 布局 × 2，否则 2x 合成出来的像素被 cap 丢掉");
   } finally { teardown(); }
 });
 
@@ -630,10 +638,10 @@ test("producer 重建按记住的放宽布局起流，fit 复核不再重排", a
     await setTargetViewport(SESSION, TARGET, 735, 867, 2);
     const v1 = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v1 as any);
-    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估：735 → 1470
+    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估：735 → 1250（内容宽）
     const sock1 = created.at(-1)!;   // [0]=viewport socket, [1]=producer
     const widened = sock1.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
-    assert.equal(widened.params.width, 1470, "前置：fit 已放宽到 1470");
+    assert.equal(widened.params.width, 1250, "前置：fit 已放宽到内容宽 1250");
 
     // producer 意外死掉（等价于 linger 到期拆流，跳过 5s 等待）
     sock1.close();
@@ -642,15 +650,15 @@ test("producer 重建按记住的放宽布局起流，fit 复核不再重排", a
     const sock2 = created.at(-1)!;
     assert.notEqual(sock2, sock1, "应新建 producer");
     const metrics0 = sock2.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride")[0];
-    assert.equal(metrics0.params.width, 1470,
+    assert.equal(metrics0.params.width, 1250,
       "重建的 producer 必须直接按放宽布局起流，而不是基础 735（那会让页面重排两次）");
     const cast0 = sock2.sent.filter((m) => m.method === "Page.startScreencast")[0];
-    assert.equal(cast0.params.maxWidth, 1470, "帧上限同样按放宽布局");
+    assert.equal(cast0.params.maxWidth, 2500, "帧上限 = 放宽布局 × 观看端 DPR");
 
     // 喂一帧让 producer 知道当前布局，再等 fit 复核：同布局不得 stop/start
     sock2.emit("message", Buffer.from(JSON.stringify({
       method: "Page.screencastFrame",
-      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 1470, deviceHeight: 1734 } },
+      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 1250, deviceHeight: 1474 } },
     })));
     await new Promise((r) => setTimeout(r, 1600));
     const stops = sock2.sent.filter((m) => m.method === "Page.stopScreencast");
@@ -670,5 +678,57 @@ test("显式改视口（拖分栏/换缩放档）会作废记住的放宽布局�
     const prod = created[1];   // [0]=viewport socket, [1]=producer
     const m = prod.sent.filter((x) => x.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
     assert.equal(m.params.width, 900, "旧放宽布局必须作废（它按 735 栏宽推导）");
+  } finally { teardown(); }
+});
+
+// ── 帧分辨率：真实 DSF 决定，cap 决定下发多少 ────────────────────────────────
+// 2026-08-03 实测矩阵（Chrome 146，容器镜像 ihainan/browsermint-browser:0.5.1）：
+//   启动 dsf 1 + 模拟 dsf 2，无 cap        → 400x300
+//   启动 dsf 2 + 模拟 dsf 1，无 cap        → 800x600
+//   启动 dsf 2 + 模拟 dsf 2，cap 400x300   → 400x300   ← cap 会把 2x 丢掉
+//   启动 dsf 2 + 模拟 dsf 2，cap 800x600   → 800x600
+// 所以页面自己的 devicePixelRatio 与帧分辨率无关；cap 必须按**观看端**能用的密度给。
+test("HiDPI 观看端：帧上限 = 布局 × 2（不给的话 2x 合成白做）", async () => {
+  const created = setup({ scrollWidth: 735 });   // 响应式站点，不触发 fit
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
+    assert.equal(cast.params.maxWidth, 1470);
+    assert.equal(cast.params.maxHeight, 1734);
+    // 布局本身不变：清晰度不再靠放宽布局去买，正文字号不受影响
+    const metrics = created.at(-1)!.sent
+      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
+    assert.equal(metrics.params.width, 735);
+  } finally { teardown(); }
+});
+
+test("普通屏观看端：帧上限 = 布局 × 1（2x 比 1x 贵 ~2.5 倍字节，不能白发）", async () => {
+  const created = setup({ scrollWidth: 735 });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 1);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
+    assert.equal(cast.params.maxWidth, 735, "1x 观看端不该收 2x 帧");
+  } finally { teardown(); }
+});
+
+test("流已经是 2x：不再抓高清静帧（那一步正是动静之间的清晰度跳变）", async () => {
+  // setTargetViewport 先建一条视口 socket，producer 是第二条 —— 静帧要断言在后者上
+  const created = setup({
+    sockets: [() => new FakeSocket(), () => new StillSocket()], scrollWidth: 735,
+  });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)! as StillSocket;
+    sock.pushStreamFrame("MOVE1");
+    await new Promise((r) => setTimeout(r, 400));   // 超过 IDLE_BEFORE_STILL_MS
+    assert.ok(!sock.answerShot, "流已达 2x，静止时不该再发 captureScreenshot");
+    const datas = v.received.map((x) => JSON.parse(x).data).filter(Boolean);
+    assert.equal(datas.at(-1), "MOVE1", "屏上留的就是那张 2x 动帧");
   } finally { teardown(); }
 });

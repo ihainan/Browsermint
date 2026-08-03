@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { config } from "../config.js";
 import { holdsLease, forgetTargetLeases } from "./lease.service.js";
+import { BROWSER_DEVICE_SCALE_FACTOR } from "./driver/session-driver.js";
 import { solveCaptcha, type CaptchaType } from "./capsolver.service.js";
 import { prisma } from "../db/client.js";
 
@@ -1405,6 +1406,11 @@ type CastProducer = {
   /// Layout the current stream is rendering at, learned from frame metadata.
   /// Needed to ask for a still of exactly the same region.
   layout: { width: number; height: number } | null;
+  /// Resolution multiplier the *stream* is currently delivering (frameScale of the
+  /// viewport in force when the stream was started). When it already reaches
+  /// SHARP_STILL_SCALE the idle screenshot has nothing left to add, and skipping it
+  /// removes the visible sharpness step between moving and still content.
+  streamScale: number;
   /// Idle → grab one high-resolution still (see SHARP_STILL_SCALE).
   idleTimer: NodeJS.Timeout | null;
   stillInFlight: boolean;
@@ -1456,13 +1462,37 @@ function producerSend(p: CastProducer, method: string, params: Record<string, un
 // frames instead of a smooth replay of the past.
 const VIEWER_BUFFER_LIMIT_BYTES = 0;
 
-// Screencast frames are always the CSS size of the visual viewport: measured,
-// deviceScaleFactor makes no difference (dsf=1 and dsf=2 produce byte-identical
-// frames) and neither does setPageScaleFactor. So the only lever on sharpness is
-// the layout width itself — see fitViewportToContent.
-function castCaps(want: ViewportWant) {
-  const layout = layoutSize(want);
-  return { maxWidth: layout.width, maxHeight: layout.height };
+// Frame pixels = layoutCss × the *launch* device scale factor
+// (BROWSER_DEVICE_SCALE_FACTOR), and startScreencast's maxWidth/maxHeight can
+// only scale that down — never up. The old comment here claimed frames were
+// always the CSS size of the viewport; that was true only because the cap below
+// used to be the CSS size, which threw the extra pixels away. See
+// session-driver.ts for the measurement matrix.
+//
+// So the cap is what decides how much of the rendered detail a viewer receives.
+// Size it by the viewer's own pixel density: a 2x display gets the full 2x frame
+// (sharp), a 1x display gets it scaled down in the browser rather than over the
+// wire (2x costs ~2.5-2.8x the bytes — measured on vuejs.org / HN at q90).
+function frameScale(want: ViewportWant): number {
+  const viewer = want.deviceScaleFactor > 0 ? want.deviceScaleFactor : 1;
+  return Math.min(BROWSER_DEVICE_SCALE_FACTOR, Math.max(1, viewer));
+}
+
+function castCaps(want: ViewportWant, layout?: { width: number; height: number }) {
+  const l = layout ?? layoutSize(want);
+  const s = frameScale(want);
+  return { maxWidth: Math.round(l.width * s), maxHeight: Math.round(l.height * s) };
+}
+
+/** The only place that starts a stream, so the cap and the `streamScale` the
+ *  idle-still path reads can never drift apart. */
+function startCast(
+  p: CastProducer, want?: ViewportWant, layout?: { width: number; height: number },
+): void {
+  p.streamScale = want ? frameScale(want) : 1;
+  producerSend(p, "Page.startScreencast", {
+    format: "jpeg", quality: CAST_QUALITY, ...(want ? castCaps(want, layout) : {}),
+  });
 }
 
 function producerRequest(
@@ -1520,11 +1550,12 @@ async function fitViewportToContent(
     fittedLayouts.delete(fitKey);
     return;
   }
-  // This page is going to be scaled down regardless, so render it wide enough
-  // that the frame carries at least as many pixels as the pane has physical
-  // ones: a 1250px frame shown in 1470 physical pixels is upscaled for free.
-  const sharpWidth = Math.round(want.width * (want.deviceScaleFactor || 1));
-  const layoutWidth = Math.min(Math.round(Math.max(scrollWidth, sharpWidth)), 3840);
+  // Widen only as far as the content actually needs. This used to also widen to
+  // `pane × dpr` to buy pixels for a HiDPI viewer, which cost real legibility —
+  // a page needing 1250px got laid out at 1470 and its text shrank accordingly.
+  // The frame now carries layout × BROWSER_DEVICE_SCALE_FACTOR pixels on its own,
+  // so buying sharpness by widening the layout is no longer a trade worth making.
+  const layoutWidth = Math.min(Math.round(scrollWidth), 3840);
   const layoutHeight = Math.min(
     Math.max(Math.round(base.height * (layoutWidth / base.width)), 240), 2160);
   fittedLayouts.set(fitKey, { width: layoutWidth, height: layoutHeight });
@@ -1541,13 +1572,11 @@ async function fitViewportToContent(
     screenWidth: layoutWidth, screenHeight: layoutHeight, dontSetVisibleSize: false,
   });
   // The cap must allow the full layout through: capping at the pane's CSS width
-  // would scale the 1470px frame straight back down to 735 and undo the whole
-  // point (measured — that is exactly what happened the first time). The viewer
-  // does the fitting in CSS; we ship the pixels.
+  // would scale the frame straight back down and undo the whole point (measured —
+  // that is exactly what happened the first time). The viewer does the fitting in
+  // CSS; we ship the pixels.
   producerSend(p, "Page.stopScreencast");
-  producerSend(p, "Page.startScreencast", {
-    format: "jpeg", quality: CAST_QUALITY, maxWidth: layoutWidth, maxHeight: layoutHeight,
-  });
+  startCast(p, want, { width: layoutWidth, height: layoutHeight });
   console.info(`[cast] ${targetId}: layout ${layoutWidth}px (content ${scrollWidth}px, ` +
     `pane ${want.width}px @${Math.round(want.zoom * 100)}% @${want.deviceScaleFactor}x), zoomed to fit`);
 }
@@ -1618,6 +1647,11 @@ function clearIdleStill(p: CastProducer): void {
 function scheduleIdleStill(p: CastProducer): void {
   clearIdleStill(p);
   if (p.closed || p.masked || p.pendingLayout || !p.layout) return;
+  // The stream already carries at least as many pixels as the still would add.
+  // Taking it anyway would cost a screenshot round-trip per pause for an image
+  // the viewer cannot tell apart — and it is that swap, not the still itself,
+  // that users see as the picture "settling" a moment after it stops moving.
+  if (p.streamScale >= SHARP_STILL_SCALE) return;
   if (Math.round(p.layout.width * SHARP_STILL_SCALE) > SHARP_STILL_MAX_WIDTH) return;
   p.idleTimer = setTimeout(() => { void captureSharpStill(p); }, IDLE_BEFORE_STILL_MS);
 }
@@ -1727,7 +1761,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
-    layout: null, idleTimer: null, stillInFlight: false, frameSeq: 0,
+    layout: null, streamScale: 1, idleTimer: null, stillInFlight: false, frameSeq: 0,
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1854,10 +1888,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       dontSetVisibleSize: false,
     });
   }
-  producerSend(p, "Page.startScreencast", {
-    format: "jpeg", quality: CAST_QUALITY,
-    ...(layout ? { maxWidth: layout.width, maxHeight: layout.height } : {}),
-  });
+  startCast(p, want && layout ? want : undefined, layout ?? undefined);
   // setWebLifecycleState is the polite way to make Chrome consider this page
   // active, but it is not sufficient in every state we've observed (a target
   // that Chrome treats as fully backgrounded stays silent). If no frame arrives
@@ -2129,7 +2160,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   });
   producerSend(p, "Page.stopScreencast");
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
-  producerSend(p, "Page.startScreencast", { format: "jpeg", quality: CAST_QUALITY, ...castCaps(want) });
+  startCast(p, want, layoutNow);
   setTimeout(() => {
     if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
   }, 800);
