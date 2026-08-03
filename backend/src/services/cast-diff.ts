@@ -101,16 +101,37 @@ const SHIFT_TIE_RATIO = 1.15;
  *
  * 判据故意保守：错判成位移会让整屏内容对不上（很显眼），漏判只是这一帧退回分块/整帧。
  */
-/** 上一次位移判定的取值。只用于排障日志——真机上「为什么没认出滚动」只能靠它。 */
-export const shiftDiag = { best: 0, bestMad: 0, still: 0, spread: 0, why: "" };
+/**
+ * 位移判定的取值，只用于排障日志。**每个差分器传自己的**——写成模块级全局的话，
+ * 多个页面同时差分会互相覆盖，日志里读到的是别人的数（排错方向的现成陷阱）。
+ */
+export interface ShiftDiag {
+  best: number; bestMad: number; still: number; spread: number; why: string;
+  prevMean: number; nextMean: number; prevSpread: number; nextSpread: number;
+}
+export const newShiftDiag = (): ShiftDiag => ({
+  best: 0, bestMad: 0, still: 0, spread: 0, why: "",
+  prevMean: 0, nextMean: 0, prevSpread: 0, nextSpread: 0,
+});
+
+const profileMean = (p: Float32Array): number => {
+  let m = 0;
+  for (let i = 0; i < p.length; i++) m += p[i];
+  return m / p.length;
+};
 
 export function detectShift(
   prev: Float32Array, next: Float32Array, height: number, range: number,
+  diag: ShiftDiag = newShiftDiag(),
 ): number {
-  const spread = Math.min(profileSpread(prev), profileSpread(next));
-  shiftDiag.spread = spread;
-  shiftDiag.best = 0; shiftDiag.bestMad = 0; shiftDiag.still = 0; shiftDiag.why = "";
-  if (spread < MIN_SPREAD) { shiftDiag.why = "flat"; return 0; }
+  diag.prevSpread = profileSpread(prev);
+  diag.nextSpread = profileSpread(next);
+  diag.prevMean = profileMean(prev);
+  diag.nextMean = profileMean(next);
+  const spread = Math.min(diag.prevSpread, diag.nextSpread);
+  diag.spread = spread;
+  diag.best = 0; diag.bestMad = 0; diag.still = 0; diag.why = "";
+  if (spread < MIN_SPREAD) { diag.why = "flat"; return 0; }
   const buf: number[] = [];
   /**
    * 位移 dy 下「对得有多好」。**掐掉最差的那 1/4 行**：sticky 头部、固定底栏、悬浮按钮
@@ -140,8 +161,8 @@ export function detectShift(
     scores[dy + range] = m;
     if (m < bestMad) { bestMad = m; best = dy; }
   }
-  shiftDiag.best = best; shiftDiag.bestMad = bestMad; shiftDiag.still = still;
-  if (bestMad > SHIFT_MAD_LIMIT) { shiftDiag.why = "mad"; return 0; }
+  diag.best = best; diag.bestMad = bestMad; diag.still = still;
+  if (bestMad > SHIFT_MAD_LIMIT) { diag.why = "mad"; return 0; }
   // 同样好的候选里取最近的一个：页面上重复的行（表格、列表）会让远处也「对得上」，
   // 认错方向或认成一屏多的位移，画面就整块错位。
   for (let dy = -range; dy <= range; dy++) {
@@ -150,7 +171,7 @@ export function detectShift(
       best = dy;
     }
   }
-  if (still <= bestMad * SHIFT_MARGIN) { shiftDiag.why = "margin"; return 0; }
+  if (still <= bestMad * SHIFT_MARGIN) { diag.why = "margin"; return 0; }
   return best;
 }
 
@@ -159,6 +180,7 @@ export class FrameDiffer {
   private prevRaw: Buffer | null = null;
   private prevProfile: Float32Array | null = null;
   private lastKeyAt = 0;
+  private readonly diag = newShiftDiag();
   private width = 0;
   private height = 0;
 
@@ -188,7 +210,7 @@ export class FrameDiffer {
     }
 
     const profile = rowProfile(data, width, height);
-    const shift = detectShift(this.prevProfile, profile, height, this.opt.shiftRange);
+    const shift = detectShift(this.prevProfile, profile, height, this.opt.shiftRange, this.diag);
     const tiles = this.changedRegions(this.prevRaw, data, width, height, shift);
 
     // 什么时候干脆退回整帧：
@@ -199,9 +221,11 @@ export class FrameDiffer {
     const limit = shift === 0 ? this.opt.keyframeRatio : 0.8;
     if (area > limit) {
       return this.keyframe(jpeg, data, width, height, now,
-        `area=${area.toFixed(2)}>${limit} shift=${shift} 位移判据[最优=${shiftDiag.best} `
-        + `分=${shiftDiag.bestMad.toFixed(2)} 不动=${shiftDiag.still.toFixed(2)} `
-        + `起伏=${shiftDiag.spread.toFixed(2)} 否决=${shiftDiag.why || "无"}]`);
+        `area=${area.toFixed(2)}>${limit} shift=${shift} 位移判据[最优=${this.diag.best} `
+        + `分=${this.diag.bestMad.toFixed(2)} 不动=${this.diag.still.toFixed(2)} `
+        + `否决=${this.diag.why || "无"} 尺寸=${width}x${height} `
+        + `上一帧[亮度=${this.diag.prevMean.toFixed(1)} 起伏=${this.diag.prevSpread.toFixed(2)}] `
+        + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`);
     }
 
     await this.encodeTiles(tiles, data, width);
