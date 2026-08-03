@@ -1205,6 +1205,7 @@ export function forgetTargetViewport(sessionId: string, targetId?: string): void
       if (producer.stopTimer) clearTimeout(producer.stopTimer);
       if (producer.firstFrameTimer) clearTimeout(producer.firstFrameTimer);
       if (producer.reconfigureTimer) clearTimeout(producer.reconfigureTimer);
+      if (producer.visibilityTimer) clearTimeout(producer.visibilityTimer);
       clearIdleStill(producer);
       producer.lastFrame = null;
       for (const viewer of producer.viewers) {
@@ -1406,6 +1407,13 @@ type CastProducer = {
   /// Layout the current stream is rendering at, learned from frame metadata.
   /// Needed to ask for a still of exactly the same region.
   layout: { width: number; height: number } | null;
+  /// Viewport the current stream was started with, so a recovery restart can
+  /// reproduce it without re-deriving it from the maps.
+  lastWant: ViewportWant | null;
+  /// Set while we are waiting to see whether a page Chrome reported as hidden
+  /// comes back on its own. Cleared the moment it does; on expiry we escalate to
+  /// actually activating the target (see onScreencastVisibility).
+  visibilityTimer: NodeJS.Timeout | null;
   /// Resolution multiplier the *stream* is currently delivering (frameScale of the
   /// viewport in force when the stream was started). When it already reaches
   /// SHARP_STILL_SCALE the idle screenshot has nothing left to add, and skipping it
@@ -1490,6 +1498,7 @@ function startCast(
   p: CastProducer, want?: ViewportWant, layout?: { width: number; height: number },
 ): void {
   p.streamScale = want ? frameScale(want) : 1;
+  p.lastWant = want ?? p.lastWant;
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY, ...(want ? castCaps(want, layout) : {}),
   });
@@ -1761,7 +1770,8 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
-    layout: null, streamScale: 1, idleTimer: null, stillInFlight: false, frameSeq: 0,
+    layout: null, streamScale: 1, lastWant: null, visibilityTimer: null,
+    idleTimer: null, stillInFlight: false, frameSeq: 0,
   };
 
   socket.on("message", (raw: WebSocket.RawData) => {
@@ -1774,6 +1784,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       if (ackId !== undefined) producerSend(p, "Page.screencastFrameAck", { sessionId: ackId });
       if (data) {
         if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
+        clearVisibilityRecovery(p);
         // First frame confirmed to be from the layout we requested → publish the
         // new revision now (and only now), then let this frame through with it.
         if (p.pendingLayout && frameMatchesPendingLayout(p, msg.params?.metadata)) {
@@ -1802,6 +1813,14 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       }
       return;
     }
+    // Chrome tells us outright when it stops considering the page visible — no
+    // need to infer a freeze from frame timing. This is the safety net behind
+    // focus emulation: if that ever fails to hold (a Chrome change, a navigation
+    // that drops the override), we still notice instead of showing a dead picture.
+    if (msg.method === "Page.screencastVisibilityChanged") {
+      onScreencastVisibility(p, targetId, msg.params?.visible !== false);
+      return;
+    }
     if (msg.method === "Runtime.bindingCalled"
         && msg.params?.name === "__browsermint_password_focus") {
       const on = msg.params?.payload === "1";
@@ -1822,6 +1841,12 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     }
     if (msg.method === "Page.frameNavigated" && msg.params?.frame?.parentId === undefined) {
       p.url = msg.params.frame.url ?? p.url;
+      // Focus emulation is CDP session state and a main-frame navigation is the
+      // most likely moment for it to be dropped. Re-asserting costs one message.
+      // It belongs *inside* this branch: an earlier branch of its own would have
+      // to return, and returning here silently kills the url/tabUpdate/fit work
+      // below (codex review 2026-08-03, High-1 — that is exactly what it did).
+      producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
       // A different page may have a different minimum layout width — the layout
       // remembered for the previous page must not survive the navigation (a
       // producer rebuilt before the fit pass below would start from it).
@@ -1846,6 +1871,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     if (p.stopTimer) { clearTimeout(p.stopTimer); p.stopTimer = null; }
     if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
     if (p.reconfigureTimer) { clearTimeout(p.reconfigureTimer); p.reconfigureTimer = null; }
+    if (p.visibilityTimer) { clearTimeout(p.visibilityTimer); p.visibilityTimer = null; }
     clearIdleStill(p);
     if (producers.get(targetKey(sessionId, targetId)) === p) {
       producers.delete(targetKey(sessionId, targetId));
@@ -1875,12 +1901,22 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   const layout = fitted ?? (want ? layoutSize(want) : null);
   producerSend(p, "Page.enable");
   installPasswordWatch(p);
-  // Chrome only emits screencast frames for a page it considers active; a
-  // background tab streams nothing and the viewer sits on a blank canvas.
-  // setWebLifecycleState marks *this page* active without changing which tab is
-  // frontmost — bringToFront would yank the foreground away from whatever the
-  // agent is driving in another tab of the same window.
+  // Chrome only emits screencast frames for a page it considers *visible*, and a
+  // page loses that the moment another tab in its window is selected. That is not
+  // a corner case: clicking any `target=_blank` link (every Baidu/Google result)
+  // opens a tab that takes the foreground, and the page being watched freezes
+  // solid — the picture keeps its last frame forever, so nothing looks broken.
+  //
+  // setWebLifecycleState only lifts the *frozen* page-lifecycle state; it does not
+  // make the widget visible. Measured on this image (8 stimulus rounds each):
+  //   baseline                                  foreground 8/8, background 0/8
+  //   --disable-renderer-backgrounding & co.    foreground 8/8, background 0/8
+  //   setFocusEmulationEnabled(true)            foreground 8/8, background 8/8
+  // Focus emulation is scoped to this CDP session, so it lives exactly as long as
+  // the producer does (see the disable in scheduleLingerIfIdle): pages nobody is
+  // watching go back to normal visibility semantics.
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
+  producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
   if (want && layout) {
     producerSend(p, "Emulation.setDeviceMetricsOverride", {
       width: layout.width, height: layout.height, deviceScaleFactor: want.deviceScaleFactor,
@@ -1918,6 +1954,54 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   return p;
 }
 
+// How long to wait after a hidden report before trying the stream itself again.
+const VISIBILITY_RECOVER_MS = 2500;
+
+/** Chrome says this page is (in)visible. Invisible while someone is watching is
+ *  the freeze — recover, but **never by taking the foreground**.
+ *
+ *  Stealing the foreground here was the first design and it was wrong (codex
+ *  review 2026-08-03, High-2): `viewers` includes read-only viewers, so a second
+ *  person merely *watching* a background page would yank the foreground away from
+ *  the agent working under a lease in another tab of the same window — a
+ *  single-writer violation dressed up as a recovery. Worse, with two producers it
+ *  is mutually recursive: A activates → B goes hidden → B activates → A goes
+ *  hidden, every 2.5s forever. Anything that needs the foreground has to go
+ *  through the lease, and this code path has no business having one. */
+function onScreencastVisibility(
+  p: CastProducer, targetId: string, visible: boolean,
+): void {
+  if (visible) {
+    clearVisibilityRecovery(p);
+    return;
+  }
+  // Nobody is looking: a hidden page that produces nothing is exactly right.
+  if (p.viewers.size === 0 || p.closed) return;
+  // Re-assert focus emulation — this alone fixes it whenever the override was
+  // simply lost, and it disturbs nobody else.
+  producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  if (p.visibilityTimer) return;
+  p.visibilityTimer = setTimeout(() => {
+    p.visibilityTimer = null;
+    if (p.closed || p.viewers.size === 0) return;
+    // Still nothing. Restart the stream on our own session: harmless to every
+    // other target, and it re-runs the whole setup including the override.
+    // If even this does not help, the picture stays frozen — but a stuck frame
+    // is strictly better than fighting the agent for the foreground. The viewer
+    // still has a manual way out (reload the page from the address bar).
+    console.info(`[cast] ${targetId} still hidden with ${p.viewers.size} viewer(s), restarting stream`);
+    producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    producerSend(p, "Page.stopScreencast");
+    const want = p.lastWant;
+    startCast(p, want ?? undefined, p.layout ?? undefined);
+  }, VISIBILITY_RECOVER_MS);
+}
+
+/** A frame proves the page is producing again — no report needed to tell us. */
+function clearVisibilityRecovery(p: CastProducer): void {
+  if (p.visibilityTimer) { clearTimeout(p.visibilityTimer); p.visibilityTimer = null; }
+}
+
 function scheduleLingerIfIdle(producer: CastProducer, key: string, targetId: string): void {
   if (producer.viewers.size > 0 || producer.closed) return;
   // 'close' and 'error' can both fire for the same viewer: without clearing, the
@@ -1926,6 +2010,11 @@ function scheduleLingerIfIdle(producer: CastProducer, key: string, targetId: str
   if (producer.stopTimer) clearTimeout(producer.stopTimer);
   producer.stopTimer = setTimeout(() => {
     if (producer.viewers.size > 0 || producer.closed) return;
+    // Hand the page back its real visibility semantics. Leaving focus emulation on
+    // would make every page anyone ever watched believe it is focused forever,
+    // which quietly changes how sites behave (blur-pause, autoplay, idle timers)
+    // long after the last viewer left.
+    producerSend(producer, "Emulation.setFocusEmulationEnabled", { enabled: false });
     producerSend(producer, "Page.stopScreencast");
     try { producer.socket.close(); } catch { /* already gone */ }
     // Only drop the entry if it is still ours — a reconnect during the linger

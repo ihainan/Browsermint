@@ -64,11 +64,19 @@ class FakeViewer extends EventEmitter {
 // 预先 new 好放进数组的话，只要测试在 attach 之前先 await 过别的东西（例如
 // setTargetViewport 会自己建一条视口 socket），那次 await 就把 "open" 消费掉了，
 // 后面注册的 once("open") 永远等不到 → "cast socket timeout"。
-function setup(opts: { sockets?: Array<FakeSocket | (() => FakeSocket)>; scrollWidth?: number } = {}) {
+// `onCdp` 是必要的：像 Target.activateTarget 这种命令走的是 executeCdpCommand，
+// 不经过 producer 的 socket。只断言 socket 上发了什么，抓不住「有没有去抢前台」
+// 这类最危险的行为（codex 复审 2026-08-03，Medium-5）。
+function setup(opts: {
+  sockets?: Array<FakeSocket | (() => FakeSocket)>;
+  scrollWidth?: number;
+  onCdp?: (method: string, params?: any) => void;
+} = {}) {
   const created: FakeSocket[] = [];
   resetCastTestHooks();
   setCdpServiceOverridesForTests({
-    executeCdpCommand: async (_s, method) => {
+    executeCdpCommand: async (_s, method, params?: any) => {
+      opts.onCdp?.(method, params);
       if (method === "Target.getTargets") {
         return { targetInfos: [{ targetId: TARGET, type: "page" }, { targetId: "w-1", type: "worker" }] };
       }
@@ -730,5 +738,122 @@ test("流已经是 2x：不再抓高清静帧（那一步正是动静之间的�
     assert.ok(!sock.answerShot, "流已达 2x，静止时不该再发 captureScreenshot");
     const datas = v.received.map((x) => JSON.parse(x).data).filter(Boolean);
     assert.equal(datas.at(-1), "MOVE1", "屏上留的就是那张 2x 动帧");
+  } finally { teardown(); }
+});
+
+// ── 画面冻结（2026-08-03 用户实测：百度点搜索结果后画面死掉）────────────────
+// 根因：点 target=_blank 的链接 → 远端新建标签页抢走前台 → 原页面被 Chrome 判为
+// 不可见 → 合成器不再出帧 → 画面永久停在最后一帧（而且看起来一切正常：WS 没断、
+// 尺寸没变、像素也在）。实测对照见 session-driver.ts 与 cdp.service.ts 的注释。
+test("起流即开焦点模拟（后台标签页照样出帧的唯一有效手段）", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)!;
+    const focus = sock.sent.filter((m) => m.method === "Emulation.setFocusEmulationEnabled");
+    assert.equal(focus.length, 1);
+    assert.equal(focus[0].params.enabled, true);
+    // 必须在起流之前：先出的帧也得是可见状态下渲染的
+    const methods = sock.methods();
+    assert.ok(methods.indexOf("Emulation.setFocusEmulationEnabled")
+              < methods.indexOf("Page.startScreencast"));
+  } finally { teardown(); }
+});
+
+test("页面不可见且有人在看：只重申焦点模拟，绝不抢前台", async () => {
+  const activated: string[] = [];
+  const created = setup({ onCdp: (m, prm) => { if (m === "Target.activateTarget") activated.push(prm?.targetId); } });
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)!;
+    const before = sock.sent.filter((m) => m.method === "Emulation.setFocusEmulationEnabled").length;
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastVisibilityChanged", params: { visible: false },
+    })));
+    await new Promise((r) => setTimeout(r, 50));
+    const after = sock.sent.filter((m) => m.method === "Emulation.setFocusEmulationEnabled");
+    assert.equal(after.length, before + 1, "应重申一次焦点模拟");
+    assert.equal(after.at(-1)!.params.enabled, true);
+    // 等过恢复窗口：仍然不许抢前台（只读观众抢前台会打断持租约的 agent，
+    // 且两个 producer 会每 2.5s 互抢——codex 复审 High-2）
+    await new Promise((r) => setTimeout(r, 2800));
+    assert.deepEqual(activated, [], "任何情况下看门狗都不得调用 activateTarget");
+    const stops = sock.sent.filter((m) => m.method === "Page.stopScreencast");
+    assert.ok(stops.length >= 1, "温和恢复：重启自己的流");
+  } finally { teardown(); }
+});
+
+test("恢复窗口内来了新帧：证明已恢复，不再重启流", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)!;
+    const stopsBefore = sock.sent.filter((m) => m.method === "Page.stopScreencast").length;
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastVisibilityChanged", params: { visible: false },
+    })));
+    await new Promise((r) => setTimeout(r, 100));
+    sock.pushFrame("BACK");            // 帧本身就是恢复的证据
+    await new Promise((r) => setTimeout(r, 2800));
+    const stopsAfter = sock.sent.filter((m) => m.method === "Page.stopScreencast").length;
+    assert.equal(stopsAfter, stopsBefore, "收到帧后不该再重启流");
+  } finally { teardown(); }
+});
+
+test("观众离开后即使报不可见也不做任何恢复动作", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)!;
+    v.close();
+    await new Promise((r) => setTimeout(r, 20));
+    // 只数可见性恢复会发的两种命令：producer 起流 1.2s 后还会自己做一次布局复核
+    // （Runtime.evaluate 量内容宽度），拿消息总数当判据会把它误算进来。
+    const count = () => sock.sent.filter((m) =>
+      m.method === "Emulation.setFocusEmulationEnabled" || m.method === "Page.stopScreencast").length;
+    const before = count();
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastVisibilityChanged", params: { visible: false },
+    })));
+    await new Promise((r) => setTimeout(r, 2800));
+    assert.equal(count(), before, "无观众时不该为可见性做任何恢复动作");
+  } finally { teardown(); }
+});
+
+test("主框架导航后重申焦点模拟（导航是最可能把它弄丢的时刻）", async () => {
+  const created = setup();
+  try {
+    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)!;
+    const before = sock.sent.filter(
+      (m) => m.method === "Emulation.setFocusEmulationEnabled").length;
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.frameNavigated", params: { frame: { id: "f1", url: "https://x/" } },
+    })));
+    // 子框架导航不该触发
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.frameNavigated",
+      params: { frame: { id: "f2", parentId: "f1", url: "https://y/" } },
+    })));
+    await new Promise((r) => setTimeout(r, 30));
+    const after = sock.sent.filter(
+      (m) => m.method === "Emulation.setFocusEmulationEnabled").length;
+    assert.equal(after, before + 1, "只有主框架导航才重申，子框架不算");
+    // 重申不能把原有的主框架导航处理挤掉：曾经写成独立分支 + return，
+    // 结果 URL 不更新、tabUpdate 不广播、放宽布局不失效（codex 复审 High-1）
+    const tabUpdates = v.received.map((x) => JSON.parse(x))
+      .filter((m: any) => m.type === "tabUpdate");
+    assert.ok(tabUpdates.length >= 1, "导航后必须仍然广播 tabUpdate");
+    assert.equal(tabUpdates.at(-1).url, "https://x/", "URL 必须更新");
   } finally { teardown(); }
 });
