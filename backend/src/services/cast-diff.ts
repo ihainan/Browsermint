@@ -38,8 +38,18 @@ export interface FrameDifferOptions {
   shiftRange?: number;
 }
 
-// 块内平均像素差超过它才算「变了」。太小会被 JPEG 噪声刷屏，太大会漏掉细小文字变化。
+/**
+ * 块内平均像素差超过它才算「变了」。太小会被 JPEG 噪声刷屏，太大会漏掉细小文字变化。
+ *
+ * **门槛得跟着位移走**。滚动量只要不是 8 的倍数，JPEG 的 8×8 块就整体错位，同一块
+ * 内容重压出来处处小幅不同。实测（真实页面、q62、128px 块，内容完全没变）：
+ *   位移是 8 的倍数   → 块平均差 中位 0.06、最大 1.46
+ *   位移不是 8 的倍数 → 块平均差 中位 0.57、九成 3.2、**最大 5.13**
+ * 一律卡 3 的后果是真机上位移认对了（199px）却仍有 85% 的块被判成「变了」→ 退回整帧，
+ * 增量白算。真实的内容变化（文字出现、图片换掉）远在 10 以上，抬到 7 不会漏。
+ */
 const TILE_DIFF_THRESHOLD = 3;
+const TILE_DIFF_THRESHOLD_SHIFTED = 7;
 
 const DEFAULTS = {
   tile: 128,
@@ -336,7 +346,8 @@ export class FrameDiffer {
         n++;
       }
     }
-    return n > 0 && sum / n > TILE_DIFF_THRESHOLD;
+    const limit = shift % 8 === 0 ? TILE_DIFF_THRESHOLD : TILE_DIFF_THRESHOLD_SHIFTED;
+    return n > 0 && sum / n > limit;
   }
 
   private async encodeTiles(tiles: DiffTile[], raw: Buffer, width: number): Promise<void> {

@@ -288,3 +288,22 @@ test("不相邻的变化块不能被并到一起（中间没变的部分不该�
   const row = res.tiles.filter((t: any) => t.y === 64);
   assert.equal(row.length, 2, `左右两块不该合并，实际 ${row.length}`);
 });
+
+test("位移不是 8 的倍数时，没变的内容不能被当成变了（JPEG 块错位）", async () => {
+  // 这条钉住真机上的现象：位移认对了（199px）却仍有 85% 的块判成变化 → 退回整帧。
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  const dy = 37;                                   // 故意不是 8 的倍数
+  const scrolled = Buffer.alloc(base.length);
+  base.copy(scrolled, 0, dy * W * 3);
+  for (let y = H - dy; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 3;
+    scrolled[i] = (x * 5) & 0xff; scrolled[i + 1] = 200; scrolled[i + 2] = (y * 3) & 0xff;
+  }
+  const res: any = await d.next(await toJpeg(scrolled));
+  assert.equal(res.kind, "delta");
+  assert.equal(res.shift, dy);
+  const area = res.tiles.reduce((s: number, t: any) => s + t.w * t.h, 0) / (W * H);
+  assert.ok(area < 0.25, `位移之后只该补新露出来的一条，实际变化面积 ${(area * 100).toFixed(0)}%`);
+});
