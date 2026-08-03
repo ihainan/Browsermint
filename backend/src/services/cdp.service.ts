@@ -2526,7 +2526,13 @@ export async function attachCastViewer(
     if (producer.closed) return;
     try {
       const m = JSON.parse(raw.toString());
-      if (m?.type === "needKeyframe") producer.differ.reset();
+      if (m?.type === "needKeyframe") {
+        producer.differ.reset();
+        // **光 reset 不够**：下一张整帧要等下一帧画面到来，而页面静止时根本不会再来帧。
+        // 观看端跟丢基准 → 要整帧 → 没人回 → 画面永久停在花掉的那一张。手上存着最后
+        // 一帧，直接拿它重走一遍差分（基准已清空，出来必然是整帧）。
+        if (producer.lastFrame) void runDiff(producer, producer.lastFrame.data);
+      }
     } catch { /* 不是 JSON 就不是给我们的 */ }
   });
   // A viewer that joins while masked must be told so — otherwise it just sees a

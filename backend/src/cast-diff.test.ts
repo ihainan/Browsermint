@@ -315,3 +315,24 @@ test("位移必须精确到像素：差一像素比认不出来更糟", () => {
   const b = profile(y => (y + dy < H ? src[y + dy] : 20 + (y % 23)));
   assert.equal(detectShift(src, b, H, 300), dy);
 });
+
+// 注：帧进来时已经是 JPEG，绿蓝变了之后解码出的红色也会跟着动（YCbCr 的必然结果），
+// 所以「只比红色通道」在我们这条管线里抓不出反例——这条测的是行为（这种变化必须发出去），
+// 不是判据的鉴别力。三通道比较留作纵深防御：换成无损输入时它才是必须的。
+test("红色不变、绿蓝大变的画面也必须发出去", async () => {
+  const raw = Buffer.alloc(W * H * 3);
+  for (let i = 0; i < raw.length; i += 3) {                 // 深红底，行间有起伏
+    const y = Math.floor(i / 3 / W);
+    raw[i] = 120 + (y % 7) * 8; raw[i + 1] = 0; raw[i + 2] = 0;
+  }
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(raw));
+  const recolored = Buffer.from(raw);
+  for (let y = 100; y < 200; y++) for (let x = 100; x < 400; x++) {
+    const i = (y * W + x) * 3;
+    recolored[i + 1] = 255; recolored[i + 2] = 255;         // 红不动，绿蓝拉满
+  }
+  const res: any = await d.next(await toJpeg(recolored));
+  const changed = res.kind === "key" || res.tiles.length > 0;
+  assert.ok(changed, "只比红色通道的话这一整类变化会被静默丢掉，画面永久停在旧内容");
+});

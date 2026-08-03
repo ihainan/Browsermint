@@ -76,7 +76,12 @@ function rowProfile(raw: Buffer, width: number, height: number): Float32Array {
     let sum = 0;
     let n = 0;
     const off = y * stride;
-    for (let x = 0; x < stride; x += 9) { sum += raw[off + x]; n++; }
+    // 三个通道都算。只取红色理论上会漏掉「红色不变、绿蓝大变」的画面；实测这条管线里
+    // 抓不出反例（帧是 JPEG，绿蓝一动解码出的红色也跟着动），算纵深防御。
+    for (let x = 0; x < stride; x += 9) {
+      sum += raw[off + x] + raw[off + x + 1] + raw[off + x + 2];
+      n += 3;
+    }
     out[y] = sum / n;
   }
   return out;
@@ -217,6 +222,12 @@ export class FrameDiffer {
   private prevRaw: Buffer | null = null;
   private prevProfile: Float32Array | null = null;
   private lastKeyAt = 0;
+  /**
+   * 代次。`next()` 是异步的（解码/编码都要等），而 `reset()` 随时可能从别处进来
+   * （观看端要整帧、高清静帧换了分辨率）。没有它的话，在途的那次差分完成后照样把
+   * `prevRaw` 写回去，等于把 reset 抹掉——之后发出的增量所基于的那张图观看端根本没有。
+   */
+  private gen = 0;
   private readonly diag = newShiftDiag();
   private width = 0;
   private height = 0;
@@ -229,9 +240,11 @@ export class FrameDiffer {
   reset(): void {
     this.prevRaw = null;
     this.prevProfile = null;
+    this.gen++;
   }
 
   async next(jpeg: Buffer, now = Date.now()): Promise<DiffResult> {
+    const gen = this.gen;
     const { data, info } = await sharp(jpeg).removeAlpha()
       .raw().toBuffer({ resolveWithObject: true });
     const width = info.width;
@@ -283,6 +296,11 @@ export class FrameDiffer {
         `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`);
     }
 
+    // 这一路上 await 过好几次（解码、编码），期间可能有人 reset 过。那就当这一帧作废：
+    // 重发一张整帧，让观看端与我们从同一张图重新起头（宁可多发一帧，不可发一张对不上
+    // 基准的增量）。**没有单测**：能确定性构造的那个时刻旧代码走的是另一条分支，
+    // 真正危险的窗口在编码中途，测试里稳不住。
+    if (gen !== this.gen) return this.keyframe(jpeg, data, width, height, now, "reset-raced");
     this.prevRaw = data;
     this.prevProfile = profile;
     return { kind: "delta", shift, tiles };
@@ -350,10 +368,13 @@ export class FrameDiffer {
       if (yPrev < 0 || yPrev >= height) return true;
       const a = (yPrev * width + x0) * 3;
       const b = (yNext * width + x0) * 3;
-      for (let c = 0; c < w * 3; c += 3) {
-        const d = prev[a + c] - next[b + c];
-        sum += d < 0 ? -d : d;
-        n++;
+      // 同样三通道都比，隔一个像素采样抵掉开销（理由见 rowProfile 那段）。
+      for (let c = 0; c < w * 3; c += 6) {
+        for (let k = 0; k < 3; k++) {
+          const d = prev[a + c + k] - next[b + c + k];
+          sum += d < 0 ? -d : d;
+          n++;
+        }
       }
     }
     const limit = shift % 8 === 0 ? TILE_DIFF_THRESHOLD : TILE_DIFF_THRESHOLD_SHIFTED;
