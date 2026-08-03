@@ -1176,12 +1176,11 @@ const targetViewportSockets = new Map<string, WebSocket>();          // `${sessi
 type ViewportWant = { width: number; height: number; deviceScaleFactor: number; zoom: number };
 const targetViewports = new Map<string, ViewportWant>();
 
-function layoutSize(want: ViewportWant): { width: number; height: number } {
-  const z = want.zoom > 0 ? want.zoom : 1;
-  return {
-    width: Math.min(Math.max(Math.round(want.width / z), 320), 3840),
-    height: Math.min(Math.max(Math.round(want.height / z), 240), 2160),
-  };
+// 布局视口固定（见 FIXED_VIEWPORT）。`want` 里的宽高与 zoom **都不再参与布局**：
+// 缩放从此是观看端自己的事（CSS 变换），远端页面不因为谁把窗口拖窄了就重排。
+// 仍然保留 want 参数是因为 deviceScaleFactor 还有用——它决定帧的像素密度，不决定布局。
+function layoutSize(_want: ViewportWant): { width: number; height: number } {
+  return { ...FIXED_VIEWPORT };
 }
 // fitViewportToContent 放宽后的布局，按 target 记住。它原本只活在 producer 里：
 // viewer 全走 + 5s linger 到期 → producer 拆掉 → 放宽布局丢失 → 下次建流先按基础
@@ -1307,14 +1306,31 @@ async function openViewportSocketInner(
 
 let viewportCmdId = 1;
 
+// 远端页面的布局视口是**固定**的，不跟任何一个观看端的面板尺寸走。
+//
+// 从前是「谁最后连上，页面就按谁的栏宽重排」。一个远端页面只有一个真实视口，所以多端
+// 同看时会互相把对方的排版改掉；而工作现场要跨设备同步之后，这个毛病只会被放大——
+// 手机一打开，桌面端的排版立刻跟着变窄。
+//
+// 固定之后，「画面多大」由观看端自己缩放决定（contain 显示 + 缩放档），远端不再参与。
+// 参考 ChatGPT App 的内置浏览器：栏窄时不缩放，让用户横向滚动。
+//
+// 固定的是**完整视口**不只是宽度：只固定宽的话，另一台设备仍能通过高度影响 100vh、
+// sticky 和 canvas 的布局。
+export const FIXED_VIEWPORT = { width: 1280, height: 800 };
+
 export async function setTargetViewport(
   sessionId: string,
   targetId: string,
-  width: number,
-  height: number,
+  _width: number,
+  _height: number,
   deviceScaleFactor = 1,
   zoom = 1
 ): Promise<void> {
+  // 入参里的尺寸**一律忽略**。这道闸放在这里而不是前端，是因为一个还没刷新的旧客户端
+  // 仍会按自己的面板尺寸持续调这个接口——只改前端的话，它照样能把共享页面的布局改掉。
+  const width = FIXED_VIEWPORT.width;
+  const height = FIXED_VIEWPORT.height;
   if (cdpServiceOverrides.setTargetViewport) {
     return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor, zoom);
   }
@@ -1885,16 +1901,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
       // to return, and returning here silently kills the url/tabUpdate/fit work
       // below (codex review 2026-08-03, High-1 — that is exactly what it did).
       producerSend(p, "Emulation.setFocusEmulationEnabled", { enabled: true });
-      // A different page may have a different minimum layout width — the layout
-      // remembered for the previous page must not survive the navigation (a
-      // producer rebuilt before the fit pass below would start from it).
-      fittedLayouts.delete(targetKey(sessionId, targetId));
-      const wantNow = targetViewports.get(targetKey(sessionId, targetId));
-      if (wantNow) {
-        setTimeout(() => {
-          if (!p.closed) fitViewportToContent(p, sessionId, targetId, wantNow).catch(() => {});
-        }, 1500);
-      }
+      // 导航后不再重新 fit：布局视口是固定的，换个页面也一样（见 FIXED_VIEWPORT）。
       for (const viewer of p.viewers) {
         if (viewer.readyState === WebSocket.OPEN) {
           viewer.send(JSON.stringify({ type: "tabUpdate", url: p.url, title: p.title, favicon: null }));
@@ -1968,12 +1975,9 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   // that Chrome treats as fully backgrounded stays silent). If no frame arrives
   // shortly, fall back to actually activating the tab — worse for a concurrently
   // working agent, but a viewer with no picture at all is worse still.
-  if (want) {
-    // Give the page a moment to lay out before measuring its content width.
-    setTimeout(() => {
-      if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
-    }, 1200);
-  }
+  // 不再做 fit。它的作用是「内容装不下就放宽布局视口」，而那正是「远端跟着观看端改
+  // 排版」的另一种形式——固定视口之后，装不下就由观看端横向滚动，与真实浏览器一致。
+  // （原实现：起流 1.2s 后量 scrollWidth，超出则放宽布局并重启流。）
   p.firstFrameTimer = setTimeout(() => {
     p.firstFrameTimer = null;
     if (p.closed || p.lastFrame) return;
@@ -2476,9 +2480,6 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   producerSend(p, "Page.stopScreencast");
   producerSend(p, "Page.setWebLifecycleState", { state: "active" });
   startCast(p, want, layoutNow);
-  setTimeout(() => {
-    if (!p.closed) fitViewportToContent(p, sessionId, targetId, want).catch(() => {});
-  }, 800);
   return true;
 }
 

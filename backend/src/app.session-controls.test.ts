@@ -634,7 +634,9 @@ test("driving REST endpoints auto-resume a paused session", async () => {
   }
 });
 
-test("per-target viewport goes through the persistent-session path", async () => {
+// 客户端传来的尺寸一律被服务端覆盖成固定视口（追踪 #86 阶段 0a）：这道闸必须在服务端，
+// 因为一个还没刷新的旧客户端仍会按自己的面板尺寸持续调这个接口。
+test("客户端传来的视口尺寸被服务端强制成固定值", async () => {
   // The viewport must NOT go through executeCdpCommand: that attaches a throwaway
   // flat session, and Chrome drops the emulation override with it.
   const viewports: Array<{ targetId: string; width: number; height: number; dsf?: number; zoom?: number }> = [];
@@ -650,12 +652,12 @@ test("per-target viewport goes through the persistent-session path", async () =>
     const res = await app.inject({
       method: "POST",
       url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
-      payload: { width: 760, height: 900 },
+      payload: { width: 1280, height: 800 },
     });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { ok: true, width: 760, height: 900, deviceScaleFactor: 1, zoom: 1 });
-    assert.deepEqual(viewports, [{ targetId: "page-1", width: 760, height: 900, dsf: 1, zoom: 1 }]);
+    assert.deepEqual(res.json(), { ok: true, width: 1280, height: 800, deviceScaleFactor: 1, zoom: 1 });
+    assert.deepEqual(viewports, [{ targetId: "page-1", width: 1280, height: 800, dsf: 1, zoom: 1 }]);
     assert.deepEqual(cdpCalls, []);
   } finally {
     await closeApp(app);

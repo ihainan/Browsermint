@@ -216,89 +216,74 @@ test("pagecast与被反代的cast是两条路由，互不影响", () => {
 // 这一条是真机漏测补回来的：早先的验收只看"画面尺寸 == 栏宽"和"有像素"，而固定宽度
 // 布局的站点（百度、Google 的 PC 首页）在窄视口下**不重排**——两项判据照样全绿，实际
 // 却是内容横向溢出、右半边够不着。判据必须落在"内容宽度 vs 视口"上。
-test("不重排的站点：内容超出视口时缩放适配（而不是留一条横向滚动条）", async () => {
-  const created = setup({ scrollWidth: 1250 });   // 视口给 735，页面仍要 1250（百度实测值）
+// ── 布局视口固定（2026-08-03，追踪 #86 阶段 0a）──────────────────────────────
+// 以前是「谁最后连上，页面就按谁的栏宽重排」。一个远端页面只有一个真实视口，多端同看
+// 时会互相改掉对方的排版；工作现场要跨设备同步之后这个毛病只会被放大。
+// 现在布局固定 1280x800，「画面多大」完全由观看端自己缩放决定。
+test("布局视口固定：栏宽再怎么变，远端排版都不变", async () => {
+  const created = setup({ scrollWidth: 2000 });   // 内容远超视口也不放宽
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 2);   // HiDPI 观看端
+    await setTargetViewport(SESSION, TARGET, 400, 300, 2);
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
-    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估
-
-    const producerSock = created.at(-1)!;
-    const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    // 只放宽到内容真正需要的宽度。以前还会再放宽到「栏宽×DPR」去换像素（1470），
-    // 那是拿正文字号换清晰度；现在帧自带 ×BROWSER_DEVICE_SCALE_FACTOR 的像素，
-    // 这笔交换不再划算。
-    assert.equal(metrics.at(-1)!.params.width, 1250,
-      "要缩放的页面：布局宽 = 内容宽，不再为买像素额外放宽");
-    // 上限必须放行整幅布局 × 观看端 DPR：按布局 CSS 宽封顶会把 2x 的帧缩回 1x
-    const casts = producerSock.sent.filter((m) => m.method === "Page.startScreencast");
-    assert.equal(casts.at(-1)!.params.maxWidth, 2500,
-      "HiDPI 观看端：上限 = 布局 × 2，否则 2x 合成出来的像素被 cap 丢掉");
+    await new Promise((r) => setTimeout(r, 1600));   // 等过原来 fit 会触发的时机
+    const metrics = created.at(-1)!.sent
+      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
+    assert.ok(metrics.length > 0);
+    for (const m of metrics) {
+      assert.equal(m.params.width, 1280, "布局宽必须恒为 1280，与栏宽无关");
+      assert.equal(m.params.height, 800, "高也要固定：只固定宽的话 100vh/sticky 仍会被改");
+    }
   } finally { teardown(); }
 });
 
-// 关键回归：曾把「按 DPR 提分辨率」折进触发条件，结果响应式站点也被放宽到 width×dpr，
-// 正文字号直接减半——那正是这个功能要避免的事。
-test("响应式站点不触发缩放（哪怕 DPR>1 也不能放宽，否则字变一半大）", async () => {
-  const created = setup({ scrollWidth: 735 });    // 页面老实按视口重排
+test("缩放档不改布局（缩放从此是观看端自己的事）", async () => {
+  const created = setup({ scrollWidth: 900 });
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 2);   // HiDPI 观看端
+    await setTargetViewport(SESSION, TARGET, 735, 917, 2, 0.5);   // zoom 50%
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
-    await new Promise((r) => setTimeout(r, 1600));
-
-    const producerSock = created.at(-1)!;
-    const metrics = producerSock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    assert.ok(metrics.every((m) => m.params.width === 735),
-      "响应式站点不该被放宽布局视口（那会把正文字号缩掉一半）");
+    const metrics = created.at(-1)!.sent
+      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
+    assert.equal(metrics.params.width, 1280, "zoom 不该参与布局计算");
+    assert.equal(metrics.params.height, 800);
   } finally { teardown(); }
 });
 
-// 缩放档位：语义对齐浏览器 Ctrl +/− —— 缩小 = 布局更宽 = 内容显小但帧像素更多。
-test("缩放 50%：布局按栏宽/zoom 放宽，帧上限跟着放宽", async () => {
-  const created = setup({ scrollWidth: 700 });    // 页面本身装得下，不触发 fit
+test("内容装不下也不放宽布局（交给观看端横向滚动，与真实浏览器一致）", async () => {
+  const created = setup({ scrollWidth: 2500 });
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 0.5);
+    await setTargetViewport(SESSION, TARGET, 735, 917, 2);
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
-    await new Promise((r) => setTimeout(r, 1600));
-
     const sock = created.at(-1)!;
-    const metrics = sock.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    assert.equal(metrics.at(-1)!.params.width, 1470, "50% → 布局 = 735/0.5");
-    const casts = sock.sent.filter((m) => m.method === "Page.startScreencast");
-    assert.equal(casts.at(-1)!.params.maxWidth, 1470, "帧上限不能还按栏宽，否则又缩回去");
+    const before = sock.sent.filter((m) => m.method === "Page.stopScreencast").length;
+    await new Promise((r) => setTimeout(r, 1600));
+    assert.equal(sock.sent.filter((m) => m.method === "Page.stopScreencast").length, before,
+      "不该为了放宽布局而重启流——那正是「跟着观看端改排版」的另一种形式");
   } finally { teardown(); }
 });
 
-test("缩放 150%：布局收窄，内容显大（代价是像素更少）", async () => {
-  const created = setup({ scrollWidth: 400 });
+test("帧上限 = 固定布局 × 观看端 DPR", async () => {
+  const created = setup({ scrollWidth: 900 });
   try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 1.5);
+    await setTargetViewport(SESSION, TARGET, 735, 917, 2);
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
-    await new Promise((r) => setTimeout(r, 1600));
-
-    const metrics = created.at(-1)!.sent
-      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    assert.equal(metrics.at(-1)!.params.width, 490, "150% → 布局 = 735/1.5");
+    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
+    assert.equal(cast.params.maxWidth, 2560);    // 1280 × 2
+    assert.equal(cast.params.maxHeight, 1600);
   } finally { teardown(); }
 });
 
-test("缩放后仍按缩放后的布局判断是否装得下（不是按栏宽）", async () => {
-  const created = setup({ scrollWidth: 1200 });   // 内容 1200
+test("普通屏观看端：帧上限 = 固定布局 × 1（2x 比 1x 贵 ~2.5 倍字节）", async () => {
+  const created = setup({ scrollWidth: 900 });
   try {
-    // 50% → 布局 1470 已经装得下 1200，不该再放宽
-    await setTargetViewport(SESSION, TARGET, 735, 867, 1, 0.5);
+    await setTargetViewport(SESSION, TARGET, 735, 917, 1);
     const v = new FakeViewer();
     await attachCastViewer(SESSION, TARGET, v as any);
-    await new Promise((r) => setTimeout(r, 1600));
-
-    const metrics = created.at(-1)!.sent
-      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride");
-    assert.ok(metrics.every((m) => m.params.width === 1470),
-      "布局已够宽就不该二次放宽");
+    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
+    assert.equal(cast.params.maxWidth, 1280);
   } finally { teardown(); }
 });
 
@@ -463,12 +448,14 @@ test("High-3：新 revision 只在确认属于新布局的帧到达后才发布"
         params: { data, sessionId: 1, metadata: { deviceWidth: w, deviceHeight: h } },
       })));
 
+    // 布局固定之后这条路径基本不会被走到（改栏宽不再改变布局），但这套过渡期机制
+    // 作为安全网保留：将来任何会改变布局的改动都得靠它挡住「旧坐标带新版本」。
     pushMeta("OLD", 400, 300);           // 还在管线里的旧布局帧
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(v.received, [],
       "过渡期内旧布局的帧不得下发——否则它会被打上新 revision，坐标校验形同虚设");
 
-    pushMeta("NEW", 800, 600);           // 第一张确认属于新布局的帧
+    pushMeta("NEW", 1280, 800);          // 第一张确认属于（固定）新布局的帧
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(v.received.length, 1);
     const frame = JSON.parse(v.received[0]);
@@ -636,92 +623,8 @@ test("截图期间页面没动：静帧正常送达（卫兵不误杀）", async
   } finally { teardown(); }
 });
 
-// ── 放宽布局跨 producer 记忆（2026-08-02 用户实测：切走回来必放大缩小一次）────
-// fit 放宽的布局原本只活在 producer 里：viewer 全走 + linger 到期拆掉 producer 后
-// 布局丢失，下次建流先按基础布局起（页面重排、内容显大），1.2s 后 fit 又放宽回去
-// （再重排、内容显小）。现在放宽结果按 target 记住，重建的 producer 直接用它起流。
-test("producer 重建按记住的放宽布局起流，fit 复核不再重排", async () => {
-  const created = setup({ scrollWidth: 1250 });
-  try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
-    const v1 = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, v1 as any);
-    await new Promise((r) => setTimeout(r, 1600));   // 等 fit 评估：735 → 1250（内容宽）
-    const sock1 = created.at(-1)!;   // [0]=viewport socket, [1]=producer
-    const widened = sock1.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
-    assert.equal(widened.params.width, 1250, "前置：fit 已放宽到内容宽 1250");
-
-    // producer 意外死掉（等价于 linger 到期拆流，跳过 5s 等待）
-    sock1.close();
-    const v2 = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, v2 as any);
-    const sock2 = created.at(-1)!;
-    assert.notEqual(sock2, sock1, "应新建 producer");
-    const metrics0 = sock2.sent.filter((m) => m.method === "Emulation.setDeviceMetricsOverride")[0];
-    assert.equal(metrics0.params.width, 1250,
-      "重建的 producer 必须直接按放宽布局起流，而不是基础 735（那会让页面重排两次）");
-    const cast0 = sock2.sent.filter((m) => m.method === "Page.startScreencast")[0];
-    assert.equal(cast0.params.maxWidth, 2500, "帧上限 = 放宽布局 × 观看端 DPR");
-
-    // 喂一帧让 producer 知道当前布局，再等 fit 复核：同布局不得 stop/start
-    sock2.emit("message", Buffer.from(JSON.stringify({
-      method: "Page.screencastFrame",
-      params: { data: "F", sessionId: 1, metadata: { deviceWidth: 1250, deviceHeight: 1474 } },
-    })));
-    await new Promise((r) => setTimeout(r, 1600));
-    const stops = sock2.sent.filter((m) => m.method === "Page.stopScreencast");
-    assert.equal(stops.length, 0, "fit 复核发现布局已一致：不许再 stop/start 重排页面");
-  } finally { teardown(); }
-});
-
-test("显式改视口（拖分栏/换缩放档）会作废记住的放宽布局，由 fit 重新推导", async () => {
-  const created = setup({ scrollWidth: 1250 });
-  try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
-    const v1 = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, v1 as any);
-    await new Promise((r) => setTimeout(r, 1600));   // fit → 1470
-    await setTargetViewport(SESSION, TARGET, 900, 867, 2);   // 用户拖宽了栏
-    // 改视口后 producer 收到的 metrics 应是新基础布局 900，而不是按旧栏宽算的 1470
-    const prod = created[1];   // [0]=viewport socket, [1]=producer
-    const m = prod.sent.filter((x) => x.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
-    assert.equal(m.params.width, 900, "旧放宽布局必须作废（它按 735 栏宽推导）");
-  } finally { teardown(); }
-});
-
-// ── 帧分辨率：真实 DSF 决定，cap 决定下发多少 ────────────────────────────────
-// 2026-08-03 实测矩阵（Chrome 146，容器镜像 ihainan/browsermint-browser:0.5.1）：
-//   启动 dsf 1 + 模拟 dsf 2，无 cap        → 400x300
-//   启动 dsf 2 + 模拟 dsf 1，无 cap        → 800x600
-//   启动 dsf 2 + 模拟 dsf 2，cap 400x300   → 400x300   ← cap 会把 2x 丢掉
-//   启动 dsf 2 + 模拟 dsf 2，cap 800x600   → 800x600
-// 所以页面自己的 devicePixelRatio 与帧分辨率无关；cap 必须按**观看端**能用的密度给。
-test("HiDPI 观看端：帧上限 = 布局 × 2（不给的话 2x 合成白做）", async () => {
-  const created = setup({ scrollWidth: 735 });   // 响应式站点，不触发 fit
-  try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 2);
-    const v = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, v as any);
-    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
-    assert.equal(cast.params.maxWidth, 1470);
-    assert.equal(cast.params.maxHeight, 1734);
-    // 布局本身不变：清晰度不再靠放宽布局去买，正文字号不受影响
-    const metrics = created.at(-1)!.sent
-      .filter((m) => m.method === "Emulation.setDeviceMetricsOverride").at(-1)!;
-    assert.equal(metrics.params.width, 735);
-  } finally { teardown(); }
-});
-
-test("普通屏观看端：帧上限 = 布局 × 1（2x 比 1x 贵 ~2.5 倍字节，不能白发）", async () => {
-  const created = setup({ scrollWidth: 735 });
-  try {
-    await setTargetViewport(SESSION, TARGET, 735, 867, 1);
-    const v = new FakeViewer();
-    await attachCastViewer(SESSION, TARGET, v as any);
-    const cast = created.at(-1)!.sent.filter((m) => m.method === "Page.startScreencast").at(-1)!;
-    assert.equal(cast.params.maxWidth, 735, "1x 观看端不该收 2x 帧");
-  } finally { teardown(); }
-});
+// 注：原「放宽布局跨 producer 记忆」的两条用例已随 fit 机制一并移除
+// （布局固定后没有「放宽布局」这个概念了，见上面的固定视口用例）。
 
 test("流已经是 2x：不再抓高清静帧（那一步正是动静之间的清晰度跳变）", async () => {
   // setTargetViewport 先建一条视口 socket，producer 是第二条 —— 静帧要断言在后者上
