@@ -41,6 +41,11 @@ export const envSchema = z.object({
   // Default maxSessions for newly created users. 0 means unlimited.
   DEFAULT_USER_MAX_SESSIONS: z.coerce.number().int().min(0).default(2),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  // 浏览器会话的时区。容器默认 Etc/UTC，而出口 IP 在境外——「系统时区 UTC」是机房
+  // 容器的标志性特征，与出口地理位置不自洽，属于各家反机器人系统的常规检查项。
+  // 设成 +8 既与常用出口一致，日志时间对我们也直观。（2026-08-04：实测它**不是**
+  // Google 验证码的原因，纯属卫生问题，别指望改了就能搜 Google。）
+  BROWSER_TIMEZONE: z.string().default("Asia/Shanghai"),
   IDLE_PAUSE_ENABLED: boolEnv(true),
   IDLE_PAUSE_TIMEOUT_MS: z.coerce.number().default(10 * 60 * 1000),
   NODE_ENV: z

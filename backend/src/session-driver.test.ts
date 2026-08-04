@@ -25,6 +25,24 @@ test("浏览器容器必须带 --force-device-scale-factor（流清晰度的唯�
   assert.match(env.CHROME_ARGS, /--use-angle=swiftshader/);
 });
 
+// Steel 的假指纹注入会让 JS 里的 navigator.userAgent（139）与同一次请求的 HTTP
+// User-Agent / sec-ch-ua（146）对不上，userAgentData.brands 还被注成空数组——真实
+// 浏览器不可能这样，服务端一比就知道身份被改过，比不做任何伪装更可疑（2026-08-04
+// 实测）。关掉之后三者一致。
+test("必须关掉 Steel 的假指纹注入（它让 JS 与请求头自报的版本互相矛盾）", () => {
+  const env = buildBrowserEnv("host-1");
+  assert.equal(env.SKIP_FINGERPRINT_INJECTION, "true");
+});
+
+// 容器默认 Etc/UTC，而出口 IP 在境外：「系统时区 UTC」是机房容器的标志性特征，
+// 与出口地理位置不自洽。注：实测这**不是** Google 验证码的原因，属卫生问题。
+test("浏览器时区不能留在 UTC（与出口地理位置不自洽）", () => {
+  const env = buildBrowserEnv("host-1");
+  assert.notEqual(env.TZ, "UTC");
+  assert.notEqual(env.TZ, "Etc/UTC");
+  assert.equal(env.TZ, env.DEFAULT_TIMEZONE, "两个变量必须一致,否则 Chrome 与 Steel 各按各的来");
+});
+
 // Chrome 的 UI 也按 dsf 画。X 屏不跟着放大的话，noVNC 那条「打开完整浏览器」的
 // 兜底路径可用逻辑空间直接减半（1920x1080 的桌面只剩 960x540 可用）。
 test("X 屏尺寸按 dsf 放大，逻辑可用空间保持不变", () => {

@@ -1,6 +1,7 @@
 // Engine-agnostic contract for managing per-session browser workloads.
 // DockerDriver runs each session as a Docker container (compose deployments);
 // KubernetesDriver runs each session as a Pod + per-session Service + PVC.
+import { config } from "../../config.js";
 
 export interface SessionEndpoint {
   // Docker: container id. Kubernetes: pod name.
@@ -122,6 +123,15 @@ export function buildBrowserEnv(domainHost: string): Record<string, string> {
     LOG_STORAGE_ENABLED: "false",
     DISABLE_CHROME_SANDBOX: "true",
     CHROME_HEADLESS: "false",
+    // **关掉 Steel 的假指纹注入**。它本意是防指纹，实际制造了真实浏览器不可能有的
+    // 自相矛盾：注入后 JS 里 navigator.userAgent 报 Chrome/139，而同一次请求的
+    // HTTP User-Agent 与 sec-ch-ua 报的是二进制真实版本 146，且 userAgentData.brands
+    // 被注成空数组。任何服务端把这两者一比就知道有人在改身份——比什么都不做更可疑。
+    // 关掉之后三者一致（2026-08-04 实测 JS 与请求头同为 146）。
+    SKIP_FINGERPRINT_INJECTION: "true",
+    // 时区：见 config.ts BROWSER_TIMEZONE。容器默认 Etc/UTC 与出口地理位置不自洽。
+    TZ: config.BROWSER_TIMEZONE,
+    DEFAULT_TIMEZONE: config.BROWSER_TIMEZONE,
     // Passkey override is applied via CDP Page.addScriptToEvaluateOnNewDocument
     // after the workload starts (see cdp.service.ts). The --load-extension flag
     // is intentionally omitted: the Steel Browser image includes --disable-extensions
