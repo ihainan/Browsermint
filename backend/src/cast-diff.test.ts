@@ -243,15 +243,150 @@ test("后台标签吐出来的纯白帧要丢掉（别闪白，也别拿它当�
   assert.ok(res.tiles.length < 10, `白帧污染了基准，变化块 ${res.tiles.length}`);
 });
 
-test("真正的空白网页（纯白但有压缩起伏）不能被当成无效帧丢掉", async () => {
+test("真正的空白网页（纯白但有压缩起伏）最终必须送出（跳帧上限 + force 兜底）", async () => {
   const d = new FrameDiffer({ tile: 64 });
   await d.next(await toJpeg(makeBase()));
   const nearlyWhite = Buffer.alloc(W * H * 3, 255);
   for (let y = 40; y < 60; y++) for (let x = 30; x < 400; x++) {    // 一行字
     const i = (y * W + x) * 3; nearlyWhite[i] = 40; nearlyWhite[i + 1] = 40; nearlyWhite[i + 2] = 40;
   }
-  const res: any = await d.next(await toJpeg(nearlyWhite));
-  assert.ok(res.kind === "key" || res.tiles.length > 0, "有内容的白底页面必须照常送出");
+  // 大片新出现的纯色带会先被当成「没画完的帧」跳过（这是防滚动白帧的正确行为），
+  // 但调用方的 350ms 兜底会用 force 重投同一帧——那时必须照常送出。
+  const first: any = await d.next(await toJpeg(nearlyWhite));
+  if (first.kind === "delta" && first.tiles.length === 0) {
+    const forced: any = await d.next(await toJpeg(nearlyWhite), Date.now(), null, true);
+    assert.ok(forced.kind === "key" || forced.tiles.length > 0, "force 重投必须送出白底页面");
+  } else {
+    assert.ok(first.kind === "key" || first.tiles.length > 0, "有内容的白底页面必须送出");
+  }
+});
+
+test("滚动中「没画完的帧」（大片新纯色带）要跳过，且不污染基准", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  // 模拟 Chrome 的中间帧：内容整体下移 120px，顶部新露出的区域还没光栅化（纯白）
+  const transient = Buffer.alloc(W * H * 3, 255);
+  base.copy(transient, 120 * W * 3, 0, (H - 120) * W * 3);
+  const res: any = await d.next(await toJpeg(transient));
+  assert.equal(res.kind, "delta", "没画完的帧不该变成整帧发出去");
+  assert.equal(res.tiles.length, 0, "没画完的帧一个像素都不该发");
+  assert.match(String(res.why || ""), /transient/, "要能在日志里看出是被跳过的");
+  // 基准没被污染：下一帧回到原画面时应当几乎无变化
+  const back: any = await d.next(await toJpeg(base));
+  assert.equal(back.kind, "delta");
+  assert.equal(back.shift, 0);
+  assert.ok(back.tiles.length <= 1, `基准被污染了，变化块 ${back.tiles.length}`);
+});
+
+test("连续三帧都是纯色带：第三帧必须照常发（页面可能真的就长这样）", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  const transient = Buffer.alloc(W * H * 3, 255);
+  base.copy(transient, 120 * W * 3, 0, (H - 120) * W * 3);
+  const j = await toJpeg(transient);
+  const r1: any = await d.next(j);
+  const r2: any = await d.next(j);
+  const r3: any = await d.next(j);
+  assert.equal(r1.tiles?.length ?? -1, 0);
+  assert.equal(r2.tiles?.length ?? -1, 0);
+  assert.ok(r3.kind === "key" || r3.tiles.length > 0 || r3.shift !== 0,
+    "跳帧必须有上限，否则真实的白底画面永远到不了观看端");
+});
+
+test("光标闪烁：没有热区会被噪声阈值滤掉，有热区必须重发", async () => {
+  const base = makeBase();
+  // 光标 = 2x20 的深色竖条，故意小到块平均差远低于阈值
+  const blinked = Buffer.from(base);
+  for (let y = 100; y < 120; y++) for (let x = 300; x < 302; x++) {
+    const i = (y * W + x) * 3; blinked[i] = 0; blinked[i + 1] = 0; blinked[i + 2] = 0;
+  }
+  const noHot = new FrameDiffer({ tile: 128 });
+  await noHot.next(await toJpeg(base));
+  const r1: any = await noHot.next(await toJpeg(blinked));
+  assert.equal(r1.kind, "delta");
+  assert.equal(r1.tiles.length, 0, "前提不成立：光标级变化本应被阈值滤掉（否则热区就没意义了）");
+
+  const withHot = new FrameDiffer({ tile: 128 });
+  await withHot.next(await toJpeg(base));
+  const hot = { x: 290, y: 96, w: 40, h: 28 };
+  const r2: any = await withHot.next(await toJpeg(blinked), Date.now(), hot);
+  assert.equal(r2.kind, "delta");
+  assert.equal(r2.tiles.length, 1, "热区内的光标变化必须重发");
+  const t = r2.tiles[0];
+  assert.ok(t.x <= 300 && t.x + t.w >= 302 && t.y <= 100 && t.y + t.h >= 120,
+    `热区块没盖住光标: ${t.x},${t.y},${t.w}x${t.h}`);
+});
+
+test("热区是整个输入框那么宽时，光标变化不能被整框平均稀释掉", async () => {
+  const base = makeBase();
+  const blinked = Buffer.from(base);
+  for (let y = 100; y < 120; y++) for (let x = 300; x < 302; x++) {
+    const i = (y * W + x) * 3; blinked[i] = 0; blinked[i + 1] = 0; blinked[i + 2] = 0;
+  }
+  const d = new FrameDiffer({ tile: 128 });
+  await d.next(await toJpeg(base));
+  const hot = { x: 0, y: 96, w: W, h: 28 };            // input 框：只知道整框范围
+  const res: any = await d.next(await toJpeg(blinked), Date.now(), hot);
+  assert.equal(res.tiles.length, 1, "整框宽的热区也必须认出光标那一小条");
+  assert.ok(res.tiles[0].w <= 64, `应该只发变化的窄条,实际宽 ${res.tiles[0].w}`);
+});
+
+test("10 秒间隔整帧撞上「没画完的帧」时，坏帧不能借 interval 身份放行", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64, keyframeIntervalMs: 1 });   // 立即到期
+  await d.next(await toJpeg(base), 1000);
+  const transient = Buffer.alloc(W * H * 3, 255);
+  base.copy(transient, 120 * W * 3, 0, (H - 120) * W * 3);
+  const res: any = await d.next(await toJpeg(transient), 2000);
+  assert.equal(res.kind, "delta", "到期整帧必须让位给 transient 跳过");
+  assert.match(String(res.why || ""), /transient/);
+  // 正常帧照常拿到到期整帧
+  const ok: any = await d.next(await toJpeg(base), 3000);
+  assert.equal(ok.kind, "key");
+});
+
+test("后台空白帧的丢弃要带 why=blank（调用方靠它决定不缓存、不重投）", async () => {
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(makeBase()));
+  const white = Buffer.alloc(W * H * 3, 255);
+  const res: any = await d.next(await toJpeg(white));
+  assert.equal(res.kind, "delta");
+  assert.equal(res.tiles.length, 0);
+  assert.equal(res.why, "blank");
+});
+
+test("热区是整个多行输入框（很高）时，顶部一行的光标也不能被竖向稀释掉", async () => {
+  const base = makeBase();
+  const blinked = Buffer.from(base);
+  for (let y = 20; y < 40; y++) for (let x = 300; x < 302; x++) {   // 光标在框的第一行
+    const i = (y * W + x) * 3; blinked[i] = 0; blinked[i + 1] = 0; blinked[i + 2] = 0;
+  }
+  const d = new FrameDiffer({ tile: 128 });
+  await d.next(await toJpeg(base));
+  const hot = { x: 0, y: 16, w: W, h: 300 };           // textarea：整框,300px 高
+  const res: any = await d.next(await toJpeg(blinked), Date.now(), hot);
+  assert.equal(res.tiles.length, 1, "高框热区里顶部的光标变化必须重发");
+  const t = res.tiles[0];
+  assert.ok(t.y <= 20 && t.y + t.h >= 40 && t.x <= 300 && t.x + t.w >= 302,
+    `热区块没盖住光标: ${t.x},${t.y},${t.w}x${t.h}`);
+  assert.ok(t.h <= 96, `应该只发变化的小块,实际高 ${t.h}`);
+});
+
+test("上一帧的 1 像素高细线被修复时必须重发（隔行采样会整条跳过它）", async () => {
+  const base = makeBase();
+  const lined = Buffer.from(base);
+  for (let x = 0; x < W; x++) {                        // 奇数行上一条 1px 白线
+    const i = (101 * W + x) * 3; lined[i] = 255; lined[i + 1] = 255; lined[i + 2] = 255;
+  }
+  const d = new FrameDiffer({ tile: 128 });
+  await d.next(await toJpeg(lined));                   // 带白线的帧是基准
+  const res: any = await d.next(await toJpeg(base));   // 修复帧
+  assert.equal(res.kind, "delta");
+  assert.ok(res.tiles.length > 0, "细线修复被丢掉了——白线会永久烙在观看端画面里");
+  const covers = res.tiles.some((t: any) => t.y <= 101 && t.y + t.h > 101);
+  assert.ok(covers, "重发的块没有盖住那条线");
 });
 
 test("同一行相邻的变化块要并成一条，别一小块一小块单独压", async () => {

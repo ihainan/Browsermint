@@ -25,7 +25,10 @@ export interface DiffTile {
 
 export type DiffResult =
   | { kind: "key"; data: string; why: string }                     // 整帧（base64 JPEG）
-  | { kind: "delta"; shift: number; tiles: DiffTile[] };           // 增量：先位移，再贴块
+  | { kind: "delta"; shift: number; tiles: DiffTile[]; why?: string }; // 增量：先位移，再贴块
+
+/** 光标热区（帧的设备像素坐标）。见 next() 的 hot 参数。 */
+export interface HotRect { x: number; y: number; w: number; h: number }
 
 export interface FrameDifferOptions {
   tile?: number;           // 分块边长
@@ -156,6 +159,43 @@ const profileMean = (p: Float32Array): number => {
 };
 
 /**
+ * 每行是不是「均匀底色」（横向采样的明暗几乎不变）。
+ *
+ * 用途：识别 Chrome 在快速滚动时发出的**没画完的中间帧**——合成器已经把内容挪走、
+ * 新露出的区域还没光栅化，画面里就是一条大面积的纯底色带（实测百度页 2560x650 的
+ * 顶部补条 100% 纯白）。这种帧在本地浏览器里只存在十几毫秒，肉眼看不到；但发给
+ * 观看端后，慢链路上修复帧要一秒左右才到，坏画面就被冻在屏幕上（2026-08-04 用户
+ * 报障的「内容下沉、顶部空白、循环往复」的根因）。
+ *
+ * 判据是「均匀」而不是「白」：深色页面的未光栅化区域是页面自己的底色。
+ */
+function rowUniformFlags(raw: Buffer, width: number, height: number): Uint8Array {
+  const out = new Uint8Array(height);
+  const stride = width * 3;
+  for (let y = 0; y < height; y++) {
+    const off = y * stride;
+    let min = 255, max = 0;
+    for (let x = 0; x < stride; x += 9) {
+      const v = raw[off + x];
+      if (v < min) min = v;
+      if (v > max) max = v;
+      if (max - min > 6) break;
+    }
+    out[y] = max - min <= 6 ? 1 : 0;
+  }
+  return out;
+}
+
+/** 帧顶/帧底连续均匀行的长度（行数）。 */
+function edgeUniformRuns(flags: Uint8Array): { top: number; bottom: number } {
+  let top = 0;
+  while (top < flags.length && flags[top]) top++;
+  let bottom = 0;
+  while (bottom < flags.length && flags[flags.length - 1 - bottom]) bottom++;
+  return { top, bottom };
+}
+
+/**
  * 找「整幅内容上下平移了多少」。返回 0 表示不是位移。
  *
  * 认错的代价有兜底：位移之后每块都要跟「搬过来的上一帧」比，认错就几乎全不匹配，
@@ -233,6 +273,14 @@ export class FrameDiffer {
   private readonly diag = newShiftDiag();
   private width = 0;
   private height = 0;
+  /** 上一张被接受的帧，其顶/底连续均匀行长度（transient 判据的基线）。 */
+  private prevEdge: { top: number; bottom: number } | null = null;
+  /**
+   * 连续跳过的「没画完的帧」数。上限 2：Chrome 的修复通常就在下一两帧；真是一页
+   * 大面积纯色（滚到全白的区段）的话，第三帧照常发——代价只是约 200ms 的延迟，
+   * 而不设上限的话纯色页面会一直不更新，直到 10 秒一次的整帧。
+   */
+  private transientSkips = 0;
 
   constructor(options: FrameDifferOptions = {}) {
     this.opt = { ...DEFAULTS, ...options };
@@ -242,10 +290,25 @@ export class FrameDiffer {
   reset(): void {
     this.prevRaw = null;
     this.prevProfile = null;
+    this.prevEdge = null;
+    this.transientSkips = 0;
     this.gen++;
   }
 
-  async next(jpeg: Buffer, now = Date.now()): Promise<DiffResult> {
+  /**
+   * `hot` 是光标热区（设备像素）：这块区域里的变化**绕过所有噪声阈值**单独重发。
+   * 没有它的话光标看不见：闪烁只改 128x128 块里约 4x40 像素，块平均差 ~0.5，
+   * 远低于抗 JPEG 噪声的阈值 3——每一次闪烁都被当成压缩噪声滤掉（2026-08-04 用户
+   * 报障「看不到输入光标」的根因）。热区自成小块判差，信号 ~13 vs 噪声 ~0.5，分得开。
+   */
+  /**
+   * `force` 绕过「没画完的帧」跳过判定（不绕过其它逻辑）。调用方的兜底用：跳过之后
+   * 若迟迟没有下一帧（页面真的就长这样，比如导航到了空白页），拿同一帧强制重投，
+   * 否则观看端会一直停在旧画面上。
+   */
+  async next(
+    jpeg: Buffer, now = Date.now(), hot: HotRect | null = null, force = false,
+  ): Promise<DiffResult> {
     const gen = this.gen;
     const { data, info } = await sharp(jpeg).removeAlpha()
       .raw().toBuffer({ resolveWithObject: true });
@@ -255,10 +318,8 @@ export class FrameDiffer {
     this.width = width;
     this.height = height;
 
-    if (sizeChanged || !this.prevRaw || !this.prevProfile
-        || now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
-      return this.keyframe(jpeg, data, width, height, now,
-        sizeChanged ? "size" : !this.prevRaw ? "first" : "interval");
+    if (sizeChanged || !this.prevRaw || !this.prevProfile) {
+      return this.keyframe(jpeg, data, width, height, now, sizeChanged ? "size" : "first");
     }
 
     const profile = rowProfile(data, width, height);
@@ -267,8 +328,31 @@ export class FrameDiffer {
     // 出现），照单全收的话观看端就是闪白，帧差也没法工作——每一帧都在跟一张白纸比。
     // 已经有过内容还突然全白，一律当无效帧丢掉：真实网页哪怕是空白页也有细微起伏。
     if (isBlank(profile) && !isBlank(this.prevProfile)) {
-      return { kind: "delta", shift: 0, tiles: [] };
+      // why=blank 让调用方知道这帧被丢了（并因此不拿它当 lastFrame 缓存）
+      return { kind: "delta", shift: 0, tiles: [], why: "blank" };
     }
+
+    // **没画完的帧不发**：顶/底突然长出一大条均匀底色带（上一帧没有），是快速滚动时
+    // 合成器「内容已挪走、新区域还没光栅化」的中间态。发出去就是用户看到的「画面整体
+    // 位移 + 大片空白」，而修复帧在慢链路上要一秒才到。跳过它，基准不动，等下一帧。
+    const edge = edgeUniformRuns(rowUniformFlags(data, width, height));
+    const base = this.prevEdge ?? { top: 0, bottom: 0 };
+    const grewTop = edge.top - base.top;
+    const grewBottom = edge.bottom - base.bottom;
+    if (!force && (grewTop > height * 0.12 || grewBottom > height * 0.12)
+        && this.transientSkips < 2) {
+      this.transientSkips++;
+      return { kind: "delta", shift: 0, tiles: [],
+               why: `transient-band top=${edge.top} bottom=${edge.bottom} skip#${this.transientSkips}` };
+    }
+    this.transientSkips = 0;
+
+    // 间隔整帧放在 transient 判定**之后**：放在之前的话，10 秒到期恰好撞上一张
+    // 没画完的帧，坏帧就会以 why=interval 的整帧身份被直接放行（codex 复审抓到的旁路）。
+    if (now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
+      return this.keyframe(jpeg, data, width, height, now, "interval");
+    }
+
     const shift = detectShift(this.prevProfile, profile, height, this.opt.shiftRange, this.diag);
     const tiles = this.changedRegions(this.prevRaw, data, width, height, shift);
 
@@ -285,6 +369,23 @@ export class FrameDiffer {
         + `否决=${this.diag.why || "无"} 尺寸=${width}x${height} `
         + `上一帧[亮度=${this.diag.prevMean.toFixed(1)} 起伏=${this.diag.prevSpread.toFixed(2)}] `
         + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`);
+    }
+
+    // 光标热区：区域内有变化就重发，绕过噪声阈值（理由见 next() 的 doc）。
+    // 只在无位移时做——滚动中光标本来就跟着内容走，位移+补块已经覆盖它。
+    if (hot && shift === 0) {
+      const hx = Math.max(0, Math.min(width - 1, Math.round(hot.x)));
+      const hy = Math.max(0, Math.min(height - 1, Math.round(hot.y)));
+      const hw = Math.max(1, Math.min(width - hx, Math.round(hot.w)));
+      const hh = Math.max(1, Math.min(height - hy, Math.round(hot.h)));
+      const rect = this.hotChangedRect(this.prevRaw, data, width, hx, hy, hw, hh);
+      if (rect) {
+        const covered = tiles.some(t =>
+          t.x <= rect.x0 && t.y <= rect.y0 && t.x + t.w >= rect.x1 && t.y + t.h >= rect.y1);
+        if (!covered) {
+          tiles.push({ x: rect.x0, y: rect.y0, w: rect.x1 - rect.x0, h: rect.y1 - rect.y0, data: "" });
+        }
+      }
     }
 
     await this.encodeTiles(tiles, data, width);
@@ -305,6 +406,7 @@ export class FrameDiffer {
     if (gen !== this.gen) return this.keyframe(jpeg, data, width, height, now, "reset-raced");
     this.prevRaw = data;
     this.prevProfile = profile;
+    this.prevEdge = edge;
     return { kind: "delta", shift, tiles };
   }
 
@@ -313,6 +415,8 @@ export class FrameDiffer {
   ): DiffResult {
     this.prevRaw = raw;
     this.prevProfile = rowProfile(raw, width, height);
+    this.prevEdge = edgeUniformRuns(rowUniformFlags(raw, width, height));
+    this.transientSkips = 0;
     this.lastKeyAt = now;
     return { kind: "key", data: jpeg.toString("base64"), why };
   }
@@ -373,7 +477,10 @@ export class FrameDiffer {
     let sum = 0;
     let n = 0;
     let maxRow = 0;
-    for (let r = 0; r < h; r += 2) {                 // 隔行采样：快一倍，够用
+    // **逐行采样，不能隔行**。隔行（r += 2）会把 1-2 行高的变化整条跳过：滚动中
+    // Chrome 下一帧修复的细白线恰好是这个高度，跳过它的后果是白线永久烙在画面里、
+    // 直到 10 秒一次的整帧（坐标尺页实测抓到卡 5 秒以上的横线）。多花的 CPU 不到 1ms。
+    for (let r = 0; r < h; r += 1) {
       const yNext = y0 + r;
       const yPrev = yNext + shift;
       if (yPrev < 0 || yPrev >= height) return true;
@@ -400,6 +507,46 @@ export class FrameDiffer {
     // 注：位移时行方向已经切成 32 的细带，所以这道是纵深防御——**没有能区分它的测试**，
     // 别把它当成被验证过的行为。
     return n > 0 && (sum / n > limit || maxRow > limit * 2.5);
+  }
+
+  /**
+   * 光标热区判差：按 16x32 的小格扫描，返回有变化的格的外接矩形（无变化返回 null）。
+   *
+   * **必须按小格而不能整区平均**：input/textarea 拿不到框内光标的精确位置，热区就是
+   * 整个框（百度搜索框 2560 设备像素宽、textarea 可能几百像素高），光标那 4x40 像素的
+   * 变化摊进整框平均立刻被稀释回阈值以下。横竖都要切小（codex 复审：只切列不切行时，
+   * 高框里的竖向稀释同样致命）——16x32 的格里光标信号 ~37，噪声 ~0.5，分得开。
+   * 返回外接矩形也让每次闪烁只重发一小块，而不是整个输入框。
+   */
+  private hotChangedRect(
+    prev: Buffer, next: Buffer, width: number,
+    x0: number, y0: number, w: number, h: number,
+  ): { x0: number; x1: number; y0: number; y1: number } | null {
+    const COL = 16, ROW = 32;
+    let lo = -1, hi = -1, top = -1, bottom = -1;
+    for (let cy = y0; cy < y0 + h; cy += ROW) {
+      const ch = Math.min(ROW, y0 + h - cy);
+      for (let cx = x0; cx < x0 + w; cx += COL) {
+        const cw = Math.min(COL, x0 + w - cx);
+        let sum = 0;
+        let n = 0;
+        for (let r = 0; r < ch; r++) {
+          const a = ((cy + r) * width + cx) * 3;
+          for (let c = 0; c < cw * 3; c++) {
+            const d = prev[a + c] - next[a + c];
+            sum += d < 0 ? -d : d;
+            n++;
+          }
+        }
+        if (n > 0 && sum / n > TILE_DIFF_THRESHOLD) {
+          if (lo < 0 || cx < lo) lo = cx;
+          if (cx + cw > hi) hi = cx + cw;
+          if (top < 0) top = cy;
+          bottom = cy + ch;
+        }
+      }
+    }
+    return lo >= 0 ? { x0: lo, x1: hi, y0: top, y1: bottom } : null;
   }
 
   private async encodeTiles(tiles: DiffTile[], raw: Buffer, width: number): Promise<void> {

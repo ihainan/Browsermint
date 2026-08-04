@@ -1434,12 +1434,17 @@ type CastProducer = {
   /// 帧差分：只发变化的部分（见 cast-diff.ts）。一个 producer 一个，因为它维护
   /// 「上一帧」——那正是差分的基准。
   differ: FrameDiffer;
+  /// 远端光标位置（页面 CSS 像素，__browsermint_caret 上报）。差分器用它开「热区」：
+  /// 光标闪烁的像素变化太小，会被抗噪阈值滤掉，没有热区观看端永远看不到光标闪。
+  caret: { x: number; y: number; h: number; w: number } | null;
   /// 帧序号：客户端用它判断自己有没有跟丢（跟丢就要一张整帧）。
   castSeq: number;
   /// 差分是异步的（要解码 JPEG）。同一时刻只跑一帧，跑的时候新来的帧只覆盖待处理槽
   /// ——和「只送最新一帧」同一个道理，且顺便给 CPU 封了顶。
   diffBusy: boolean;
   diffPending: string | null;
+  /// 「没画完的帧」跳过后的兜底重投定时器（见 runDiff 的 transient 分支）。
+  transientTimer: NodeJS.Timeout | null;
   lastDiffLogAt?: number;
   diffStats?: { key: number; delta: number; bytes: number; since: number };
   /// Layout we asked Chrome for but have not yet seen a frame from. While this is
@@ -1862,11 +1867,29 @@ function countFrame(p: CastProducer, key: boolean, bytes: number): void {
   }
 }
 
-async function runDiff(p: CastProducer, data: string): Promise<void> {
+async function runDiff(p: CastProducer, data: string, force = false): Promise<void> {
   p.diffBusy = true;
+  const seqAtCall = p.frameSeq;
   try {
-    const res = await p.differ.next(Buffer.from(data, "base64"));
+    // 光标热区：CSS → 帧设备像素。上报的 y 是底边，往上留出高度加少量余量；
+    // 宽度取上报值（精确光标点时是 2，input 框拿不到框内位置时是整框宽）。
+    const s = p.streamScale || 1;
+    const hot = p.caret ? {
+      x: (p.caret.x - 10) * s, y: (p.caret.y - (p.caret.h || 20) - 4) * s,
+      w: ((p.caret.w || 2) + 20) * s, h: ((p.caret.h || 20) + 8) * s,
+    } : null;
+    const res = await p.differ.next(Buffer.from(data, "base64"), Date.now(), hot, force);
     if (p.closed || p.masked || p.pendingLayout) return;
+    // 只有被差分器认可的帧才配当 lastFrame：被跳过的（transient 白帧 / 后台空白帧）
+    // 缓存下来会经「新观看者首帧」「needKeyframe 重投」两条路绕过跳过判定原样发出。
+    // masked/pendingLayout 下不缓存的理由同旧实现：密码画面不能发给下一个观看者，
+    // 重配中的像素属于旧布局。
+    if (p.layout && !(res.kind === "delta" && res.why)) {
+      p.lastFrame = {
+        data, revision: p.viewportRevision,
+        width: p.layout.width, height: p.layout.height,
+      };
+    }
     if (res.kind === "key") {
       // 为什么退回整帧：排「怎么全是整帧」这类问题时，没有这行只能猜（限频打印）
       const now = Date.now();
@@ -1881,11 +1904,39 @@ async function runDiff(p: CastProducer, data: string): Promise<void> {
       countFrame(p, false, res.tiles.reduce((n, t) => n + t.data.length * 0.75, 0));
       sendFramePayload(p, { key: false, shift: res.shift, tiles: res.tiles });
     }
+    else if (res.why) {
+      // 跳过了「没画完的帧」——排「滚动时为什么缺帧/画面停顿」要能看到这条
+      const now = Date.now();
+      if (now - (p.lastDiffLogAt || 0) > 800) {
+        p.lastDiffLogAt = now;
+        console.info(`[cast] frame skipped (${res.why})`);
+      }
+      // 兜底：跳过押的是「Chrome 马上会给一张画完的帧」。要是没来（页面真的就
+      // 长这样，比如导航到了空白页——静止页不再产帧），350ms 后拿同一帧强制重投，
+      // 否则观看端会永远停在旧画面上。只对 transient 跳过做：后台标签的空白帧
+      // （why=blank）是该永久丢弃的，重投它正是这个防护要防的闪白。
+      if (!res.why.startsWith("transient")) return;
+      if (p.transientTimer) clearTimeout(p.transientTimer);
+      p.transientTimer = setTimeout(() => {
+        p.transientTimer = null;
+        if (p.closed || p.masked || p.pendingLayout) return;
+        if (p.frameSeq !== seqAtCall) return;        // 新帧已经来了,兜底作废
+        if (p.diffBusy) { p.diffPending = data; return; }
+        void runDiff(p, data, true);
+      }, 350);
+    }
     // 一帧都没变化 → 什么都不发（静止页面从此不再烧带宽）
   } catch (err) {
-    // 差分坏了不能让画面停住：退回整帧，并且下一帧重新起头
+    // 差分坏了不能让画面停住：退回整帧，并且下一帧重新起头。
+    // 既然按整帧发给了所有人，它也就是新观看者该拿到的缓存帧。
     console.warn(`[cast] diff failed, falling back to full frame:`, err);
     p.differ.reset();
+    if (!p.closed && !p.masked && !p.pendingLayout && p.layout) {
+      p.lastFrame = {
+        data, revision: p.viewportRevision,
+        width: p.layout.width, height: p.layout.height,
+      };
+    }
     sendFramePayload(p, { key: true, data });
   } finally {
     p.diffBusy = false;
@@ -1931,6 +1982,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   const p: CastProducer = {
     socket, viewers: new Set(), lastFrame: null,
     differ: new FrameDiffer({ quality: CAST_QUALITY }), castSeq: 0, diffBusy: false, diffPending: null,
+    caret: null, transientTimer: null,
     url: "", title: "", cmdId: 1, stopTimer: null, firstFrameTimer: null, closed: false,
     viewportRevision: 1, masked: false, controllers: new Map(),
     pendingLayout: null, reconfigureTimer: null, inputChain: Promise.resolve(),
@@ -1970,17 +2022,9 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
             p.layout = { width: Math.round(mw), height: Math.round(mh) };
           }
         }
-        // While masked we neither ship nor **retain** the frame: a cached frame
-        // would be handed to the next viewer that connects, which is exactly the
-        // password screen we are trying not to show.
-        // Never cache mid-reconfigure: those pixels belong to the old layout, and
-        // the timeout fallback would later hand them out stamped with a new revision.
-        if (!p.masked && !p.pendingLayout && p.layout) {
-          p.lastFrame = {
-            data, revision: p.viewportRevision,
-            width: p.layout.width, height: p.layout.height,
-          };
-        }
+        // lastFrame（新观看者的首帧 / needKeyframe 的重投源）不在这里缓存，而是等
+        // runDiff 分类完成后再缓存：这里存的话，一张「没画完的帧」（滚动中的白帧）
+        // 会绕过差分器的跳过判定，直接以整帧身份发给新连接的观看者（codex 复审抓到）。
         p.frameSeq++;
         broadcastFrame(p, data);
       }
@@ -1997,9 +2041,15 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     if (msg.method === "Runtime.bindingCalled"
         && msg.params?.name === "__browsermint_caret") {
       const raw = String(msg.params?.payload ?? "");
-      const [xs, ys] = raw.split(",");
+      const [xs, ys, hs, ws] = raw.split(",");
       const caret = raw && Number.isFinite(Number(xs)) && Number.isFinite(Number(ys))
         ? { x: Number(xs), y: Number(ys) } : null;
+      // 差分器的光标热区跟着最新上报走；密码框（masked）时一并抹掉
+      p.caret = caret && !p.masked
+        ? { x: caret.x, y: caret.y,
+            h: Number.isFinite(Number(hs)) ? Number(hs) : 20,
+            w: Number.isFinite(Number(ws)) ? Number(ws) : 2 }
+        : null;
       // 密码框聚焦时连位置都不报：候选窗的落点会暴露光标在密码框的哪一格
       // 带上 revision：布局变了之后，旧坐标换算到新画面上会摆错位置。观看端只认
       // 与当前画面同一版本的坐标（codex 复审 M5）。
@@ -2055,6 +2105,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
     if (p.firstFrameTimer) { clearTimeout(p.firstFrameTimer); p.firstFrameTimer = null; }
     if (p.reconfigureTimer) { clearTimeout(p.reconfigureTimer); p.reconfigureTimer = null; }
     if (p.visibilityTimer) { clearTimeout(p.visibilityTimer); p.visibilityTimer = null; }
+    if (p.transientTimer) { clearTimeout(p.transientTimer); p.transientTimer = null; }
     clearIdleStill(p);
     if (producers.get(targetKey(sessionId, targetId)) === p) {
       producers.delete(targetKey(sessionId, targetId));
@@ -2336,16 +2387,25 @@ const CARET_WATCH_SCRIPT = `(() => {
         return;
       }
       let r = el.getBoundingClientRect();
-      let x = r.left, y = r.bottom;
+      // 第 3/4 个值是光标高度与热区宽度：差分器按它们圈「热区」重发光标闪烁。
+      // input/textarea 拿不到框内光标的精确矩形，只能给整个框的宽度（宽了由
+      // 差分器按窄列扫描解决，见 cast-diff 的 hotChangedRange）。
+      // 拿不到框内光标矩形时（input/textarea），热区只能是**整个框**——高度不能截断，
+      // 多行 textarea 的光标可能在任何一行（codex 复审：截到 40px 会漏掉上面的行）。
+      let x = r.left, y = r.bottom, ch = Math.min(Math.max(r.height, 14), 400);
+      let cw = Math.min(Math.max(r.width, 2), 2000);
       // 光标在长文本里的真实位置比整个输入框的位置有用得多
       try {
         const sel = window.getSelection();
         if (sel && sel.rangeCount) {
           const rr = sel.getRangeAt(0).getBoundingClientRect();
-          if (rr.width || rr.height || rr.top) { x = rr.left; y = rr.bottom; }
+          if (rr.width || rr.height || rr.top) {
+            x = rr.left; y = rr.bottom; cw = 2;
+            if (rr.height) ch = Math.min(rr.height, 40);
+          }
         }
       } catch (e) {}
-      const payload = Math.round(x) + ',' + Math.round(y);
+      const payload = Math.round(x) + ',' + Math.round(y) + ',' + Math.round(ch) + ',' + Math.round(cw);
       if (payload === last) return;
       last = payload;
       window.__browsermint_caret(payload);
@@ -2552,7 +2612,15 @@ export async function attachCastViewer(
         // **光 reset 不够**：下一张整帧要等下一帧画面到来，而页面静止时根本不会再来帧。
         // 观看端跟丢基准 → 要整帧 → 没人回 → 画面永久停在花掉的那一张。手上存着最后
         // 一帧，直接拿它重走一遍差分（基准已清空，出来必然是整帧）。
-        if (producer.lastFrame) void runDiff(producer, producer.lastFrame.data);
+        //
+        // **必须过 diffBusy 门**。滚动高峰正是 needKeyframe 最密集的时刻，直接
+        // runDiff 会与在途的那次差分并发：两次 next() 交错读写同一个基准，第二个
+        // 完成者的增量是按「旧基准」算的、却拿到接在「新基准」后面的序号——观看端
+        // 校验通过、贴上去就是错位画面，比跟丢本身还糟。
+        if (producer.lastFrame) {
+          if (producer.diffBusy) producer.diffPending = producer.lastFrame.data;
+          else void runDiff(producer, producer.lastFrame.data);
+        }
       }
     } catch { /* 不是 JSON 就不是给我们的 */ }
   });
