@@ -664,6 +664,32 @@ async function realJpegs(): Promise<{ a: string; b: string }> {
   return { a: (await enc(raw)).toString("base64"), b: (await enc(changed)).toString("base64") };
 }
 
+test("上报给观看端的布局是 CSS 像素，不是设备像素（2 倍屏画面会整整大一倍）", async () => {
+  // 2026-08-04 用户实测：画面在「正常」和「整体放大/下移/底部被切」之间来回跳。
+  // 根因就在这里：screencastFrame 的 metadata 是设备像素，2 倍屏下是 2560x1600，
+  // 而观看端拿它当 CSS 布局尺寸去定画布的显示大小 → 画面放大一倍。另一些帧上报的是
+  // CSS 像素，两种单位交替出现 = 来回跳。1 倍屏下两者数值相同，所以只在视网膜屏上犯。
+  const created = setup({
+    sockets: [() => new FakeSocket(), () => new StillSocket()], scrollWidth: 735,
+  });
+  try {
+    await setTargetViewport(SESSION, TARGET, 1280, 800, 2);      // 2 倍屏
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)! as StillSocket;
+    // Chrome 按设备像素上报
+    sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "AAA", sessionId: 9, metadata: { deviceWidth: 2560, deviceHeight: 1600 } },
+    })));
+    await settle();
+    const frame = JSON.parse(v.received.at(-1)!);
+    assert.equal(frame.layoutWidth, 1280,
+      `观看端拿到的必须是 CSS 像素，实际 ${frame.layoutWidth}x${frame.layoutHeight}`);
+    assert.equal(frame.layoutHeight, 800);
+  } finally { teardown(); }
+});
+
 test("静帧之后的下一帧必须是整帧，不能是接在旧动帧上的增量", async () => {
   // 用户实测（2026-08-04）：静止时画面整体下移、顶部空一条、底部被切，和正常状态来回跳。
   // 根因是观看端手里已经换成了那张高清静帧，而差分器的基准还停在之前的动帧上——

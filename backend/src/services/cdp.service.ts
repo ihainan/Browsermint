@@ -1949,9 +1949,18 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
           finishReconfigure(p);
         }
         // Learn the layout the stream is actually rendering at — the sharp-still
-        // capture needs to clip exactly this region.
-        const mw = Number(msg.params?.metadata?.deviceWidth);
-        const mh = Number(msg.params?.metadata?.deviceHeight);
+        // capture needs to clip exactly this region, and the viewer sizes its canvas
+        // box by it.
+        //
+        // **必须换算成 CSS 像素**。screencastFrame 的 metadata 给的是设备像素：观看端是
+        // 2 倍屏时它是 2560x1600，而这里学到的值会随帧发给观看端当作 CSS 布局尺寸用——
+        // 于是画布被按 2560x1600 显示，画面整整放大一倍、底部被容器切掉；另一些帧
+        // （重配后由 pendingLayout 落下来的）又是 1280x800，两种单位交替出现，
+        // 表现就是「画面在正常和放大之间来回跳」。1 倍屏下两者数值相同，所以只在
+        // 视网膜屏上才犯——这也是它躲过所有测试和多次真机验证的原因（2026-08-04）。
+        const scale = p.streamScale || 1;
+        const mw = Number(msg.params?.metadata?.deviceWidth) / scale;
+        const mh = Number(msg.params?.metadata?.deviceHeight) / scale;
         if (Number.isFinite(mw) && Number.isFinite(mh) && mw > 0 && mh > 0) {
           p.layout = { width: Math.round(mw), height: Math.round(mh) };
         }
