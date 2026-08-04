@@ -664,6 +664,37 @@ async function realJpegs(): Promise<{ a: string; b: string }> {
   return { a: (await enc(raw)).toString("base64"), b: (await enc(changed)).toString("base64") };
 }
 
+test("布局尺寸在整条流上必须恒定——变来变去 = 画面不停放大缩小", async () => {
+  // 2026-08-04：第一版修法是「metadata 除以倍率」，但倍率在起流/重配的间隙里未必等于
+  // 这一帧的倍率，于是布局在 1280x800 与 2560x1600 之间横跳，用户看到画面反复缩放。
+  // 判据不是「某一帧对不对」，而是**整条流上只能有一个值**。
+  const created = setup({
+    sockets: [() => new FakeSocket(), () => new StillSocket()], scrollWidth: 735,
+  });
+  try {
+    await setTargetViewport(SESSION, TARGET, 1280, 800, 2);
+    const v = new FakeViewer();
+    await attachCastViewer(SESSION, TARGET, v as any);
+    const sock = created.at(-1)! as StillSocket;
+    const push = (dw: number, dh: number) => sock.emit("message", Buffer.from(JSON.stringify({
+      method: "Page.screencastFrame",
+      params: { data: "AAA", sessionId: 9, metadata: { deviceWidth: dw, deviceHeight: dh } },
+    })));
+    push(2560, 1600);            // Chrome 按设备像素报
+    await settle();
+    push(2560, 1600);
+    await settle();
+    push(1280, 800);             // 有些时刻它报的是 CSS 像素（重配前后）
+    await settle();
+    const layouts = new Set(v.received.map(m => {
+      const f = JSON.parse(m);
+      return f.layoutWidth ? `${f.layoutWidth}x${f.layoutHeight}` : null;
+    }).filter(Boolean));
+    assert.equal(layouts.size, 1, `整条流上布局必须恒定，实际出现了 ${[...layouts].join(" / ")}`);
+    assert.ok(layouts.has("1280x800"), `应当是我们跟 Chrome 要的 CSS 视口，实际 ${[...layouts]}`);
+  } finally { teardown(); }
+});
+
 test("上报给观看端的布局是 CSS 像素，不是设备像素（2 倍屏画面会整整大一倍）", async () => {
   // 2026-08-04 用户实测：画面在「正常」和「整体放大/下移/底部被切」之间来回跳。
   // 根因就在这里：screencastFrame 的 metadata 是设备像素，2 倍屏下是 2560x1600，

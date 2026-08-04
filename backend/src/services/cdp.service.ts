@@ -1557,6 +1557,12 @@ function startCast(
 ): void {
   p.streamScale = want ? frameScale(want) : 1;
   p.lastWant = want ?? p.lastWant;
+  // **布局的权威来源是「我们跟 Chrome 要的这个 CSS 视口」**，不是帧 metadata。
+  // metadata 给的是设备像素，要除以倍率才是 CSS 像素；而倍率在起流/重配的间隙里
+  // 未必等于当前帧的倍率，反推出来的值就会在 1280x800 与 2560x1600 之间来回横跳——
+  // 观看端按它定画布显示尺寸，用户看到的就是画面不停放大缩小（2026-08-04 实测）。
+  const css = layout ?? (want ? layoutSize(want) : null);
+  if (css) p.layout = { width: css.width, height: css.height };
   producerSend(p, "Page.startScreencast", {
     format: "jpeg", quality: CAST_QUALITY, ...(want ? castCaps(want, layout) : {}),
   });
@@ -1952,17 +1958,17 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
         // capture needs to clip exactly this region, and the viewer sizes its canvas
         // box by it.
         //
-        // **必须换算成 CSS 像素**。screencastFrame 的 metadata 给的是设备像素：观看端是
-        // 2 倍屏时它是 2560x1600，而这里学到的值会随帧发给观看端当作 CSS 布局尺寸用——
-        // 于是画布被按 2560x1600 显示，画面整整放大一倍、底部被容器切掉；另一些帧
-        // （重配后由 pendingLayout 落下来的）又是 1280x800，两种单位交替出现，
-        // 表现就是「画面在正常和放大之间来回跳」。1 倍屏下两者数值相同，所以只在
-        // 视网膜屏上才犯——这也是它躲过所有测试和多次真机验证的原因（2026-08-04）。
-        const scale = p.streamScale || 1;
-        const mw = Number(msg.params?.metadata?.deviceWidth) / scale;
-        const mh = Number(msg.params?.metadata?.deviceHeight) / scale;
-        if (Number.isFinite(mw) && Number.isFinite(mh) && mw > 0 && mh > 0) {
-          p.layout = { width: Math.round(mw), height: Math.round(mh) };
+        // **只在从没配过视口时才拿 metadata 兜底**。metadata 是设备像素，除以倍率才是
+        // CSS 像素，而倍率在起流/重配的间隙里未必等于这一帧的倍率——按它逐帧更新会让
+        // 布局在 1280x800 与 2560x1600 之间来回横跳，观看端据此定画布尺寸，用户看到的
+        // 就是画面不停放大缩小。配过视口的情况下，权威值在 startCast 里就已经定下了。
+        if (!p.layout) {
+          const scale = p.streamScale || 1;
+          const mw = Number(msg.params?.metadata?.deviceWidth) / scale;
+          const mh = Number(msg.params?.metadata?.deviceHeight) / scale;
+          if (Number.isFinite(mw) && Number.isFinite(mh) && mw > 0 && mh > 0) {
+            p.layout = { width: Math.round(mw), height: Math.round(mh) };
+          }
         }
         // While masked we neither ship nor **retain** the frame: a cached frame
         // would be handed to the next viewer that connects, which is exactly the
