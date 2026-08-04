@@ -65,6 +65,19 @@ const DEFAULTS = {
 };
 
 /**
+ * 运动降档：帧流持续（连续两个间隔 < 500ms）就判为「动着」，整帧回退与增量块统一
+ * 换低质量重编码。公网上滚动卡顿的主因就是动帧体积（实测 2x 密集页整帧 q62 ≈ 350KB、
+ * ~5 帧/秒 ≈ 1.7MB/s），而「动的时候糊一点」正是这条管线的既有取舍——停稳 0.7s 就有
+ * q96 高清静帧盖上来。q38 实测比 q62 小一半上下，糊但完全可读。
+ *
+ * 500ms 的间隔判据同时把两类「静止但有帧」排除在外：光标闪烁（~530ms 一帧）与
+ * 低频动画，它们不该被降档。
+ */
+const MOTION_GAP_MS = 500;
+const MOTION_MIN_STREAK = 2;
+const MOTION_QUALITY = 38;
+
+/**
  * 行亮度剖面：位移检测的依据。
  *
  * **不能用「逐行哈希 + 相等」**。滚动量只要不是 8 的倍数，JPEG 的 8×8 块就会错位，
@@ -275,6 +288,9 @@ export class FrameDiffer {
   private height = 0;
   /** 上一张被接受的帧，其顶/底连续均匀行长度（transient 判据的基线）。 */
   private prevEdge: { top: number; bottom: number } | null = null;
+  /** 运动判定：上一次 next() 的时刻与「短间隔连续帧」计数。 */
+  private lastCallAt = 0;
+  private motionStreak = 0;
   /**
    * 连续跳过的「没画完的帧」数。上限 2：Chrome 的修复通常就在下一两帧；真是一页
    * 大面积纯色（滚到全白的区段）的话，第三帧照常发——代价只是约 200ms 的延迟，
@@ -318,8 +334,13 @@ export class FrameDiffer {
     this.width = width;
     this.height = height;
 
+    const gap = now - this.lastCallAt;
+    this.lastCallAt = now;
+    this.motionStreak = gap > 0 && gap < MOTION_GAP_MS ? this.motionStreak + 1 : 0;
+    const motion = this.motionStreak >= MOTION_MIN_STREAK;
+
     if (sizeChanged || !this.prevRaw || !this.prevProfile) {
-      return this.keyframe(jpeg, data, width, height, now, sizeChanged ? "size" : "first");
+      return await this.keyframe(jpeg, data, width, height, now, sizeChanged ? "size" : "first");
     }
 
     const profile = rowProfile(data, width, height);
@@ -359,7 +380,7 @@ export class FrameDiffer {
     // 间隔整帧放在 transient 判定**之后**：放在之前的话，10 秒到期恰好撞上一张
     // 没画完的帧，坏帧就会以 why=interval 的整帧身份被直接放行（codex 复审抓到的旁路）。
     if (now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
-      const k = this.keyframe(jpeg, data, width, height, now, "interval");
+      const k = await this.keyframe(jpeg, data, width, height, now, "interval", motion);
       this.prevEdge = edgeAfterAccept;
       return k;
     }
@@ -374,12 +395,12 @@ export class FrameDiffer {
     const area = tiles.reduce((sum, t) => sum + t.w * t.h, 0) / (width * height);
     const limit = shift === 0 ? this.opt.keyframeRatio : 0.8;
     if (area > limit) {
-      const k = this.keyframe(jpeg, data, width, height, now,
+      const k = await this.keyframe(jpeg, data, width, height, now,
         `area=${area.toFixed(2)}>${limit} shift=${shift} 位移判据[最优=${this.diag.best} `
         + `分=${this.diag.bestMad.toFixed(2)} 不动=${this.diag.still.toFixed(2)} `
         + `否决=${this.diag.why || "无"} 尺寸=${width}x${height} `
         + `上一帧[亮度=${this.diag.prevMean.toFixed(1)} 起伏=${this.diag.prevSpread.toFixed(2)}] `
-        + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`);
+        + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`, motion);
       // 面积兜底整帧是「棘轮白帧」的主要逃逸口——基线仍按单调取小，别让它采认白带
       this.prevEdge = edgeAfterAccept;
       return k;
@@ -402,15 +423,15 @@ export class FrameDiffer {
       }
     }
 
-    await this.encodeTiles(tiles, data, width);
+    await this.encodeTiles(tiles, data, width, motion ? MOTION_QUALITY : this.opt.quality);
 
     // **最后用字节数说话**：整帧就在手上（Chrome 已经压好了），增量的大小也算得出来。
     // 与其靠「变化面积超过 X%」这种猜的阈值，不如直接比——增量不比整帧小就发整帧。
     // 省掉一整类「某些页面上增量反而更大」的意外（实测滚动时确实会出现）。
     const deltaBytes = tiles.reduce((sum, t) => sum + (t.data.length * 3) / 4, 0);
     if (deltaBytes >= jpeg.length * 0.9) {
-      const k = this.keyframe(jpeg, data, width, height, now,
-        `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`);
+      const k = await this.keyframe(jpeg, data, width, height, now,
+        `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`, motion);
       this.prevEdge = edgeAfterAccept;
       return k;
     }
@@ -426,15 +447,26 @@ export class FrameDiffer {
     return { kind: "delta", shift, tiles };
   }
 
-  private keyframe(
+  private async keyframe(
     jpeg: Buffer, raw: Buffer, width: number, height: number, now: number, why = "first",
-  ): DiffResult {
+    motion = false,
+  ): Promise<DiffResult> {
     this.prevRaw = raw;
     this.prevProfile = rowProfile(raw, width, height);
     this.prevEdge = edgeUniformRuns(rowUniformFlags(raw, width, height));
     this.transientSkips = 0;
     this.lastKeyAt = now;
-    return { kind: "key", data: jpeg.toString("base64"), why };
+    // 运动中的整帧重编码降质：滚动期间的整帧是公网卡顿主因（理由见 MOTION_QUALITY）。
+    // 基准（prevRaw）仍是原质量像素——降质只影响发出去的字节，不影响后续差分。
+    let data = jpeg;
+    if (motion) {
+      try {
+        const smaller = await sharp(raw, { raw: { width, height, channels: 3 } })
+          .jpeg({ quality: MOTION_QUALITY }).toBuffer();
+        if (smaller.length < jpeg.length) { data = smaller; why += " mq"; }
+      } catch { /* 压不动就发原帧 */ }
+    }
+    return { kind: "key", data: data.toString("base64"), why };
   }
 
   /**
@@ -565,7 +597,9 @@ export class FrameDiffer {
     return lo >= 0 ? { x0: lo, x1: hi, y0: top, y1: bottom } : null;
   }
 
-  private async encodeTiles(tiles: DiffTile[], raw: Buffer, width: number): Promise<void> {
+  private async encodeTiles(
+    tiles: DiffTile[], raw: Buffer, width: number, quality = this.opt.quality,
+  ): Promise<void> {
     for (const t of tiles) {
       const buf = Buffer.alloc(t.w * t.h * 3);
       for (let r = 0; r < t.h; r++) {
@@ -573,7 +607,7 @@ export class FrameDiffer {
         raw.copy(buf, r * t.w * 3, src, src + t.w * 3);
       }
       t.data = (await sharp(buf, { raw: { width: t.w, height: t.h, channels: 3 } })
-        .jpeg({ quality: this.opt.quality })
+        .jpeg({ quality })
         .toBuffer()).toString("base64");
     }
   }

@@ -488,3 +488,43 @@ test("红色不变、绿蓝大变的画面也必须发出去", async () => {
   const changed = res.kind === "key" || res.tiles.length > 0;
   assert.ok(changed, "只比红色通道的话这一整类变化会被静默丢掉，画面永久停在旧内容");
 });
+
+test("运动中（帧流持续）的整帧降质重编码；停稳后回到正常质量", async () => {
+  const base = makeBase();
+  // 整页换掉→面积兜底整帧。同样的内容,分别在「静止节奏」与「运动节奏」下走一遍。
+  const flip = Buffer.from(base);
+  for (let i = 0; i < flip.length; i += 3) flip[i] = 255 - flip[i];
+  const still = new FrameDiffer({ tile: 64 });
+  await still.next(await toJpeg(base), 1000);
+  const slowKey: any = await still.next(await toJpeg(flip), 3000);      // 2s 间隔:静止
+  assert.equal(slowKey.kind, "key");
+
+  const moving = new FrameDiffer({ tile: 64 });
+  await moving.next(await toJpeg(base), 1000);
+  await moving.next(await toJpeg(flip), 1100);                          // 两个短间隔起摆
+  const j = await toJpeg(base);
+  await moving.next(j, 1200);
+  const fastKey: any = await moving.next(await toJpeg(flip), 1300);     // 运动中
+  assert.equal(fastKey.kind, "key");
+  assert.match(fastKey.why, / mq/, "运动中的整帧应标记降质");
+  assert.ok(fastKey.data.length < slowKey.data.length * 0.9,   // 合成噪声夹具压缩空间小,真实页面实测减半
+    `运动整帧应显著更小: ${fastKey.data.length} vs ${slowKey.data.length}`);
+
+  // 停稳(间隔拉开)后恢复正常质量
+  const calmKey: any = await moving.next(await toJpeg(base), 5000);
+  assert.equal(calmKey.kind, "key");   // interval 未到,area 兜底…整页又换回 base
+  assert.ok(!/ mq/.test(calmKey.why), "停稳后不该再降质");
+});
+
+test("运动降档不能误伤慢节奏的帧（光标闪烁 ~530ms 一帧）", async () => {
+  const base = makeBase();
+  const flip = Buffer.from(base);
+  for (let i = 0; i < flip.length; i += 3) flip[i] = 255 - flip[i];
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base), 1000);
+  await d.next(await toJpeg(flip), 1530);
+  await d.next(await toJpeg(base), 2060);
+  const k: any = await d.next(await toJpeg(flip), 2590);
+  assert.equal(k.kind, "key");
+  assert.ok(!/ mq/.test(k.why), "530ms 节奏不是运动,不该降质");
+});
