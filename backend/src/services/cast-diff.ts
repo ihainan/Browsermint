@@ -332,9 +332,14 @@ export class FrameDiffer {
       return { kind: "delta", shift: 0, tiles: [], why: "blank" };
     }
 
-    // **没画完的帧不发**：顶/底突然长出一大条均匀底色带（上一帧没有），是快速滚动时
+    // **没画完的帧不发**：顶/底长出一大条均匀底色带（基线里没有），是快速滚动时
     // 合成器「内容已挪走、新区域还没光栅化」的中间态。发出去就是用户看到的「画面整体
     // 位移 + 大片空白」，而修复帧在慢链路上要一秒才到。跳过它，基准不动，等下一帧。
+    //
+    // 基线（prevEdge）**只跟「变实」的帧走，不跟「变白」的帧走**（下面接受路径里的
+    // 单调取小）。跟着每张被接受的帧走的话，慢速光栅化下白带每帧只长一点点、每次都
+    // 低于阈值，基线一路被抬上去，白带就棘轮式地爬满半屏（慢网真机实测抓到 762px）。
+    // 只有 force 重投（页面停稳 350ms，Chrome 必然已画完）才整体采认当前边带。
     const edge = edgeUniformRuns(rowUniformFlags(data, width, height));
     const base = this.prevEdge ?? { top: 0, bottom: 0 };
     const grewTop = edge.top - base.top;
@@ -346,11 +351,17 @@ export class FrameDiffer {
                why: `transient-band top=${edge.top} bottom=${edge.bottom} skip#${this.transientSkips}` };
     }
     this.transientSkips = 0;
+    const edgeAfterAccept = force ? edge : {
+      top: Math.min(base.top, edge.top),
+      bottom: Math.min(base.bottom, edge.bottom),
+    };
 
     // 间隔整帧放在 transient 判定**之后**：放在之前的话，10 秒到期恰好撞上一张
     // 没画完的帧，坏帧就会以 why=interval 的整帧身份被直接放行（codex 复审抓到的旁路）。
     if (now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
-      return this.keyframe(jpeg, data, width, height, now, "interval");
+      const k = this.keyframe(jpeg, data, width, height, now, "interval");
+      this.prevEdge = edgeAfterAccept;
+      return k;
     }
 
     const shift = detectShift(this.prevProfile, profile, height, this.opt.shiftRange, this.diag);
@@ -363,12 +374,15 @@ export class FrameDiffer {
     const area = tiles.reduce((sum, t) => sum + t.w * t.h, 0) / (width * height);
     const limit = shift === 0 ? this.opt.keyframeRatio : 0.8;
     if (area > limit) {
-      return this.keyframe(jpeg, data, width, height, now,
+      const k = this.keyframe(jpeg, data, width, height, now,
         `area=${area.toFixed(2)}>${limit} shift=${shift} 位移判据[最优=${this.diag.best} `
         + `分=${this.diag.bestMad.toFixed(2)} 不动=${this.diag.still.toFixed(2)} `
         + `否决=${this.diag.why || "无"} 尺寸=${width}x${height} `
         + `上一帧[亮度=${this.diag.prevMean.toFixed(1)} 起伏=${this.diag.prevSpread.toFixed(2)}] `
         + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`);
+      // 面积兜底整帧是「棘轮白帧」的主要逃逸口——基线仍按单调取小，别让它采认白带
+      this.prevEdge = edgeAfterAccept;
+      return k;
     }
 
     // 光标热区：区域内有变化就重发，绕过噪声阈值（理由见 next() 的 doc）。
@@ -395,8 +409,10 @@ export class FrameDiffer {
     // 省掉一整类「某些页面上增量反而更大」的意外（实测滚动时确实会出现）。
     const deltaBytes = tiles.reduce((sum, t) => sum + (t.data.length * 3) / 4, 0);
     if (deltaBytes >= jpeg.length * 0.9) {
-      return this.keyframe(jpeg, data, width, height, now,
+      const k = this.keyframe(jpeg, data, width, height, now,
         `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`);
+      this.prevEdge = edgeAfterAccept;
+      return k;
     }
 
     // 这一路上 await 过好几次（解码、编码），期间可能有人 reset 过。那就当这一帧作废：
@@ -406,7 +422,7 @@ export class FrameDiffer {
     if (gen !== this.gen) return this.keyframe(jpeg, data, width, height, now, "reset-raced");
     this.prevRaw = data;
     this.prevProfile = profile;
-    this.prevEdge = edge;
+    this.prevEdge = edgeAfterAccept;
     return { kind: "delta", shift, tiles };
   }
 

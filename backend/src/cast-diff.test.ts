@@ -333,6 +333,23 @@ test("热区是整个输入框那么宽时，光标变化不能被整框平均�
   assert.ok(res.tiles[0].w <= 64, `应该只发变化的窄条,实际宽 ${res.tiles[0].w}`);
 });
 
+test("白带每帧只长一点点（棘轮式）也必须被拦住——基线不跟着白帧爬", async () => {
+  const base = makeBase();
+  const d = new FrameDiffer({ tile: 64 });
+  await d.next(await toJpeg(base));
+  // 慢速光栅化的真实形态:白带逐帧从 10% → 20% → 30%,单帧增幅都低于 12% 阈值
+  const withTopWhite = (rows: number) => {
+    const f = Buffer.from(base);
+    f.fill(255, 0, rows * W * 3);
+    return f;
+  };
+  const r1: any = await d.next(await toJpeg(withTopWhite(Math.floor(H * 0.10))));
+  const r2: any = await d.next(await toJpeg(withTopWhite(Math.floor(H * 0.20))));
+  // 第一帧 10% 低于阈值放行;第二帧累计 20%,相对「实」基线已超阈值,必须跳过
+  assert.match(String(r2.why || ""), /transient/,
+    `棘轮白帧逃逸了: r1=${r1.kind}/${r1.why} r2=${r2.kind}/${r2.why}`);
+});
+
 test("10 秒间隔整帧撞上「没画完的帧」时，坏帧不能借 interval 身份放行", async () => {
   const base = makeBase();
   const d = new FrameDiffer({ tile: 64, keyframeIntervalMs: 1 });   // 立即到期
