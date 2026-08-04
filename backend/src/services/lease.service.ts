@@ -145,11 +145,15 @@ export async function currentLease(
 export async function holdsLease(
   sessionId: string, targetId: string, leaseId: string
 ): Promise<boolean> {
-  const row = await prisma.targetLease.findFirst({
-    where: { sessionId, targetId, leaseId, expiresAt: { gt: await dbNow() } },
-    select: { id: true },
-  });
-  return row !== null;
+  // 单条查询里用 Postgres 自己的 now()，别先 dbNow() 再查——这是**输入热路径**：
+  // 每个滚轮/鼠标事件都要过一遍，两次串行 DB 往返直接摊在「点了没反应」的那半秒里
+  // （codex 会诊 2026-08-04：输入注入延迟的主要嫌疑）。语义不变：时钟真源仍是 DB。
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM "TargetLease"
+    WHERE "sessionId" = ${sessionId}::uuid AND "targetId" = ${targetId}
+      AND "leaseId" = ${leaseId} AND "expiresAt" > now()
+    LIMIT 1`;
+  return rows.length > 0;
 }
 
 /** Is someone *other* than this holder driving the target right now? */

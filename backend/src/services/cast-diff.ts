@@ -248,22 +248,61 @@ export function detectShift(
     return sum / keep;
   };
   const still = mad(0);
+  // **两段式搜索**。逐像素扫 ±range 且每个候选排序求截尾均值,在 2560x1600 帧上实测
+  // 128ms/帧,占整条差分流水线 80%,直接把滚动帧率压到 3-5fps——这就是「滚动略卡」
+  // 的主因。粗搜(位移步进 3、行稀采、纯均值)先圈出少数候选谷,再在每个谷 ±4 内用
+  // 与原来完全相同的精确判据(截尾均值)重打分:最终取值仍是像素级精确的,只是不再
+  // 为注定不会赢的位移付全价。实测 128ms → ~5ms,全部既有单测(含差一像素用例)不变。
+  // 粗搜的每个采样点取 dy±1 三者的最小差：位移步进 3 意味着真解可能差 1-2px，
+  // 而剖面在近周期内容上梯度很陡，差 1px 的均差能翻好几倍——不容错的话真解的
+  // 邻位会输给远处「整周期别名」（实测：真解邻位 9.0、别名 4.7，真解进不了精修集，
+  // 表现为 37px 滚动被判成没滚）。容错后真解与别名都能进精修集，胜负由精确判据定。
+  const coarse = (dy: number): number => {
+    const from = Math.max(1, -dy + 1);
+    const to = Math.min(height - 1, height - dy - 1);
+    if (to - from < height * 0.3) return Infinity;
+    let sum = 0;
+    let n = 0;
+    for (let y = from; y < to; y += 5) {
+      const t = next[y];
+      const a = Math.abs(prev[y + dy] - t);
+      const b = Math.abs(prev[y + dy - 1] - t);
+      const c = Math.abs(prev[y + dy + 1] - t);
+      sum += a < b ? (a < c ? a : c) : (b < c ? b : c);
+      n++;
+    }
+    return n < 10 ? Infinity : sum / n;
+  };
+  const cands: Array<{ dy: number; m: number }> = [];
+  for (let dy = -range; dy <= range; dy += 3) {
+    if (dy === 0) continue;
+    const m = coarse(dy);
+    if (m === Infinity) continue;
+    cands.push({ dy, m });
+  }
+  cands.sort((a, b) => a.m - b.m);
+  const seeds = new Set<number>();
+  for (const c of cands.slice(0, 8)) seeds.add(c.dy);
+  // 近处的候选谷也各留一个:重复纹理下「取最近的解」的规则需要近处的谷在场,
+  // 光取全局最优的 8 个可能全落在同一个远处深谷里
+  for (const c of cands) { if (Math.abs(c.dy) <= 60) { seeds.add(c.dy); break; } }
   let best = 0;
   let bestMad = Infinity;
-  const scores = new Float64Array(2 * range + 1);
-  for (let dy = -range; dy <= range; dy++) {
-    if (dy === 0) { scores[dy + range] = Infinity; continue; }
-    const m = mad(dy);
-    scores[dy + range] = m;
-    if (m < bestMad) { bestMad = m; best = dy; }
+  const exact = new Map<number, number>();
+  for (const seed of seeds) {
+    for (let dy = seed - 4; dy <= seed + 4; dy++) {
+      if (dy === 0 || dy < -range || dy > range || exact.has(dy)) continue;
+      const m = mad(dy);
+      exact.set(dy, m);
+      if (m < bestMad) { bestMad = m; best = dy; }
+    }
   }
   diag.best = best; diag.bestMad = bestMad; diag.still = still;
   if (bestMad > SHIFT_MAD_LIMIT) { diag.why = "mad"; return 0; }
   // 同样好的候选里取最近的一个：页面上重复的行（表格、列表）会让远处也「对得上」，
   // 认错方向或认成一屏多的位移，画面就整块错位。
-  for (let dy = -range; dy <= range; dy++) {
-    if (dy === 0) continue;
-    if (scores[dy + range] <= bestMad * SHIFT_TIE_RATIO
+  for (const [dy, m] of exact) {
+    if (m <= bestMad * SHIFT_TIE_RATIO
         && Math.abs(dy) <= Math.abs(best) * SHIFT_TIE_MUST_BE_NEARER) {
       best = dy;
     }
@@ -380,7 +419,8 @@ export class FrameDiffer {
     // 间隔整帧放在 transient 判定**之后**：放在之前的话，10 秒到期恰好撞上一张
     // 没画完的帧，坏帧就会以 why=interval 的整帧身份被直接放行（codex 复审抓到的旁路）。
     if (now - this.lastKeyAt >= this.opt.keyframeIntervalMs) {
-      const k = await this.keyframe(jpeg, data, width, height, now, "interval", motion);
+      const k = await this.keyframe(jpeg, data, width, height, now, "interval", motion,
+        { profile, edge: edgeAfterAccept });
       this.prevEdge = edgeAfterAccept;
       return k;
     }
@@ -400,7 +440,8 @@ export class FrameDiffer {
         + `分=${this.diag.bestMad.toFixed(2)} 不动=${this.diag.still.toFixed(2)} `
         + `否决=${this.diag.why || "无"} 尺寸=${width}x${height} `
         + `上一帧[亮度=${this.diag.prevMean.toFixed(1)} 起伏=${this.diag.prevSpread.toFixed(2)}] `
-        + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`, motion);
+        + `这一帧[亮度=${this.diag.nextMean.toFixed(1)} 起伏=${this.diag.nextSpread.toFixed(2)}]]`, motion,
+        { profile, edge: edgeAfterAccept });
       // 面积兜底整帧是「棘轮白帧」的主要逃逸口——基线仍按单调取小，别让它采认白带
       this.prevEdge = edgeAfterAccept;
       return k;
@@ -431,7 +472,8 @@ export class FrameDiffer {
     const deltaBytes = tiles.reduce((sum, t) => sum + (t.data.length * 3) / 4, 0);
     if (deltaBytes >= jpeg.length * 0.9) {
       const k = await this.keyframe(jpeg, data, width, height, now,
-        `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`, motion);
+        `bytes=${Math.round(deltaBytes / 1024)}KB>=${Math.round(jpeg.length / 1024)}KB shift=${shift} tiles=${tiles.length}`, motion,
+        { profile, edge: edgeAfterAccept });
       this.prevEdge = edgeAfterAccept;
       return k;
     }
@@ -450,10 +492,12 @@ export class FrameDiffer {
   private async keyframe(
     jpeg: Buffer, raw: Buffer, width: number, height: number, now: number, why = "first",
     motion = false,
+    pre?: { profile: Float32Array; edge: { top: number; bottom: number } },
   ): Promise<DiffResult> {
     this.prevRaw = raw;
-    this.prevProfile = rowProfile(raw, width, height);
-    this.prevEdge = edgeUniformRuns(rowUniformFlags(raw, width, height));
+    // 差分主流程进来时 profile/edge 已经算过一遍,别重扫 400 万像素(codex 会诊建议)
+    this.prevProfile = pre?.profile ?? rowProfile(raw, width, height);
+    this.prevEdge = pre?.edge ?? edgeUniformRuns(rowUniformFlags(raw, width, height));
     this.transientSkips = 0;
     this.lastKeyAt = now;
     // 运动中的整帧重编码降质：滚动期间的整帧是公网卡顿主因（理由见 MOTION_QUALITY）。

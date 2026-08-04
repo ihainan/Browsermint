@@ -19,8 +19,19 @@ function makePrisma() {
   let rows: any[] = [];
   let seq = 0;
   return {
-    // 过期判断统一走 DB 时钟（多副本各用本机时钟会出现"两个都以为自己能写"）
-    $queryRaw: async () => [{ now: new Date() }],
+    // 过期判断统一走 DB 时钟（多副本各用本机时钟会出现"两个都以为自己能写"）。
+    // holdsLease 的单条合并查询（输入热路径省一次往返）也在这里仿真。
+    $queryRaw: async (strings: any, ...vals: any[]) => {
+      const q = Array.isArray(strings) ? strings.join("?") : String(strings);
+      if (q.includes('FROM "TargetLease"')) {
+        const [sessionId, targetId, leaseId] = vals;
+        const now = new Date();
+        const hit = rows.find((r) => r.sessionId === sessionId && r.targetId === targetId
+          && r.leaseId === leaseId && r.expiresAt > now);
+        return hit ? [{ id: hit.id }] : [];
+      }
+      return [{ now: new Date() }];
+    },
     _rows: () => rows,
     targetLease: {
       findUnique: async ({ where }: any) => {

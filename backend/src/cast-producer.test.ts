@@ -927,10 +927,14 @@ test("只有**此刻仍持写权**的连接算发起者，其他窗口不跟着�
   try {
     // 租约查询必须真的被调用：旧版只看「连接当时带没带 leaseId」，把过期租约也
     // 当成持有者（codex 复审 M4）。这个 mock 同时充当「有没有真的去查」的探针。
-    // holdsLease 先取库时间再查行，两个都要有替身，否则查询根本走不到
+    // holdsLease 现在是单条合并查询（输入热路径省一次往返），探针挂在 $queryRaw 上。
     setPrismaForTests({
-      $queryRaw: async () => [{ now: new Date() }],
-      targetLease: { findFirst: async (q: any) => { asked.push(q); return { id: "L1" } } },
+      $queryRaw: async (strings: any, ...vals: any[]) => {
+        const q = Array.isArray(strings) ? strings.join("?") : String(strings);
+        if (q.includes('FROM "TargetLease"')) { asked.push(vals); return [{ id: "L1" }]; }
+        return [{ now: new Date() }];
+      },
+      targetLease: {},
     } as any);
     await setTargetViewport(SESSION, TARGET, 735, 867, 2);
     const watcher = new FakeViewer();
@@ -953,8 +957,11 @@ test("租约已经失效的连接不算发起者（连接还开着不代表还�
   const created = setup();
   try {
     setPrismaForTests({
-      $queryRaw: async () => [{ now: new Date() }],
-      targetLease: { findFirst: async () => null },      // 租约没了
+      $queryRaw: async (strings: any) => {
+        const q = Array.isArray(strings) ? strings.join("?") : String(strings);
+        return q.includes('FROM "TargetLease"') ? [] : [{ now: new Date() }];   // 租约没了
+      },
+      targetLease: {},
     } as any);
     await setTargetViewport(SESSION, TARGET, 735, 867, 2);
     const stale = new FakeViewer();
