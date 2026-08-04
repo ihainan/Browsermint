@@ -50,6 +50,8 @@ export interface FrameDifferOptions {
  */
 const TILE_DIFF_THRESHOLD = 3;
 const TILE_DIFF_THRESHOLD_SHIFTED = 7;
+/** 有位移时行方向的分带高度（见 changedRegions）。 */
+const SHIFTED_ROW_BAND = 32;
 
 const DEFAULTS = {
   tile: 128,
@@ -334,23 +336,31 @@ export class FrameDiffer {
       out.push({ x: 0, y: 0, w: width, h: from, data: "" });
     }
     const T = this.opt.tile;
-    for (let y0 = Math.floor(from / T) * T; y0 < to; y0 += T) {
-      const h = Math.min(T, to - y0);
+    // 位移时把行方向切细。滚动后仍然对不上的通常是**很扁的一条**（sticky 顶栏、固定
+    // 底栏、悬浮条），用 128 见方的粗网格去框，一条 40 行的顶栏要连累整块 128 行——
+    // 加上新露出来的那一条就凑满整屏，于是判定「变化面积过大」退回整帧，增量白算。
+    const TH = shift === 0 ? T : SHIFTED_ROW_BAND;
+    for (let y0 = Math.floor(from / TH) * TH; y0 < to; y0 += TH) {
+      const h = Math.min(TH, to - y0);
       if (h <= 0) continue;
       // **同一行里相邻的变化块并成一条横带再压**。单独压小块很亏：每块一份 JPEG 头，
       // 块之间的相关性也用不上。真机实测滚动时 14 个小块要 51KB，而整帧才 56KB——
       // 增量白算了。合并之后同样的内容通常只要一半上下。
       let runStart = -1;
-      for (let x0 = 0; x0 <= width; x0 += T) {
+      for (let x0 = 0; x0 < width; x0 += T) {
         const w = Math.min(T, width - x0);
-        const changed = x0 < width
-          && this.regionDiffers(prev, next, width, height, x0, y0, w, h, shift);
-        if (changed && runStart < 0) runStart = x0;
-        if (!changed && runStart >= 0) {
-          out.push({ x: runStart, y: y0, w: Math.min(x0, width) - runStart, h, data: "" });
+        if (this.regionDiffers(prev, next, width, height, x0, y0, w, h, shift)) {
+          if (runStart < 0) runStart = x0;
+        } else if (runStart >= 0) {
+          out.push({ x: runStart, y: y0, w: x0 - runStart, h, data: "" });
           runStart = -1;
         }
       }
+      // **循环外收尾**。第一版靠「多走一步」来 flush（`x0 <= width`），而那一步只有在
+      // 画面宽度正好是块宽整数倍时才走得到：1280/128 正好 10 块，所以真机上从没露过馅；
+      // 宽度不是整数倍（窄视口、别的倍率）时，那一行最后一段变化被整个丢掉——
+      // 表现为滚动后 sticky 顶栏不重画，画面顶端留着位移过来的内容。协议重放测试抓到的。
+      if (runStart >= 0) out.push({ x: runStart, y: y0, w: width - runStart, h, data: "" });
     }
     return out;
   }
@@ -362,12 +372,15 @@ export class FrameDiffer {
   ): boolean {
     let sum = 0;
     let n = 0;
+    let maxRow = 0;
     for (let r = 0; r < h; r += 2) {                 // 隔行采样：快一倍，够用
       const yNext = y0 + r;
       const yPrev = yNext + shift;
       if (yPrev < 0 || yPrev >= height) return true;
       const a = (yPrev * width + x0) * 3;
       const b = (yNext * width + x0) * 3;
+      const rowFrom = n;
+      const rowBase = sum;
       // 同样三通道都比，隔一个像素采样抵掉开销（理由见 rowProfile 那段）。
       for (let c = 0; c < w * 3; c += 6) {
         for (let k = 0; k < 3; k++) {
@@ -376,9 +389,17 @@ export class FrameDiffer {
           n++;
         }
       }
+      if (n > rowFrom) {
+        const rowMean = (sum - rowBase) / (n - rowFrom);
+        if (rowMean > maxRow) maxRow = rowMean;
+      }
     }
     const limit = shift % 8 === 0 ? TILE_DIFF_THRESHOLD : TILE_DIFF_THRESHOLD_SHIFTED;
-    return n > 0 && sum / n > limit;
+    // **整块平均之外，还要看最差的那一行**：一块里只有一小条变了（sticky 顶栏、固定
+    // 底栏）时，平均会把它稀释到门槛以下，那一条就不重发了。放宽门槛到 7 之后这个洞更大。
+    // 注：位移时行方向已经切成 32 的细带，所以这道是纵深防御——**没有能区分它的测试**，
+    // 别把它当成被验证过的行为。
+    return n > 0 && (sum / n > limit || maxRow > limit * 2.5);
   }
 
   private async encodeTiles(tiles: DiffTile[], raw: Buffer, width: number): Promise<void> {
