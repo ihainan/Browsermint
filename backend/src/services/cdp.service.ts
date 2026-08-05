@@ -1190,7 +1190,9 @@ const targetViewports = new Map<string, ViewportWant>();
 // 手机的 CSS 视口范围内。这保住了「任意/过期客户端不能把共享页面拉成任意尺寸」的
 // 原有安全性质——桌面旧客户端根本不发 preset，永远落在 FIXED_VIEWPORT。
 const MOBILE_W = { min: 320, max: 480 };
-const MOBILE_H = { min: 480, max: 950 };
+// 高度下限 360 而不是 480：横屏手机的画面区高度常在 320-400，钳到 480 会让远端比
+// 屏幕高一截、fit 再整体缩小（codex 二轮评审）。宽高独立钳制，横屏出较宽布局是特性。
+const MOBILE_H = { min: 360, max: 950 };
 
 // 布局视口默认固定（见 FIXED_VIEWPORT）：桌面形态下 `want` 里的宽高与 zoom 都不参与
 // 布局，缩放是观看端自己的事（CSS 变换），远端页面不因为谁把窗口拖窄了就重排。
@@ -1632,6 +1634,11 @@ function producerRequest(
 // zooming to fit the width — do the same: widen the *layout* viewport to the
 // content width and let the screencast scale the frame back down to the pane.
 // Responsive sites never hit this path (their scrollWidth fits the viewport).
+//
+// preset=mobile 也走这条通道（裁定，2026-08-05 codex 二轮评审后确认保留）：手机上遇到
+// 非响应式站点，真手机浏览器的行为同样是「按内容宽布局 + 缩小看全景」（Safari/Chrome
+// 对无 viewport meta 的页面本来就按 ~980px 布局）；跳过 fit 只会换来半屏不可达的横向
+// 滚动。响应式站点 scrollWidth 贴合 mobile 布局宽，根本不会进来。
 async function fitViewportToContent(
   p: CastProducer, sessionId: string, targetId: string, want: ViewportWant
 ): Promise<void> {
