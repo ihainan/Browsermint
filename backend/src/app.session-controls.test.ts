@@ -656,9 +656,53 @@ test("客户端传来的视口尺寸被服务端强制成固定值", async () =>
     });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { ok: true, width: 1280, height: 800, deviceScaleFactor: 1, zoom: 1 });
+    assert.deepEqual(res.json(), { ok: true, width: 1280, height: 800, deviceScaleFactor: 1, zoom: 1, preset: "desktop" });
     assert.deepEqual(viewports, [{ targetId: "page-1", width: 1280, height: 800, dsf: 1, zoom: 1 }]);
     assert.deepEqual(cdpCalls, []);
+  } finally {
+    await closeApp(app);
+  }
+});
+
+// preset=mobile（移动端评审 D1）：布局跟随请求方的竖屏尺寸，但钳在真实手机的
+// CSS 视口范围内；未知 preset 一律按 desktop（旧客户端不发这个字段）。
+test("preset=mobile 的视口跟随请求尺寸并被钳制；未知 preset 回落 desktop", async () => {
+  const viewports: Array<{ targetId: string; width: number; height: number; dsf?: number; zoom?: number }> = [];
+  const { app } = await makeApp({
+    setTargetViewport: async (_sessionId, targetId, width, height, dsf, zoom) => {
+      viewports.push({ targetId, width, height, dsf, zoom });
+    },
+  });
+  const token = sessionToken();
+  try {
+    // 正常手机尺寸：原样生效
+    let res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
+      payload: { width: 390, height: 700, deviceScaleFactor: 2, preset: "mobile" },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().preset, "mobile");
+    assert.deepEqual(viewports.at(-1), { targetId: "page-1", width: 390, height: 700, dsf: 2, zoom: 1 });
+
+    // 越界尺寸：钳到手机范围（宽 320..480、高 480..950），不允许借 mobile 名义设任意布局
+    res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
+      payload: { width: 900, height: 2000, preset: "mobile" },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(viewports.at(-1), { targetId: "page-1", width: 480, height: 950, dsf: 1, zoom: 1 });
+
+    // 未知 preset：按 desktop 强制固定视口
+    res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/session-running/targets/page-1/viewport?token=${encodeURIComponent(token)}`,
+      payload: { width: 390, height: 700, preset: "tablet" },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().preset, "desktop");
+    assert.deepEqual(viewports.at(-1), { targetId: "page-1", width: 1280, height: 800, dsf: 1, zoom: 1 });
   } finally {
     await closeApp(app);
   }

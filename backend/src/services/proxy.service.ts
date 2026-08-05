@@ -1837,11 +1837,15 @@ export async function handleSetTargetViewport(
 
   const body = request.body as {
     width?: unknown; height?: unknown; deviceScaleFactor?: unknown; zoom?: unknown;
+    preset?: unknown;
   };
   const width = Math.floor(Number(body?.width));
   const height = Math.floor(Number(body?.height));
   const dsf = body?.deviceScaleFactor === undefined ? 1 : Number(body.deviceScaleFactor);
   const zoom = body?.zoom === undefined ? 1 : Number(body.zoom);
+  // preset 白名单：desktop（默认，布局钳到 FIXED_VIEWPORT）| mobile（布局钳到手机
+  // CSS 视口范围 + mobile 排版）。未知值一律按 desktop——旧客户端不发这个字段。
+  const preset = body?.preset === "mobile" ? "mobile" as const : "desktop" as const;
   if (!Number.isFinite(width) || !Number.isFinite(height) ||
       width < 320 || height < 240 || width > 3840 || height > 2160) {
     return reply.status(400).send({ error: "width/height out of range (320x240..3840x2160)" });
@@ -1857,10 +1861,10 @@ export async function handleSetTargetViewport(
     // Persistent flat session: an override dies with the session that set it, so
     // a fire-and-forget attach (what executeCdpCommand does) would be undone the
     // instant the call returns.
-    await setTargetViewport(sessionId, targetId, width, height, dsf, zoom);
+    await setTargetViewport(sessionId, targetId, width, height, dsf, zoom, preset);
     logSessionEvent(sessionId, "target_viewport", request.ip, request.url, 200,
-      { targetId, width, height, deviceScaleFactor: dsf, zoom }, getHttpSource(request));
-    return reply.send({ ok: true, width, height, deviceScaleFactor: dsf, zoom });
+      { targetId, width, height, deviceScaleFactor: dsf, zoom, preset }, getHttpSource(request));
+    return reply.send({ ok: true, width, height, deviceScaleFactor: dsf, zoom, preset });
   } catch (err) {
     return reply.status(502).send({ error: String(err) });
   }

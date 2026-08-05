@@ -1179,14 +1179,38 @@ const targetViewportSockets = new Map<string, WebSocket>();          // `${sessi
 // width/height 是**栏**的 CSS 尺寸；zoom 是用户选的缩放（1 = 100%）。布局视口 =
 // 栏宽 / zoom：缩小(zoom<1) → 布局更宽 → 内容显小但帧像素更多（HiDPI 上更锐利），
 // 与浏览器 Ctrl +/− 的语义一致。
-type ViewportWant = { width: number; height: number; deviceScaleFactor: number; zoom: number };
+type ViewportPreset = "desktop" | "mobile";
+type ViewportWant = {
+  width: number; height: number; deviceScaleFactor: number; zoom: number;
+  preset?: ViewportPreset;
+};
 const targetViewports = new Map<string, ViewportWant>();
 
-// 布局视口固定（见 FIXED_VIEWPORT）。`want` 里的宽高与 zoom **都不再参与布局**：
-// 缩放从此是观看端自己的事（CSS 变换），远端页面不因为谁把窗口拖窄了就重排。
-// 仍然保留 want 参数是因为 deviceScaleFactor 还有用——它决定帧的像素密度，不决定布局。
-function layoutSize(_want: ViewportWant): { width: number; height: number } {
+// 手机预设的尺寸围栏：preset=mobile 时布局跟随请求方的**竖屏**面板尺寸，但钳在真实
+// 手机的 CSS 视口范围内。这保住了「任意/过期客户端不能把共享页面拉成任意尺寸」的
+// 原有安全性质——桌面旧客户端根本不发 preset，永远落在 FIXED_VIEWPORT。
+const MOBILE_W = { min: 320, max: 480 };
+const MOBILE_H = { min: 480, max: 950 };
+
+// 布局视口默认固定（见 FIXED_VIEWPORT）：桌面形态下 `want` 里的宽高与 zoom 都不参与
+// 布局，缩放是观看端自己的事（CSS 变换），远端页面不因为谁把窗口拖窄了就重排。
+// preset=mobile（2026-08-05 移动端评审 D1，产品裁决推翻单一固定视口）：手机上把
+// 1280×800 缩成 390 宽的横带不可读——改为下发受钳制的竖屏视口 + mobile 排版，
+// 让页面按手机版式渲染。多端同看同一页仍是「后设者赢」（一页只有一个真实视口）。
+function layoutSize(want: ViewportWant): { width: number; height: number } {
+  if (want.preset === "mobile") {
+    // want 里的尺寸在 setTargetViewport 入口已钳制过；这里再钳一次是防御性的
+    // （构造 want 的路径以后变多了也不至于越界）。
+    return {
+      width: Math.min(Math.max(Math.round(want.width), MOBILE_W.min), MOBILE_W.max),
+      height: Math.min(Math.max(Math.round(want.height), MOBILE_H.min), MOBILE_H.max),
+    };
+  }
   return { ...FIXED_VIEWPORT };
+}
+// Emulation.setDeviceMetricsOverride 的 mobile 位（meta viewport 处理/滚动条形态）
+function mobileOf(want: ViewportWant | undefined): boolean {
+  return want?.preset === "mobile";
 }
 // fitViewportToContent 放宽后的布局，按 target 记住。它原本只活在 producer 里：
 // viewer 全走 + 5s linger 到期 → producer 拆掉 → 放宽布局丢失 → 下次建流先按基础
@@ -1328,22 +1352,30 @@ export const FIXED_VIEWPORT = { width: 1280, height: 800 };
 export async function setTargetViewport(
   sessionId: string,
   targetId: string,
-  _width: number,
-  _height: number,
+  reqWidth: number,
+  reqHeight: number,
   deviceScaleFactor = 1,
-  zoom = 1
+  zoom = 1,
+  preset: ViewportPreset = "desktop"
 ): Promise<void> {
-  // 入参里的尺寸**一律忽略**。这道闸放在这里而不是前端，是因为一个还没刷新的旧客户端
-  // 仍会按自己的面板尺寸持续调这个接口——只改前端的话，它照样能把共享页面的布局改掉。
-  const width = FIXED_VIEWPORT.width;
-  const height = FIXED_VIEWPORT.height;
+  // desktop：入参尺寸**一律忽略**（强制 FIXED_VIEWPORT）。这道闸放在这里而不是前端，
+  // 是因为一个还没刷新的旧客户端仍会按自己的面板尺寸持续调这个接口——只改前端的话，
+  // 它照样能把共享页面的布局改掉。
+  // mobile：尺寸参与布局但钳在真实手机的 CSS 视口范围（MOBILE_W/H），安全性质不变。
+  // 钳制在**入口**做：want 里存的就是生效值，测试 hook 与 reapply 读到的不会是原始请求。
+  const width = preset === "mobile"
+    ? Math.min(Math.max(Math.round(reqWidth), MOBILE_W.min), MOBILE_W.max)
+    : FIXED_VIEWPORT.width;
+  const height = preset === "mobile"
+    ? Math.min(Math.max(Math.round(reqHeight), MOBILE_H.min), MOBILE_H.max)
+    : FIXED_VIEWPORT.height;
   if (cdpServiceOverrides.setTargetViewport) {
     return cdpServiceOverrides.setTargetViewport(sessionId, targetId, width, height, deviceScaleFactor, zoom);
   }
   // Open first: remembering a viewport for a target that doesn't exist would
   // leave an entry nothing ever cleans up.
   const sock = await openViewportSocket(sessionId, targetId);
-  const want: ViewportWant = { width, height, deviceScaleFactor, zoom };
+  const want: ViewportWant = { width, height, deviceScaleFactor, zoom, preset };
   targetViewports.set(targetKey(sessionId, targetId), want);
   // Pane size / zoom changed: the remembered widened layout was computed against
   // the old base and no longer applies. The fit pass re-derives it if still needed.
@@ -1369,7 +1401,7 @@ export async function setTargetViewport(
     id,
     method: "Emulation.setDeviceMetricsOverride",
     params: {
-      width: layout.width, height: layout.height, deviceScaleFactor, mobile: false,
+      width: layout.width, height: layout.height, deviceScaleFactor, mobile: mobileOf(want),
       screenWidth: layout.width, screenHeight: layout.height, dontSetVisibleSize: false,
     },
   }));
@@ -1394,7 +1426,7 @@ export async function reapplyTargetViewport(sessionId: string, targetId: string)
   // `zoom` must be carried through: omitting it silently re-applies at 100% and
   // throws away whatever gear the user picked.
   await setTargetViewport(sessionId, targetId, want.width, want.height,
-                          want.deviceScaleFactor, want.zoom);
+                          want.deviceScaleFactor, want.zoom, want.preset ?? "desktop");
   return true;
 }
 
@@ -1646,7 +1678,7 @@ async function fitViewportToContent(
   beginReconfigure(p, layoutWidth, layoutHeight);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutWidth, height: layoutHeight,
-    deviceScaleFactor: want.deviceScaleFactor, mobile: false,
+    deviceScaleFactor: want.deviceScaleFactor, mobile: mobileOf(want),
     screenWidth: layoutWidth, screenHeight: layoutHeight, dontSetVisibleSize: false,
   });
   // The cap must allow the full layout through: capping at the pane's CSS width
@@ -2157,7 +2189,7 @@ async function createProducer(sessionId: string, targetId: string): Promise<Cast
   if (want && layout) {
     producerSend(p, "Emulation.setDeviceMetricsOverride", {
       width: layout.width, height: layout.height, deviceScaleFactor: want.deviceScaleFactor,
-      mobile: false, screenWidth: layout.width, screenHeight: layout.height,
+      mobile: mobileOf(want), screenWidth: layout.width, screenHeight: layout.height,
       dontSetVisibleSize: false,
     });
   }
@@ -2704,7 +2736,7 @@ export async function applyViewportToProducer(sessionId: string, targetId: strin
   beginReconfigure(p, layoutNow.width, layoutNow.height);
   producerSend(p, "Emulation.setDeviceMetricsOverride", {
     width: layoutNow.width, height: layoutNow.height, deviceScaleFactor: want.deviceScaleFactor,
-    mobile: false, screenWidth: layoutNow.width, screenHeight: layoutNow.height,
+    mobile: mobileOf(want), screenWidth: layoutNow.width, screenHeight: layoutNow.height,
     dontSetVisibleSize: false,
   });
   producerSend(p, "Page.stopScreencast");
